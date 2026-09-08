@@ -33,6 +33,70 @@ func SetConfig(c *config.Config) {
 	}
 }
 
+// mediaKindLabel returns the user-facing media type for logging and prompt
+// metadata. Case order is kept in sync with ExtractFileRef in
+// internal/media/downloader.go (Photo, Document, Audio, Voice, Video).
+func mediaKindLabel(msg *models.Message) string {
+	switch {
+	case msg.Photo != nil:
+		return "Photo"
+	case msg.Document != nil:
+		return "Document"
+	case msg.Audio != nil:
+		return "Audio"
+	case msg.Voice != nil:
+		return "Voice"
+	case msg.Video != nil:
+		return "Video"
+	default:
+		return "Media"
+	}
+}
+
+func processMediaAttachment(ctx context.Context, b *bot.Bot, msg *models.Message, chatID int64, workspace string, userID int64) (string, bool) {
+	fileID, fileSize, mimeType, originalName, mediaType, ext, ok := media.ExtractFileRef(msg)
+	if !ok || fileID == "" {
+		return "", false
+	}
+
+	kind := mediaKindLabel(msg)
+
+	data, _, err := media.DownloadFile(ctx, b, fileID)
+	if err != nil {
+		logger.Log(logger.ERROR, userID, fmt.Sprintf("Failed to download %s: %v", kind, err))
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   fmt.Sprintf("Error: failed to download %s: %v", kind, err),
+		})
+		return "", true
+	}
+
+	localPath := media.GetFilePath(workspace, mediaType, ext)
+	if err := media.SaveFile(localPath, data); err != nil {
+		logger.Log(logger.ERROR, userID, fmt.Sprintf("Failed to save %s: %v", kind, err))
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   fmt.Sprintf("Error: failed to save %s: %v", kind, err),
+		})
+		return "", true
+	}
+
+	caption := strings.TrimSpace(msg.Caption)
+	meta := media.MediaMetadata{
+		Kind:         kind,
+		FileSize:     fileSize,
+		MimeType:     mimeType,
+		OriginalName: originalName,
+	}
+	prompt := media.BuildPrompt(localPath, meta, caption)
+
+	logger.Log(logger.INPUT, userID, fmt.Sprintf("%s received: fileID=%s size=%d saved=%s",
+		kind, fileID, fileSize, localPath))
+	log.Printf("Downloaded %s for user %d to %s (%d bytes)", kind, userID, localPath, len(data))
+
+	return prompt, false
+}
+
 func DefaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
 		return
@@ -67,44 +131,15 @@ func DefaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID := update.Message.Chat.ID
 	workspace := cfg.Workspace.Path
 
-	var userMessage string
-	if len(update.Message.Photo) > 0 {
-		largest := update.Message.Photo[len(update.Message.Photo)-1]
-		if largest.FileID != "" {
-			mediaType, ext, _ := media.GetMediaType(update.Message)
-			data, _, err := media.DownloadFile(ctx, b, largest.FileID)
-			if err != nil {
-				logger.Log(logger.ERROR, userID, fmt.Sprintf("Failed to download photo: %v", err))
-				b.SendMessage(ctx, &bot.SendMessageParams{
-					ChatID: chatID,
-					Text:   fmt.Sprintf("Error: failed to download photo: %v", err),
-				})
-				return
-			}
-			localPath := media.GetFilePath(workspace, mediaType, ext)
-			if err := media.SaveFile(localPath, data); err != nil {
-				logger.Log(logger.ERROR, userID, fmt.Sprintf("Failed to save photo: %v", err))
-				b.SendMessage(ctx, &bot.SendMessageParams{
-					ChatID: chatID,
-					Text:   fmt.Sprintf("Error: failed to save photo: %v", err),
-				})
-				return
-			}
-			caption := strings.TrimSpace(update.Message.Text)
-			if caption == "" {
-				caption = strings.TrimSpace(update.Message.Caption)
-			}
-			userMessage = media.BuildPrompt(localPath, caption)
-			logger.Log(logger.INPUT, userID, fmt.Sprintf("Photo received: fileID=%s size=%d saved=%s",
-				largest.FileID, largest.FileSize, localPath))
-			log.Printf("Downloaded photo for user %d to %s (%d bytes)", userID, localPath, len(data))
-		}
+	userMessage, mediaHandled := processMediaAttachment(ctx, b, update.Message, chatID, workspace, userID)
+	if mediaHandled && userMessage == "" {
+		return
 	}
 	if userMessage == "" {
 		userMessage = update.Message.Text
 	}
 
-	if len(update.Message.Photo) == 0 && strings.TrimSpace(update.Message.Text) == "" {
+	if strings.TrimSpace(userMessage) == "" {
 		logger.Log(logger.DEBUG, userID, "Received empty or whitespace-only message, skipping")
 		return
 	}

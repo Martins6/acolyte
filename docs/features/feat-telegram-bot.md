@@ -6,8 +6,20 @@ Core Telegram bot that enables users to interact with OpenCode AI agent from Tel
 
 - Implements Telegram Bot API using go-telegram/bot library
 - Handles text messages and forwards to OpenCode
-- Accepts photo uploads: downloads them, stores them under `<workspace>/downloads/images/` with UTC-timestamped filenames (e.g. `20240706_143052.jpg`, with `_1`/`_2` collision suffixes for same-second duplicates), and forwards a `File located at: <path>\n\nUser message: <caption>` prompt to OpenCode
-- Documents, audio, voice, video, stickers, contacts, and locations are ignored (only photos are wired in)
+- Accepts media attachments: photos, documents, audio files, voice messages, and videos. Each is downloaded from Telegram, saved under `<workspace>/downloads/<type>/` with UTC-timestamped filenames (e.g. `20240706_143052.pdf`, with `_1`/`_2` collision suffixes for same-second duplicates), and forwarded to OpenCode with a metadata-rich prompt:
+
+  ```
+  File located at: <abs-path>
+  File type: <Photo|Document|Audio|Voice|Video>
+  File size: <bytes> bytes
+  Original name: <name>      ← only when Telegram provides FileName
+  MIME type: <mime>           ← only when Telegram provides MimeType
+
+  User message: <caption>
+  ```
+
+  `Original name` and `MIME type` lines are omitted when Telegram does not provide them (common for photos and voice messages). The trailing `User message:` line is always present, even when the caption is empty.
+- Stickers, contacts, and locations are still ignored.
 - Sender-side media (the bot sending photos/documents back to Telegram) is NOT implemented; all replies are plain text
 - Implements slash commands: /set-agent, /set-model, /set-provider, /workspace, /help, /new-session
 - Restricts access to the configured allowed user
@@ -22,7 +34,7 @@ Core Telegram bot that enables users to interact with OpenCode AI agent from Tel
 - cmd/new.go - Workspace initialization
 - cmd/logs.go - Log viewing command
 - internal/bot/client.go - Bot initialization
-- internal/bot/handlers.go - Message handlers (text + photo)
+- internal/bot/handlers.go - Message handlers (text + media)
 - internal/bot/commands.go - Slash command implementations
 - internal/config/config.go - Configuration loading
 - internal/opencode/runner.go - OpenCode CLI runner
