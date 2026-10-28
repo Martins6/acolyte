@@ -4,7 +4,7 @@ Telegram bot gateway that allows users to interact with an OpenCode AI agent dir
 
 # Files
 
-- feat-telegram-bot.md - Core Telegram bot with message handling, photo support (UTC-timestamped filenames), and user authentication
+- feat-telegram-bot.md - Core Telegram bot with message handling, media support (photos, documents, audio, voice, video with UTC-timestamped filenames), and user authentication
 - feat-install-script.md - Installation script for easy binary deployment
 - feat-opencode-run-integration.md - OpenCode run command integration replacing HTTP server
 - feat-progress-updates.md - Progress updates for long-running operations
