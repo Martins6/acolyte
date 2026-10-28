@@ -288,7 +288,7 @@ Each review posts exactly one PR review whose body starts with a `Verdict: LGTM 
 
 A project-level [`opencode.json`](./opencode.json) pins the `opencode-go` provider and `mimo-v2.6-pro` model so the opencode server started by the action resolves the model reliably (the GitHub runner has no local auth/config to fall back on).
 
-Branch protection keeps `main` safe: pull requests are required, only `dev` is accepted as a source branch (`.github/workflows/pr-guard.yml` enforces this), and only the repository owner can merge.
+Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner (`.github/workflows/pr-guard.yml` enforces this), and only the owner has merge rights.
 
 To enable it:
 

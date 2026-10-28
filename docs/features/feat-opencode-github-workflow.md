@@ -11,7 +11,7 @@ Adds GitHub Actions automation around the OpenCode `build` agent using the offic
 - Verdict rules: `NEEDS_REVIEW` if any Necessary finding exists, otherwise `LGTM`
 - Auth uses `use_github_token: true` with the workflow `GITHUB_TOKEN` (no OpenCode GitHub App or OIDC needed); the model key comes from `${{ secrets.OPENCODE_GO_API_KEY }}`; job permissions are `contents: read`, `pull-requests: write`, `issues: write` (PR labels go through the issues API)
 - `OPENCODE_PERMISSION` restricts the agent's shell access to `gh` commands only
-- Adds `.github/workflows/pr-guard.yml`: pull requests into `main` fail unless the head branch is `dev`, enforcing `dev` -> `main` as the only path onto `main`
+- Adds `.github/workflows/pr-guard.yml`: pull requests into `main` fail unless the head branch is `dev` in this repository (not a fork) and the PR author is the repository owner, enforcing `dev` -> `main` as the only path onto `main`
 - Project-level `opencode.json` at the repo root pins the `opencode-go` provider and `mimo-v2.6-pro` model so the opencode server started by the action resolves the model reliably in the runner (the same pattern that resolved [opencode#7958](https://github.com/anomalyco/opencode/issues/7958))
 - README.md gains a "GitHub Workflow" subsection covering the secret name, review behavior, and the `dev` -> `main` merge flow
 - Repo-side (configured through the GitHub API, not part of this diff): branch protection on `main` requires a pull request, the `pr-guard` status check, and restricts merging to the repository owner; `dev` requires pull requests

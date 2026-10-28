@@ -17,4 +17,12 @@ jobs:
             echo "::error::PRs into main are only allowed from dev (head branch: ${{ github.head_ref }})."
             exit 1
           fi
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            echo "::error::PRs into main must come from a branch in this repository, not a fork."
+            exit 1
+          fi
+          if [ "${{ github.event.pull_request.user.login }}" != "${{ github.repository_owner }}" ]; then
+            echo "::error::Only the repository owner can merge into main."
+            exit 1
+          fi
           echo "OK: dev -> main"
