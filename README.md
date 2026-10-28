@@ -280,22 +280,24 @@ For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file
 
 ### GitHub Workflow
 
-Two GitHub Actions workflows wire the OpenCode `build` agent into this repo using the official [`anomalyco/opencode/github`](https://opencode.ai/docs/github/) action:
+A single GitHub Actions workflow runs automatic PR review with the OpenCode `build` agent using the official [`anomalyco/opencode/github`](https://opencode.ai/docs/github/) action:
 
-- `.github/workflows/opencode.yml` — triggered when `/opencode` or `/oc` appears in an issue or PR review comment.
-- `.github/workflows/opencode-review.yml` — automatically reviews every non-draft PR on open, on each new commit (`synchronize`), on reopen, and when moved out of draft.
+- `.github/workflows/opencode-review.yml` — reviews every non-draft PR opened by the repository owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs from any other author never trigger the agent.
 
-A project-level [`opencode.json`](./opencode.json) pins the `minimax-coding-plan` provider and `MiniMax-M3` model so the opencode server started by the action resolves the model reliably (the GitHub runner has no local auth/config to fall back on).
+Each review posts exactly one PR review whose body starts with a `Verdict: LGTM | NEEDS_REVIEW` line, swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff.
 
-To enable them:
+A project-level [`opencode.json`](./opencode.json) pins the `opencode-go` provider and `mimo-v2.6-pro` model so the opencode server started by the action resolves the model reliably (the GitHub runner has no local auth/config to fall back on).
 
-1. Install the [OpenCode GitHub App](https://github.com/apps/opencode-agent) on this repository.
-2. Add the provider's API key under *Settings → Secrets and variables → Actions* as `MINIMAX_API_KEY` — that env var name matches the `minimax-coding-plan` provider in [models.dev](https://models.dev/).
+Branch protection keeps `main` safe: pull requests are required, only `dev` is accepted as a source branch (`.github/workflows/pr-guard.yml` enforces this), and only the repository owner can merge.
+
+To enable it:
+
+1. Add the provider's API key under *Settings → Secrets and variables → Actions* as `OPENCODE_GO_API_KEY`.
 
 Usage:
 
-- Comment `/opencode <instruction>` (or `/oc`) on any issue or PR to invoke the agent.
 - Open a PR to get an automatic code review; every new push re-runs the review on the latest diff.
+- Land work by merging feature PRs into `dev`, then a `dev` → `main` PR merged by the repository owner.
 
 ## License
 

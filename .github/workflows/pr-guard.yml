@@ -1,0 +1,20 @@
+name: pr-guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  pr-guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Enforce dev -> main only
+        run: |
+          if [ "${{ github.head_ref }}" != "dev" ]; then
+            echo "::error::PRs into main are only allowed from dev (head branch: ${{ github.head_ref }})."
+            exit 1
+          fi
+          echo "OK: dev -> main"

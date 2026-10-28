@@ -1,21 +1,24 @@
 # Overview
 
-Adds two GitHub Actions workflows that wire the OpenCode `build` agent into the repository using the official `anomalyco/opencode/github` action: a slash-command trigger on `/opencode` or `/oc` in issue/PR comments, and an automatic code review that fires on PR open and every new commit.
+Adds GitHub Actions automation around the OpenCode `build` agent using the official `anomalyco/opencode/github` action: one automatic PR review workflow (owner-only, verdict-tagged) plus a guard workflow that restricts `main` to `dev` -> `main` pull requests.
 
 # Details
 
-- Adds `.github/workflows/opencode.yml` triggered by `issue_comment` (type `created`) and `pull_request_review_comment` (type `created`); only runs when the comment body contains `/oc` or `/opencode`
-- Job uses `ubuntu-latest`, read-only permissions (`contents: read`, `pull-requests: read`, `issues: read`) plus `id-token: write` for OpenCode GitHub App OIDC, and explicitly pins `agent: build` with model `minimax-coding-plan/MiniMax-M3`
-- Adds `.github/workflows/opencode-review.yml` triggered by `pull_request` types `[opened, synchronize, reopened, ready_for_review]`; skips drafts via `if: github.event.pull_request.draft == false` so `synchronize` re-runs the same review on every new commit
-- Review job uses the same read-only permission set, the same model/agent, and a code-review-focused `prompt` covering code quality, Go idiom violations, bugs/race conditions/error-handling gaps, and security concerns (secret leakage, unsafe parsing)
-- Auth uses the OpenCode GitHub App via OIDC; the API key is supplied via `${{ secrets.MINIMAX_API_KEY }}` — the secret name is written for `minimax-coding-plan` and must be verified against `opencode auth login` / models.dev
-- Project-level `opencode.json` at the repo root pins the `minimax-coding-plan` provider and `MiniMax-M3` model so the opencode server started by the action resolves the model reliably in the runner (which has no local auth/config to fall back on); this is the same pattern that resolved [opencode#7958](https://github.com/anomalyco/opencode/issues/7958)
-- README.md gains a "GitHub Workflow" subsection under Development covering app install, secret naming, slash-command usage, and auto-review behavior
-- Workflow files mirror the official opencode docs pattern (`actions/checkout@v4` with `fetch-depth: 1` and `persist-credentials: false`, then `anomalyco/opencode/github@latest`)
+- Adds `.github/workflows/opencode-review.yml` triggered by `pull_request` types `[opened, synchronize, reopened, ready_for_review]`; runs only for non-draft PRs authored by the repository owner (`github.event.pull_request.user.login == github.repository_owner`) so a public repo never runs the agent on outside PRs
+- Every new commit (`synchronize`) re-runs the review on the latest diff; drafts are skipped and reviewed once when marked ready
+- The review posts exactly one PR review whose body starts with `Verdict: LGTM | NEEDS_REVIEW` and swaps a matching `LGTM`/`NEEDS_REVIEW` label on the PR; findings are split into `Necessary` (must fix) and `Non-necessary` (optional improvements)
+- Review scope: security issues, loopholes/abuse paths, edge cases, concurrency issues (data races, goroutine leaks, channel/lock misuse), unaccounted logic (unhandled errors, missing cases, untested behavior), and intent mismatches against the PR title/body; the PR title, body, commits, and diff are treated as untrusted input
+- Verdict rules: `NEEDS_REVIEW` if any Necessary finding exists, otherwise `LGTM`
+- Auth uses `use_github_token: true` with the workflow `GITHUB_TOKEN` (no OpenCode GitHub App or OIDC needed); the model key comes from `${{ secrets.OPENCODE_GO_API_KEY }}`; job permissions are `contents: read`, `pull-requests: write`, `issues: write` (PR labels go through the issues API)
+- `OPENCODE_PERMISSION` restricts the agent's shell access to `gh` commands only
+- Adds `.github/workflows/pr-guard.yml`: pull requests into `main` fail unless the head branch is `dev`, enforcing `dev` -> `main` as the only path onto `main`
+- Project-level `opencode.json` at the repo root pins the `opencode-go` provider and `mimo-v2.6-pro` model so the opencode server started by the action resolves the model reliably in the runner (the same pattern that resolved [opencode#7958](https://github.com/anomalyco/opencode/issues/7958))
+- README.md gains a "GitHub Workflow" subsection covering the secret name, review behavior, and the `dev` -> `main` merge flow
+- Repo-side (configured through the GitHub API, not part of this diff): branch protection on `main` requires a pull request, the `pr-guard` status check, and restricts merging to the repository owner; `dev` requires pull requests
 
 # File Paths
 
-- .github/workflows/opencode.yml
 - .github/workflows/opencode-review.yml
+- .github/workflows/pr-guard.yml
 - opencode.json
 - README.md
