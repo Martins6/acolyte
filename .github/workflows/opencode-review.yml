@@ -37,16 +37,18 @@ jobs:
       # loaded into the agent's context, .opencode/plugins runs code). Remove
       # each path unconditionally - so PR-added files under .opencode/ cannot
       # survive - then restore the base branch's version when it has one.
+      # CLAUDE.md is not supported in this project and is always removed.
       - name: Restore trusted agent runtime config
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          for p in opencode.json opencode.jsonc AGENTS.md CLAUDE.md .opencode; do
+          for p in opencode.json opencode.jsonc AGENTS.md .opencode; do
             rm -rf "$p"
             if git cat-file -e "origin/$BASE_REF:$p" 2>/dev/null; then
               git checkout "origin/$BASE_REF" -- "$p"
             fi
           done
+          rm -rf CLAUDE.md
 
       - name: Run OpenCode review
         uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a # latest
