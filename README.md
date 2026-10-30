@@ -288,7 +288,7 @@ Each review posts exactly one PR review whose body starts with a `## Verdict` he
 
 The model is pinned in the workflow itself (`opencode-go/mimo-v2.6-pro`); no project-level `opencode.json` is committed — this is a public repo, and the review's runtime-config guard strips any PR-added `opencode.json`/`opencode.jsonc`/`AGENTS.md`/`.opencode/` (restoring base-branch versions) and any `CLAUDE.md` (unsupported in this project) before the agent runs.
 
-Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner (`.github/workflows/pr-guard.yml` enforces this), and only the owner has merge rights.
+Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner, and only the owner has merge rights. The gate (`.github/workflows/pr-guard.yml`) runs from the base branch definition via `pull_request_target` and posts a `pr-guard` commit status on the PR head SHA, so a PR cannot redefine its own gate.
 
 To enable it:
 

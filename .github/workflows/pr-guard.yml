@@ -1,36 +1,40 @@
 name: pr-guard
 
+# pull_request_target runs this workflow from the BASE branch definition, so a
+# PR cannot redefine its own gate (with plain pull_request, the PR's version of
+# this file would run and could greenwash the check). The job checks out
+# nothing and reads no secrets. The verdict is posted as a commit status on the
+# PR head SHA (required checks match against the head SHA).
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, edited]
     branches: [main]
 
 jobs:
-  pr-guard:
+  guard:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      statuses: write
     # Event values are passed via env and compared in shell. Never interpolate
     # ${{ }} expressions into run: scripts - ref names are user-controlled.
     env:
-      HEAD_REF: ${{ github.head_ref }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
       HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       PR_AUTHOR: ${{ github.event.pull_request.user.login }}
       BASE_REPO: ${{ github.repository }}
       REPO_OWNER: ${{ github.repository_owner }}
     steps:
       - name: Enforce dev -> main only
         run: |
-          if [ "$HEAD_REF" != "dev" ]; then
-            echo "::error::PRs into main are only allowed from dev (head branch: $HEAD_REF)."
+          if [ "$HEAD_REF" != "dev" ] || [ "$HEAD_REPO" != "$BASE_REPO" ] || [ "$PR_AUTHOR" != "$REPO_OWNER" ]; then
+            gh api -X POST "repos/$BASE_REPO/statuses/$HEAD_SHA" \
+              -f state=failure -f context=pr-guard \
+              -f description="PRs into main must be owner-authored dev -> main"
             exit 1
           fi
-          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
-            echo "::error::PRs into main must come from a branch in this repository, not a fork."
-            exit 1
-          fi
-          if [ "$PR_AUTHOR" != "$REPO_OWNER" ]; then
-            echo "::error::Only the repository owner can merge into main."
-            exit 1
-          fi
-          echo "OK: dev -> main"
+          gh api -X POST "repos/$BASE_REPO/statuses/$HEAD_SHA" \
+            -f state=success -f context=pr-guard \
+            -f description="dev -> main"
