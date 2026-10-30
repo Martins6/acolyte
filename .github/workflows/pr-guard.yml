@@ -10,18 +10,26 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Event values are passed via env and compared in shell. Never interpolate
+    # ${{ }} expressions into run: scripts - ref names are user-controlled.
+    env:
+      HEAD_REF: ${{ github.head_ref }}
+      HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      BASE_REPO: ${{ github.repository }}
+      REPO_OWNER: ${{ github.repository_owner }}
     steps:
       - name: Enforce dev -> main only
         run: |
-          if [ "${{ github.head_ref }}" != "dev" ]; then
-            echo "::error::PRs into main are only allowed from dev (head branch: ${{ github.head_ref }})."
+          if [ "$HEAD_REF" != "dev" ]; then
+            echo "::error::PRs into main are only allowed from dev (head branch: $HEAD_REF)."
             exit 1
           fi
-          if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
             echo "::error::PRs into main must come from a branch in this repository, not a fork."
             exit 1
           fi
-          if [ "${{ github.event.pull_request.user.login }}" != "${{ github.repository_owner }}" ]; then
+          if [ "$PR_AUTHOR" != "$REPO_OWNER" ]; then
             echo "::error::Only the repository owner can merge into main."
             exit 1
           fi

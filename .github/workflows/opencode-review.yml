@@ -77,3 +77,18 @@ jobs:
               `gh pr view`, remove an outdated LGTM/NEEDS_REVIEW label if present,
               then add the label matching the verdict.
             - Reply with only the word: done
+
+      # The action auto-posts the agent's final reply as a PR comment; the
+      # review above is the single source of truth, so remove that comment.
+      - name: Remove action comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"actions/runs/$RUN_ID\")))] | .[].id")
+          for id in $ids; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$id"
+          done

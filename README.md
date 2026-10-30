@@ -284,7 +284,7 @@ A single GitHub Actions workflow runs automatic PR review with the OpenCode `bui
 
 - `.github/workflows/opencode-review.yml` — reviews every non-draft PR opened by the repository owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs from any other author never trigger the agent.
 
-Each review posts exactly one PR review whose body starts with a `Verdict: LGTM | NEEDS_REVIEW` line, swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff.
+Each review posts exactly one PR review whose body starts with a `Verdict: LGTM | NEEDS_REVIEW` line, swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff. The workflow removes the action's automatic comment so the review is the only thing left on the PR.
 
 A project-level [`opencode.json`](./opencode.json) pins the `opencode-go` provider and `mimo-v2.6-pro` model so the opencode server started by the action resolves the model reliably (the GitHub runner has no local auth/config to fall back on).
 
