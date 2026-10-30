@@ -17,3 +17,6 @@ docs/features/temp_feature_plan/
 # Environment
 .env
 acolyte
+
+# Local agent instructions (not tracked)
+AGENTS.md
