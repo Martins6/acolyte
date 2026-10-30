@@ -26,23 +26,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          # Check out the PR head SHA (not the merge ref) so the action's own
+          # head-branch checkout is a no-op and the restored files below persist.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       # The PR under review must not configure the agent's own runtime
-      # (opencode.json can redirect the provider base URL, AGENTS.md is loaded
-      # into the agent's context, .opencode/plugins runs code). Restore those
-      # paths from the PR base branch - deleting them when the base has none -
-      # so the agent always runs on trusted configuration.
+      # (opencode.json/.jsonc can redirect the provider base URL, AGENTS.md is
+      # loaded into the agent's context, .opencode/plugins runs code). Remove
+      # each path unconditionally - so PR-added files under .opencode/ cannot
+      # survive - then restore the base branch's version when it has one.
       - name: Restore trusted agent runtime config
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          for p in opencode.json AGENTS.md .opencode; do
+          for p in opencode.json opencode.jsonc AGENTS.md CLAUDE.md .opencode; do
+            rm -rf "$p"
             if git cat-file -e "origin/$BASE_REF:$p" 2>/dev/null; then
               git checkout "origin/$BASE_REF" -- "$p"
-            else
-              rm -rf "$p"
             fi
           done
 
@@ -55,10 +57,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Least privilege for the agent's shell: only the gh subcommands a
           # review needs. gh auth/api/secret/repo are denied, and any command
-          # containing `$` is denied so no environment variable can be
-          # expanded into gh output. Residual risk: the agent can still write
-          # attacker-influenced text into the review body itself.
-          OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh pr review*": "allow", "gh pr edit*": "allow", "gh label*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny", "*$*": "deny" } }'
+          # containing `$` is denied so no environment variable can be expanded
+          # into gh output. webfetch/websearch/task are denied so there is no
+          # direct network exfiltration channel. Residual risk: gh pr edit/review
+          # can act on any PR and gh label on any label repo-wide, and the review
+          # body itself remains a channel the agent could be steered into.
+          OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh pr review*": "allow", "gh pr edit*": "allow", "gh label*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny", "*$*": "deny" }, "webfetch": "deny", "websearch": "deny", "task": "deny" }'
         with:
           model: opencode-go/mimo-v2.6-pro
           agent: build

@@ -286,7 +286,7 @@ A single GitHub Actions workflow runs automatic PR review with the OpenCode `bui
 
 Each review posts exactly one PR review whose body starts with a `## Verdict` heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff. The workflow removes the action's automatic comment so the review is the only thing left on the PR.
 
-The model is pinned in the workflow itself (`opencode-go/mimo-v2.6-pro`); no project-level `opencode.json` is committed — this is a public repo, and the review's runtime-config guard strips any PR-added `opencode.json`/`.opencode/` before the agent runs.
+The model is pinned in the workflow itself (`opencode-go/mimo-v2.6-pro`); no project-level `opencode.json` is committed — this is a public repo, and the review's runtime-config guard strips any PR-added `opencode.json`/`opencode.jsonc`/`AGENTS.md`/`CLAUDE.md`/`.opencode/` before the agent runs.
 
 Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner (`.github/workflows/pr-guard.yml` enforces this), and only the owner has merge rights.
 
