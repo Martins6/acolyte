@@ -15,7 +15,7 @@ Adds GitHub Actions automation around the OpenCode `build` agent using the offic
 - Both actions are pinned by full commit SHA (`actions/checkout` `d23441a` # v6.1.0, `anomalyco/opencode/github` `77fc88c` # latest) — floating tags never receive the API key and write-capable token
 - Adds `.github/workflows/pr-guard.yml`: pull requests into `main` fail unless the head branch is `dev` in this repository (not a fork) and the PR author is the repository owner, enforcing `dev` -> `main` as the only path onto `main`; event values are passed via `env:` and compared in shell (never interpolated into `run:` scripts, which would allow script injection via crafted ref names)
 - A `Remove action comment` cleanup step (`if: always()`, paginated API scan) deletes the automatic comment the action posts for the agent's final reply, so the PR carries only the review
-- Project-level `opencode.json` at the repo root pins the `opencode-go` provider and `mimo-v2.6-pro` model so the opencode server started by the action resolves the model reliably in the runner (the same pattern that resolved [opencode#7958](https://github.com/anomalyco/opencode/issues/7958))
+- No project-level `opencode.json` is committed (this is a public repo): the model is pinned via the action's `model` input (`opencode-go/mimo-v2.6-pro`), and the runtime-config restore step strips any PR-added `opencode.json`/`.opencode/` before the agent runs
 - README.md gains a "GitHub Workflow" subsection covering the secret name, review behavior, and the `dev` -> `main` merge flow
 - Repo-side (configured through the GitHub API, not part of this diff): branch protection on `main` requires a pull request, the `pr-guard` status check, and restricts merging to the repository owner; `dev` requires pull requests
 
@@ -23,5 +23,4 @@ Adds GitHub Actions automation around the OpenCode `build` agent using the offic
 
 - .github/workflows/opencode-review.yml
 - .github/workflows/pr-guard.yml
-- opencode.json
 - README.md
