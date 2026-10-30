@@ -4,6 +4,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
+# Rapid pushes cancel the in-flight review so only the latest diff is reviewed
+# and label swaps cannot race between overlapping runs.
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   review:
     # Only review non-draft PRs authored by the repository owner.
@@ -23,16 +29,36 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The PR under review must not configure the agent's own runtime
+      # (opencode.json can redirect the provider base URL, AGENTS.md is loaded
+      # into the agent's context, .opencode/plugins runs code). Restore those
+      # paths from the PR base branch - deleting them when the base has none -
+      # so the agent always runs on trusted configuration.
+      - name: Restore trusted agent runtime config
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          for p in opencode.json AGENTS.md .opencode; do
+            if git cat-file -e "origin/$BASE_REF:$p" 2>/dev/null; then
+              git checkout "origin/$BASE_REF" -- "$p"
+            else
+              rm -rf "$p"
+            fi
+          done
+
       - name: Run OpenCode review
         uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a # latest
         env:
           # models.dev: the `opencode-go` provider reads OPENCODE_API_KEY.
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          # Required by use_github_token mode and by the gh CLI.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Least privilege: the agent may only run the gh subcommands it needs
-          # for reviewing; gh auth/api/secret/repo are denied so a prompt-injection
-          # cannot print credentials or mutate the repository.
-          OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh pr review*": "allow", "gh pr edit*": "allow", "gh label*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny" } }'
+          # Least privilege for the agent's shell: only the gh subcommands a
+          # review needs. gh auth/api/secret/repo are denied, and any command
+          # containing `$` is denied so no environment variable can be
+          # expanded into gh output. Residual risk: the agent can still write
+          # attacker-influenced text into the review body itself.
+          OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh pr review*": "allow", "gh pr edit*": "allow", "gh label*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny", "*$*": "deny" } }'
         with:
           model: opencode-go/mimo-v2.6-pro
           agent: build
@@ -79,11 +105,14 @@ jobs:
             After posting the review:
             - Swap the verdict label on the PR: inspect current labels with
               `gh pr view`, remove an outdated LGTM/NEEDS_REVIEW label if present,
-              then add the label matching the verdict.
+              create the verdict label first with `gh label create` if it does not
+              exist, then add the label matching the verdict.
             - Reply with only the word: done
 
       # The action auto-posts the agent's final reply as a PR comment; the
       # review above is the single source of truth, so remove that comment.
+      # --paginate: the comment is the newest one and a single API page only
+      # returns the oldest 30 comments.
       - name: Remove action comment
         if: always()
         env:
@@ -91,8 +120,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          ids=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"actions/runs/$RUN_ID\")))] | .[].id")
+          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | contains(\"actions/runs/$RUN_ID\"))) | .id")
           for id in $ids; do
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$id"
           done
