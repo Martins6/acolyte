@@ -278,6 +278,28 @@ For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file
 - `github.com/spf13/viper` - Configuration
 - `github.com/google/uuid` - UUID generation
 
+### GitHub Workflow
+
+A single GitHub Actions workflow runs automatic PR review with the OpenCode `build` agent using the official [`anomalyco/opencode/github`](https://opencode.ai/docs/github/) action:
+
+- `.github/workflows/opencode-review.yml` — reviews every non-draft PR opened by the repository owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs from any other author never trigger the agent.
+
+Each review posts exactly one PR review whose body starts with a `## Verdict` heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff. The workflow removes the action's automatic comment so the review is the only thing left on the PR.
+
+The model is pinned in the workflow itself (`opencode-go/mimo-v2.6-pro`); no project-level `opencode.json` is committed — this is a public repo, and the review's runtime-config guard strips any PR-added `opencode.json`/`opencode.jsonc`/`AGENTS.md`/`.opencode/` (restoring base-branch versions) and any `CLAUDE.md` (unsupported in this project) before the agent runs.
+
+Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner, and only the owner has merge rights. The gate (`.github/workflows/pr-guard.yml`) runs from the base branch definition via `pull_request_target` and posts a `pr-guard` commit status on the PR head SHA, so a PR cannot redefine its own gate.
+
+To enable it:
+
+1. Add the provider's API key under *Settings → Secrets and variables → Actions* as `OPENCODE_GO_API_KEY` (either as a repository secret, or as an environment secret on the `OPENCODE_GO_API_KEY` environment — the review job declares that environment). The workflow maps it to `OPENCODE_API_KEY`, the variable the `opencode-go` provider reads.
+2. Create the `LGTM` and `NEEDS_REVIEW` labels — or skip this, the review creates them on first use.
+
+Usage:
+
+- Open a PR to get an automatic code review; every new push re-runs the review on the latest diff.
+- Land work by merging feature PRs into `dev`, then a `dev` → `main` PR merged by the repository owner.
+
 ## License
 
 MIT

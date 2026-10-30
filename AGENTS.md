@@ -16,7 +16,3 @@ A lightweight, dynamic Telegram-based agent gateway to OpenCode. The "acolyte" t
 - Slash commands for agent/model/provider configuration
 - Per-user session management
 - Structured logging with 30-day retention
-
-## Documentation
-
-See `docs/features/` for deeper documentation.
