@@ -12,10 +12,13 @@ concurrency:
 
 jobs:
   review:
-    # Only review non-draft PRs authored by the repository owner.
+    # Only review non-draft PRs authored by the repository owner, and only
+    # same-repo PRs: the fork code path re-checks-out the fork tip, which
+    # would silently discard the trusted runtime config restored below.
     if: |
       github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login == github.repository_owner
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: OPENCODE_GO_API_KEY
     permissions:
@@ -41,6 +44,7 @@ jobs:
       - name: Restore trusted agent runtime config
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           for p in opencode.json opencode.jsonc AGENTS.md .opencode; do
             rm -rf "$p"
@@ -49,6 +53,26 @@ jobs:
             fi
           done
           rm -rf CLAUDE.md
+
+          # The removal/restoration above dirties the worktree whenever head
+          # and base disagree on these paths. The action treats any worktree
+          # dirt as "the agent made changes" and runs
+          # `git add . && git commit && git push` against the PR branch - which
+          # fails this step (use_github_token mode configures no git identity,
+          # and persist-credentials:false leaves no push credentials) and, if
+          # it could run, would push the restored files onto the PR branch.
+          # Commit the restoration on a local branch named after the PR head
+          # ref instead: the tree is then clean (the action skips its push
+          # path) and the action's own `git checkout <head ref>` becomes a
+          # no-op instead of reverting the restoration. This commit is
+          # local-only and is never pushed.
+          git checkout -B "$HEAD_REF"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -m "ci: restore trusted agent runtime config (local-only)"
+          fi
 
       - name: Run OpenCode review
         uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a # latest
@@ -61,10 +85,14 @@ jobs:
           # review needs. gh auth/api/secret/repo are denied, and any command
           # containing `$` is denied so no environment variable can be expanded
           # into gh output. webfetch/websearch/task are denied so there is no
-          # direct network exfiltration channel. Residual risk: gh pr edit/review
-          # can act on any PR and gh label on any label repo-wide, and the review
-          # body itself remains a channel the agent could be steered into.
-          OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh pr review*": "allow", "gh pr edit*": "allow", "gh label*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny", "*$*": "deny" }, "webfetch": "deny", "websearch": "deny", "task": "deny" }'
+          # direct network exfiltration channel. File-mutating tools
+          # (edit/write/apply_patch and legacy aliases) are denied: the agent is
+          # review-only, and any worktree dirt makes the action attempt
+          # `git commit && git push` against the PR branch. Residual risk:
+          # gh pr edit/review can act on any PR and gh label on any label
+          # repo-wide, and the review body itself remains a channel the agent
+          # could be steered into.
+          OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh pr review*": "allow", "gh pr edit*": "allow", "gh label*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny", "*$*": "deny" }, "edit": "deny", "write": "deny", "apply_patch": "deny", "patch": "deny", "multiedit": "deny", "webfetch": "deny", "websearch": "deny", "task": "deny" }'
         with:
           model: opencode-go/mimo-v2.6-pro
           agent: build
