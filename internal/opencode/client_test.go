@@ -254,7 +254,6 @@ func TestMessagesAfterPaging(t *testing.T) {
 }
 
 func TestMessagesAfterTruncated(t *testing.T) {
-	t.Parallel()
 
 	origSize, origPages := messagePageSize, messageMaxPages
 	t.Cleanup(func() { messagePageSize, messageMaxPages = origSize, origPages })
@@ -397,7 +396,6 @@ func TestRunUserTurnSyncsAgentAndModel(t *testing.T) {
 }
 
 func TestRunSyntheticTurnRewaitsUntilDelivered(t *testing.T) {
-	t.Parallel()
 
 	origGap := syntheticRecheckGap
 	t.Cleanup(func() { syntheticRecheckGap = origGap })
@@ -444,7 +442,6 @@ func TestRunSyntheticTurnRewaitsUntilDelivered(t *testing.T) {
 }
 
 func TestRunSyntheticTurnFailsFastWhenTruncated(t *testing.T) {
-	t.Parallel()
 
 	origSize, origPages := messagePageSize, messageMaxPages
 	t.Cleanup(func() { messagePageSize, messageMaxPages = origSize, origPages })
@@ -480,7 +477,6 @@ func TestRunSyntheticTurnFailsFastWhenTruncated(t *testing.T) {
 }
 
 func TestRunSyntheticTurnRewaitsWhenTruncatedButPending(t *testing.T) {
-	t.Parallel()
 
 	origSize, origPages := messagePageSize, messageMaxPages
 	origGap := syntheticRecheckGap

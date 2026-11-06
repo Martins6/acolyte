@@ -77,27 +77,39 @@ func LoadServicePassword() (string, error) {
 	return cfg.Password, nil
 }
 
-// ServiceURL returns the URL reported by `opencode service status`, falling
-// back to DefaultServiceURL when the service reports nothing (e.g. stopped)
-// or reports no trusted address.
-func ServiceURL(ctx context.Context) string {
+// serviceURLEnv is the explicit allowlist override for non-local services.
+const serviceURLEnv = "ACOLYTE_OPENCODE_URL"
+
+// ServiceURL resolves the OpenCode service URL: an explicitly configured
+// ACOLYTE_OPENCODE_URL wins, then the first loopback URL reported by
+// `opencode service status`, then DefaultServiceURL. Non-loopback URLs are
+// never trusted from free text (we would send the Basic-auth password and
+// turn content there): a remote endpoint must be configured explicitly.
+func ServiceURL(ctx context.Context) (string, error) {
+	if raw := strings.TrimSpace(os.Getenv(serviceURLEnv)); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname()))) {
+			return "", fmt.Errorf("opencode: invalid %s %q: only https or loopback http is allowed", serviceURLEnv, raw)
+		}
+		return strings.TrimRight(raw, "/"), nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	out, err := serviceStatusCmd(ctx)
 	if err == nil {
 		if u := pickServiceURL(urlPattern.FindAllString(string(out), -1)); u != "" {
-			return u
+			return u, nil
 		}
 	}
-	return DefaultServiceURL
+	return DefaultServiceURL, nil
 }
 
-// pickServiceURL chooses among candidate URLs found in the status output: the
-// first loopback URL wins, falling back to the first https URL. Trailing
-// punctuation is trimmed. Returns "" when no candidate is trusted.
+// pickServiceURL returns the first loopback URL among the candidates found in
+// the status output, with trailing punctuation trimmed. Returns "" when no
+// loopback candidate exists.
 func pickServiceURL(candidates []string) string {
-	firstHTTPS := ""
 	for _, raw := range candidates {
 		raw = strings.TrimRight(raw, ".,;:)'\"")
 		u, err := url.Parse(raw)
@@ -107,11 +119,8 @@ func pickServiceURL(candidates []string) string {
 		if isLoopbackHost(u.Hostname()) {
 			return raw
 		}
-		if u.Scheme == "https" && firstHTTPS == "" {
-			firstHTTPS = raw
-		}
 	}
-	return firstHTTPS
+	return ""
 }
 
 // isLoopbackHost reports whether host is a loopback address.
@@ -128,7 +137,12 @@ func Ensure(ctx context.Context) (*Client, error) {
 		return nil, err
 	}
 
-	c := NewClient(ServiceURL(ctx), password)
+	baseURL, err := ServiceURL(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	c := NewClient(baseURL, password)
 	err = probeHealth(ctx, c)
 	if err == nil {
 		return c, nil
@@ -146,8 +160,12 @@ func Ensure(ctx context.Context) (*Client, error) {
 
 	deadline := time.Now().Add(serviceStartTimeout)
 	for {
-		c = NewClient(ServiceURL(ctx), password)
-		err := probeHealth(ctx, c)
+		baseURL, err := ServiceURL(ctx)
+		if err != nil {
+			return nil, err
+		}
+		c := NewClient(baseURL, password)
+		err = probeHealth(ctx, c)
 		if err == nil {
 			return c, nil
 		}

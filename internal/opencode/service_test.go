@@ -61,69 +61,69 @@ func TestLoadServicePassword(t *testing.T) {
 	}
 }
 
-func TestServiceURLFallback(t *testing.T) {
-	orig := serviceStatusCmd
-	t.Cleanup(func() { serviceStatusCmd = orig })
-	serviceStatusCmd = func(ctx context.Context) ([]byte, error) {
-		return nil, fmt.Errorf("service stopped")
-	}
-
-	if got := ServiceURL(context.Background()); got != DefaultServiceURL {
-		t.Errorf("ServiceURL = %q, want %q", got, DefaultServiceURL)
-	}
-}
-
-func TestServiceURLExtractsURLFromLine(t *testing.T) {
-	orig := serviceStatusCmd
-	t.Cleanup(func() { serviceStatusCmd = orig })
-	serviceStatusCmd = func(ctx context.Context) ([]byte, error) {
-		return []byte("status: running\nurl: http://127.0.0.1:12345\n"), nil
-	}
-
-	if got := ServiceURL(context.Background()); got != "http://127.0.0.1:12345" {
-		t.Errorf("ServiceURL = %q, want http://127.0.0.1:12345", got)
-	}
-}
-
-func TestServiceURLRejectsUntrusted(t *testing.T) {
+func TestServiceURL(t *testing.T) {
 	tests := []struct {
 		name string
-		out  string
+		env  string
+		out  string // status output; empty = status command fails
 		want string
 	}{
-		{"plain http non-loopback", "url: http://example.com:8080", DefaultServiceURL},
-		{"https accepted", "url: https://opencode.example.com:443", "https://opencode.example.com:443"},
-		{"no url", "status: stopped", DefaultServiceURL},
-		{"loopback preferred over earlier https", "docs: https://opencode.ai/docs\nurl: http://127.0.0.1:49374", "http://127.0.0.1:49374"},
-		{"loopback preferred over earlier https even with trailing punctuation", "see https://opencode.ai/docs. url: http://127.0.0.1:49374.", "http://127.0.0.1:49374"},
-		{"trailing quote trimmed", `url: "http://127.0.0.1:49374"`, "http://127.0.0.1:49374"},
-		{"https fallback with trailing slash punctuation", "url: https://opencode.example.com/,", "https://opencode.example.com/"},
+		{"status stopped falls back", "", "", DefaultServiceURL},
+		{"loopback from status", "", "http://127.0.0.1:49374", "http://127.0.0.1:49374"},
+		{"loopback extracted from labeled line", "", "status: running\nurl: http://127.0.0.1:12345\n", "http://127.0.0.1:12345"},
+		{"plain http non-loopback never trusted", "", "url: http://example.com:8080", DefaultServiceURL},
+		{"https from free text never trusted", "", "url: https://opencode.example.com:443", DefaultServiceURL},
+		{"unrelated https before remote service url, no loopback", "",
+			"docs: https://opencode.ai/docs\nservice: https://remote.example.com:8443", DefaultServiceURL},
+		{"loopback preferred over earlier https", "",
+			"docs: https://opencode.ai/docs\nurl: http://127.0.0.1:49374", "http://127.0.0.1:49374"},
+		{"loopback preferred even with trailing punctuation", "",
+			"see https://opencode.ai/docs. url: http://127.0.0.1:49374.", "http://127.0.0.1:49374"},
+		{"trailing quote trimmed", "", `url: "http://127.0.0.1:49374"`, "http://127.0.0.1:49374"},
+		{"configured remote endpoint allowlisted", "https://remote.example.com:8443",
+			"docs: https://opencode.ai/docs", "https://remote.example.com:8443"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(serviceURLEnv, tt.env)
 			orig := serviceStatusCmd
 			t.Cleanup(func() { serviceStatusCmd = orig })
 			serviceStatusCmd = func(ctx context.Context) ([]byte, error) {
+				if tt.out == "" {
+					return nil, fmt.Errorf("service stopped")
+				}
 				return []byte(tt.out), nil
 			}
 
-			if got := ServiceURL(context.Background()); got != tt.want {
+			got, err := ServiceURL(context.Background())
+			if err != nil {
+				t.Fatalf("ServiceURL: %v", err)
+			}
+			if got != tt.want {
 				t.Errorf("ServiceURL = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestServiceURLFromStatus(t *testing.T) {
-	orig := serviceStatusCmd
-	t.Cleanup(func() { serviceStatusCmd = orig })
-	serviceStatusCmd = func(ctx context.Context) ([]byte, error) {
-		return []byte("http://127.0.0.1:12345\n"), nil
+func TestServiceURLRejectsUntrustedConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+	}{
+		{"plain http non-loopback", "http://example.com:8080"},
+		{"unparseable", "://bad"},
 	}
 
-	if got := ServiceURL(context.Background()); got != "http://127.0.0.1:12345" {
-		t.Errorf("ServiceURL = %q, want http://127.0.0.1:12345", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(serviceURLEnv, tt.env)
+
+			if _, err := ServiceURL(context.Background()); err == nil {
+				t.Fatal("expected an error for untrusted configuration")
+			}
+		})
 	}
 }
 
