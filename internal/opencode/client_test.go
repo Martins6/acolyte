@@ -157,6 +157,40 @@ func TestMessagesAfter(t *testing.T) {
 	}
 }
 
+func TestMessagesAfterStopsAtLaterInput(t *testing.T) {
+	t.Parallel()
+
+	// A second input (later turn) is interleaved after the marker: its output
+	// must not leak into the marker turn's reply. Walked backward, the
+	// collection resets at each later input.
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[
+			{"id":"msg_idle2","type":"idle","time":{"created":7},"outcome":"succeeded"},
+			{"id":"msg_b2","type":"assistant","time":{"created":6},"content":[{"type":"text","text":"later turn reply"}]},
+			{"id":"msg_input2","type":"user","time":{"created":5},"text":"later question"},
+			{"id":"msg_a2","type":"assistant","time":{"created":4},"content":[{"type":"text","text":"second part"}]},
+			{"id":"msg_a1","type":"assistant","time":{"created":3},"content":[{"type":"text","text":"first part"}]},
+			{"id":"msg_marker","type":"synthetic","time":{"created":2},"text":"event"},
+			{"id":"msg_old","type":"assistant","time":{"created":1},"content":[{"type":"text","text":"older turn"}]}
+		],"cursor":{"previous":null,"next":null}}`)
+	}
+	client := newTestClient(t, handler)
+
+	msgs, delivered, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
+	if err != nil {
+		t.Fatalf("messagesAfter: %v", err)
+	}
+	if !delivered {
+		t.Fatal("marker reported as not delivered")
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages after marker, want 2: %+v", len(msgs), msgs)
+	}
+	if msgs[0].ID != "msg_a1" || msgs[1].ID != "msg_a2" {
+		t.Errorf("wrong messages: %s %s, want msg_a1 msg_a2", msgs[0].ID, msgs[1].ID)
+	}
+}
+
 func TestMessagesAfterUndelivered(t *testing.T) {
 	t.Parallel()
 
@@ -375,6 +409,28 @@ func TestAPIErrorMapping(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err.Error(), tt.wantPart)
 			}
 		})
+	}
+}
+
+func TestContext(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/session/ses_x/context" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"data":[
+			{"id":"msg_m","type":"user","time":{"created":1},"text":"hello"},
+			{"id":"msg_r","type":"assistant","time":{"created":2},"content":[{"type":"text","text":"hi"}]}
+		]}`)
+	})
+
+	msgs, err := client.Context(context.Background(), "ses_x")
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Text != "hello" || msgs[1].Content[0].Text != "hi" {
+		t.Errorf("unexpected context messages: %+v", msgs)
 	}
 }
 

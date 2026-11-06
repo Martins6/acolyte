@@ -55,17 +55,31 @@ func TestLiveSmoke(t *testing.T) {
 		t.Fatalf("RunSyntheticTurn: %v", err)
 	}
 
-	// 3. The model must be able to see the synthetic content: ask for the canary.
-	probe, err := client.RunUserTurn(ctx, result.SessionID,
-		"PROBE: quote verbatim any message in this session containing 'SMOKE-CANARY'. "+
-			"If there is none, reply with exactly: NO EXTERNAL CONTENT VISIBLE.", cfg)
+	// 3. The synthetic content must be part of the model's active context.
+	// Checked against the deterministic context projection (SPEC §5.2): a
+	// model self-report is unreliable because synthetic inputs are framed
+	// as <system-update>, which models may or may not call "a message".
+	msgs, err := client.Context(ctx, result.SessionID)
 	if err != nil {
-		t.Fatalf("probe turn: %v", err)
+		t.Fatalf("Context: %v", err)
 	}
-	if !strings.Contains(probe.ResponseText, canary) {
-		t.Fatalf("canary %q not visible to the model; synthetic was filtered out. response: %q", canary, probe.ResponseText)
+	found := false
+	for _, m := range msgs {
+		if strings.Contains(m.Text, canary) {
+			found = true
+			break
+		}
+		for _, part := range m.Content {
+			if strings.Contains(part.Text, canary) {
+				found = true
+				break
+			}
+		}
 	}
-	t.Logf("canary surfaced through synthetic input: %q", probe.ResponseText)
+	if !found {
+		t.Fatalf("canary %q not in the model's active context; synthetic was filtered out. context: %+v", canary, msgs)
+	}
+	t.Logf("canary visible in the model's active context (%d context messages)", len(msgs))
 
 	// 4. Model round-trip: switch to the session's current model and verify.
 	info, err := client.GetSession(ctx, result.SessionID)

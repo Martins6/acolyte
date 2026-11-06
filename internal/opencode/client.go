@@ -224,8 +224,24 @@ func (c *Client) Wait(ctx context.Context, sessionID string) error {
 	return c.do(ctx, http.MethodPost, path, nil, nil)
 }
 
+// Context returns the session's active context messages (all messages after
+// the last compaction) — exactly what the model sees on the next turn.
+func (c *Client) Context(ctx context.Context, sessionID string) ([]Message, error) {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/context"
+	var resp struct {
+		Data []Message `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
 // messagesAfter returns the chronological messages that follow markerID in the
-// session timeline. ok is false when markerID has not been delivered yet.
+// session timeline. The collection stops at the first later input
+// (user/synthetic message): a later input starts a later turn, so its output
+// must not leak into this turn's reply. ok is false when markerID has not been
+// delivered yet.
 func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) ([]Message, bool, error) {
 	const pageSize = 100
 	const maxPages = 20
@@ -252,6 +268,12 @@ func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) 
 			if m.ID == markerID {
 				found = true
 				break
+			}
+			if m.Type == "user" || m.Type == "synthetic" {
+				// A later input starts a later turn: everything collected
+				// so far is newer than it and belongs to that turn.
+				after = after[:0]
+				continue
 			}
 			after = append(after, m)
 		}

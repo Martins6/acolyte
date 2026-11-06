@@ -220,8 +220,6 @@ func DefaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		errorMsg := "Error: Could not get response from OpenCode."
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "invalid") {
 			errorMsg = fmt.Sprintf("Error: %v. Please check your model/provider settings with /set-model or /set-provider command.", err)
-		} else if strings.Contains(err.Error(), "no valid output") {
-			errorMsg = "Error: OpenCode returned no output. Please check your model/provider settings."
 		} else {
 			errorMsg = fmt.Sprintf("Error: Could not get response from OpenCode. %v", err)
 		}

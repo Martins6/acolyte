@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -30,7 +32,15 @@ var (
 
 	// servicePollInterval is the health-probe interval while starting.
 	servicePollInterval = 500 * time.Millisecond
+
+	// serviceProbeTimeout bounds a single health probe so a wedged listener
+	// cannot block Ensure (and its caller) indefinitely.
+	serviceProbeTimeout = 5 * time.Second
 )
+
+// urlPattern finds a URL inside `opencode service status` output, whatever
+// the surrounding line format is.
+var urlPattern = regexp.MustCompile(`https?://[^\s]+`)
 
 // Command seams, replaced in tests.
 var (
@@ -66,21 +76,33 @@ func LoadServicePassword() (string, error) {
 }
 
 // ServiceURL returns the URL reported by `opencode service status`, falling
-// back to DefaultServiceURL when the service reports nothing (e.g. stopped).
+// back to DefaultServiceURL when the service reports nothing (e.g. stopped)
+// or reports an untrusted address.
 func ServiceURL(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	out, err := serviceStatusCmd(ctx)
 	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
-				return line
-			}
+		if u := urlPattern.FindString(string(out)); u != "" && isTrustedServiceURL(u) {
+			return u
 		}
 	}
 	return DefaultServiceURL
+}
+
+// isTrustedServiceURL reports whether the discovered URL is safe to send
+// credentials and turn content to: https anywhere, or http on loopback only.
+func isTrustedServiceURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	host := u.Hostname()
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 // Ensure discovers the OpenCode background service, starts it when it is not
@@ -93,7 +115,7 @@ func Ensure(ctx context.Context) (*Client, error) {
 	}
 
 	c := NewClient(ServiceURL(ctx), password)
-	if err := c.HealthCheck(ctx); err == nil {
+	if err := probeHealth(ctx, c); err == nil {
 		return c, nil
 	}
 
@@ -104,7 +126,7 @@ func Ensure(ctx context.Context) (*Client, error) {
 	deadline := time.Now().Add(serviceStartTimeout)
 	for {
 		c = NewClient(ServiceURL(ctx), password)
-		err := c.HealthCheck(ctx)
+		err := probeHealth(ctx, c)
 		if err == nil {
 			return c, nil
 		}
@@ -117,6 +139,14 @@ func Ensure(ctx context.Context) (*Client, error) {
 		case <-time.After(servicePollInterval):
 		}
 	}
+}
+
+// probeHealth runs one health probe under a short deadline so a wedged
+// listener cannot block the caller.
+func probeHealth(ctx context.Context, c *Client) error {
+	ctx, cancel := context.WithTimeout(ctx, serviceProbeTimeout)
+	defer cancel()
+	return c.HealthCheck(ctx)
 }
 
 // startService starts the managed background service via the OpenCode CLI.
