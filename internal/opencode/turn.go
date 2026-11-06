@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,9 +11,13 @@ import (
 // turnTimeout matches the retired CLI runner's 5-minute cap.
 const turnTimeout = 5 * time.Minute
 
+// ErrTurnTruncated reports that a turn's marker was delivered but lies older
+// than the newest collection window, so its reply cannot be bounded reliably.
+var ErrTurnTruncated = errors.New("opencode: turn output exceeded the collection window")
+
 // syntheticRecheckGap is how long to pause before re-waiting when a queued
-// input has not been delivered yet.
-const syntheticRecheckGap = 2 * time.Second
+// input has not been delivered yet (a var so tests can shorten it).
+var syntheticRecheckGap = 2 * time.Second
 
 // TurnConfig carries the per-turn settings the callers already hold.
 type TurnConfig struct {
@@ -116,12 +121,24 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 		if err := c.Wait(ctx, sessionID); err != nil {
 			return nil, err
 		}
-		msgs, delivered, err := c.messagesAfter(ctx, sessionID, markerID)
+		msgs, delivered, truncated, err := c.messagesAfter(ctx, sessionID, markerID)
 		if err != nil {
 			return nil, err
 		}
 		if delivered {
 			return &TurnResult{SessionID: sessionID, ResponseText: assistantText(msgs)}, nil
+		}
+		if truncated {
+			// The marker lies beyond the collection window: it is either
+			// still pending (long session, keep waiting) or buried under a
+			// huge turn (its reply cannot be bounded, fail fast).
+			pending, err := c.InboxPending(ctx, sessionID, markerID)
+			if err != nil {
+				return nil, err
+			}
+			if !pending {
+				return nil, ErrTurnTruncated
+			}
 		}
 		select {
 		case <-ctx.Done():

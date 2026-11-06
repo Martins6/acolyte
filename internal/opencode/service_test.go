@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +94,10 @@ func TestServiceURLRejectsUntrusted(t *testing.T) {
 		{"plain http non-loopback", "url: http://example.com:8080", DefaultServiceURL},
 		{"https accepted", "url: https://opencode.example.com:443", "https://opencode.example.com:443"},
 		{"no url", "status: stopped", DefaultServiceURL},
+		{"loopback preferred over earlier https", "docs: https://opencode.ai/docs\nurl: http://127.0.0.1:49374", "http://127.0.0.1:49374"},
+		{"loopback preferred over earlier https even with trailing punctuation", "see https://opencode.ai/docs. url: http://127.0.0.1:49374.", "http://127.0.0.1:49374"},
+		{"trailing quote trimmed", `url: "http://127.0.0.1:49374"`, "http://127.0.0.1:49374"},
+		{"https fallback with trailing slash punctuation", "url: https://opencode.example.com/,", "https://opencode.example.com/"},
 	}
 
 	for _, tt := range tests {
@@ -204,6 +209,48 @@ func TestEnsureStartsService(t *testing.T) {
 	}
 	if client.baseURL != srv.URL {
 		t.Errorf("baseURL = %q, want %q", client.baseURL, srv.URL)
+	}
+}
+
+func TestEnsureAuthFailFast(t *testing.T) {
+	writeServicePassword(t, `{"password":"wrong"}`)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"_tag":"UnauthorizedError","message":"bad password"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	origStatus := serviceStatusCmd
+	origStart := serviceStartCmd
+	t.Cleanup(func() {
+		serviceStatusCmd = origStatus
+		serviceStartCmd = origStart
+	})
+	serviceStatusCmd = func(ctx context.Context) ([]byte, error) {
+		return []byte(srv.URL + "\n"), nil
+	}
+	serviceStartCmd = func(ctx context.Context) ([]byte, error) {
+		t.Error("start must not be called when the service rejects credentials")
+		return nil, nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Ensure(context.Background())
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an auth error")
+		}
+		if !strings.Contains(err.Error(), "rejected credentials") {
+			t.Errorf("error %q does not mention rejected credentials", err.Error())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ensure did not fail fast on an auth error")
 	}
 }
 

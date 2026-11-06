@@ -3,7 +3,9 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -38,9 +40,9 @@ var (
 	serviceProbeTimeout = 5 * time.Second
 )
 
-// urlPattern finds a URL inside `opencode service status` output, whatever
-// the surrounding line format is.
-var urlPattern = regexp.MustCompile(`https?://[^\s]+`)
+// urlPattern finds candidate URLs inside `opencode service status` output,
+// whatever the surrounding line format is.
+var urlPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
 // Command seams, replaced in tests.
 var (
@@ -77,31 +79,43 @@ func LoadServicePassword() (string, error) {
 
 // ServiceURL returns the URL reported by `opencode service status`, falling
 // back to DefaultServiceURL when the service reports nothing (e.g. stopped)
-// or reports an untrusted address.
+// or reports no trusted address.
 func ServiceURL(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	out, err := serviceStatusCmd(ctx)
 	if err == nil {
-		if u := urlPattern.FindString(string(out)); u != "" && isTrustedServiceURL(u) {
+		if u := pickServiceURL(urlPattern.FindAllString(string(out), -1)); u != "" {
 			return u
 		}
 	}
 	return DefaultServiceURL
 }
 
-// isTrustedServiceURL reports whether the discovered URL is safe to send
-// credentials and turn content to: https anywhere, or http on loopback only.
-func isTrustedServiceURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
+// pickServiceURL chooses among candidate URLs found in the status output: the
+// first loopback URL wins, falling back to the first https URL. Trailing
+// punctuation is trimmed. Returns "" when no candidate is trusted.
+func pickServiceURL(candidates []string) string {
+	firstHTTPS := ""
+	for _, raw := range candidates {
+		raw = strings.TrimRight(raw, ".,;:)'\"")
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if isLoopbackHost(u.Hostname()) {
+			return raw
+		}
+		if u.Scheme == "https" && firstHTTPS == "" {
+			firstHTTPS = raw
+		}
 	}
-	if u.Scheme == "https" {
-		return true
-	}
-	host := u.Hostname()
+	return firstHTTPS
+}
+
+// isLoopbackHost reports whether host is a loopback address.
+func isLoopbackHost(host string) bool {
 	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
@@ -115,8 +129,15 @@ func Ensure(ctx context.Context) (*Client, error) {
 	}
 
 	c := NewClient(ServiceURL(ctx), password)
-	if err := probeHealth(ctx, c); err == nil {
+	err = probeHealth(ctx, c)
+	if err == nil {
 		return c, nil
+	}
+	// A reachable service that rejects our credentials will not become
+	// healthy by starting another one: fail fast with the auth error.
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && (apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden) {
+		return nil, fmt.Errorf("opencode: background service rejected credentials (check ~/.config/opencode/service.json): %w", err)
 	}
 
 	if err := startService(ctx); err != nil {

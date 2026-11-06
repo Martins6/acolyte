@@ -3,12 +3,14 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestClient returns a client wired to a scripted test server.
@@ -141,12 +143,15 @@ func TestMessagesAfter(t *testing.T) {
 	}
 	client := newTestClient(t, handler)
 
-	msgs, delivered, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
+	msgs, delivered, truncated, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
 	if err != nil {
 		t.Fatalf("messagesAfter: %v", err)
 	}
 	if !delivered {
 		t.Fatal("marker reported as not delivered")
+	}
+	if truncated {
+		t.Fatal("unexpected truncation")
 	}
 	if len(msgs) != 3 {
 		t.Fatalf("got %d messages after marker, want 3: %+v", len(msgs), msgs)
@@ -176,7 +181,7 @@ func TestMessagesAfterStopsAtLaterInput(t *testing.T) {
 	}
 	client := newTestClient(t, handler)
 
-	msgs, delivered, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
+	msgs, delivered, _, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
 	if err != nil {
 		t.Fatalf("messagesAfter: %v", err)
 	}
@@ -200,12 +205,15 @@ func TestMessagesAfterUndelivered(t *testing.T) {
 		],"cursor":{"previous":null,"next":null}}`)
 	})
 
-	msgs, delivered, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
+	msgs, delivered, truncated, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
 	if err != nil {
 		t.Fatalf("messagesAfter: %v", err)
 	}
 	if delivered {
 		t.Error("marker reported as delivered but it is not in the timeline")
+	}
+	if truncated {
+		t.Error("unexpected truncation: the timeline was fully walked")
 	}
 	if len(msgs) != 1 {
 		t.Errorf("got %d messages, want 1 (everything up to marker)", len(msgs))
@@ -233,12 +241,62 @@ func TestMessagesAfterPaging(t *testing.T) {
 		],"cursor":{"previous":"cur1","next":null}}`)
 	})
 
-	msgs, delivered, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
+	msgs, delivered, truncated, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
 	if err != nil {
 		t.Fatalf("messagesAfter: %v", err)
 	}
+	if truncated {
+		t.Error("unexpected truncation")
+	}
 	if !delivered || len(msgs) != 1 || msgs[0].ID != "msg_new" {
 		t.Errorf("delivered=%v msgs=%+v, want [msg_new]", delivered, msgs)
+	}
+}
+
+func TestMessagesAfterTruncated(t *testing.T) {
+	t.Parallel()
+
+	origSize, origPages := messagePageSize, messageMaxPages
+	t.Cleanup(func() { messagePageSize, messageMaxPages = origSize, origPages })
+	messagePageSize = 1
+	messageMaxPages = 2
+
+	// The marker is older than the walk cap: pages never contain it and
+	// never run out of cursor.
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[
+			{"id":"msg_new","type":"assistant","time":{"created":3},"content":[{"type":"text","text":"new"}]}
+		],"cursor":{"previous":null,"next":"more"}}`)
+	})
+
+	msgs, delivered, truncated, err := client.messagesAfter(context.Background(), "ses_x", "msg_marker")
+	if err != nil {
+		t.Fatalf("messagesAfter: %v", err)
+	}
+	if delivered {
+		t.Error("marker reported as delivered")
+	}
+	if !truncated {
+		t.Error("expected truncation: marker is older than the walk cap")
+	}
+	_ = msgs
+}
+
+func TestInboxPending(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/session/ses_x/inbox" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, `{"data":[{"id":"msg_pending","sessionID":"ses_x","type":"synthetic"}]}`)
+	})
+
+	if pending, err := client.InboxPending(context.Background(), "ses_x", "msg_pending"); err != nil || !pending {
+		t.Errorf("InboxPending = %v, %v; want true, nil", pending, err)
+	}
+	if pending, err := client.InboxPending(context.Background(), "ses_x", "msg_other"); err != nil || pending {
+		t.Errorf("InboxPending = %v, %v; want false, nil", pending, err)
 	}
 }
 
@@ -341,6 +399,10 @@ func TestRunUserTurnSyncsAgentAndModel(t *testing.T) {
 func TestRunSyntheticTurnRewaitsUntilDelivered(t *testing.T) {
 	t.Parallel()
 
+	origGap := syntheticRecheckGap
+	t.Cleanup(func() { syntheticRecheckGap = origGap })
+	syntheticRecheckGap = time.Millisecond
+
 	waits := 0
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -378,6 +440,102 @@ func TestRunSyntheticTurnRewaitsUntilDelivered(t *testing.T) {
 	}
 	if result.SessionID != "ses_new" || result.ResponseText != "reacted" {
 		t.Errorf("result = %+v, want {ses_new reacted}", result)
+	}
+}
+
+func TestRunSyntheticTurnFailsFastWhenTruncated(t *testing.T) {
+	t.Parallel()
+
+	origSize, origPages := messagePageSize, messageMaxPages
+	t.Cleanup(func() { messagePageSize, messageMaxPages = origSize, origPages })
+	messagePageSize = 1
+	messageMaxPages = 2
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			fmt.Fprint(w, `{"data":{"id":"ses_new"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_new/synthetic":
+			fmt.Fprint(w, `{"data":{"id":"msg_ev","sessionID":"ses_new","type":"synthetic"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_new/wait":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_new/message":
+			// Marker buried past the walk cap.
+			fmt.Fprint(w, `{"data":[
+				{"id":"msg_new","type":"assistant","time":{"created":9},"content":[{"type":"text","text":"new"}]}
+			],"cursor":{"previous":null,"next":"more"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_new/inbox":
+			// Not pending: the marker was delivered and is buried.
+			fmt.Fprint(w, `{"data":[]}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	_, err := client.RunSyntheticTurn(context.Background(), "", SyntheticEvent{Text: "event"}, TurnConfig{Workspace: "/ws"})
+	if !errors.Is(err, ErrTurnTruncated) {
+		t.Fatalf("err = %v, want ErrTurnTruncated", err)
+	}
+}
+
+func TestRunSyntheticTurnRewaitsWhenTruncatedButPending(t *testing.T) {
+	t.Parallel()
+
+	origSize, origPages := messagePageSize, messageMaxPages
+	origGap := syntheticRecheckGap
+	t.Cleanup(func() {
+		messagePageSize, messageMaxPages = origSize, origPages
+		syntheticRecheckGap = origGap
+	})
+	messagePageSize = 1
+	messageMaxPages = 2
+	syntheticRecheckGap = time.Millisecond
+
+	round := 0
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			fmt.Fprint(w, `{"data":{"id":"ses_new"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_new/synthetic":
+			fmt.Fprint(w, `{"data":{"id":"msg_ev","sessionID":"ses_new","type":"synthetic"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_new/wait":
+			round++
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_new/message":
+			if round < 2 {
+				// Still queued: marker beyond the walk cap of a long session.
+				fmt.Fprint(w, `{"data":[
+					{"id":"msg_new","type":"assistant","time":{"created":9},"content":[{"type":"text","text":"new"}]}
+				],"cursor":{"previous":null,"next":"more"}}`)
+				return
+			}
+			fmt.Fprint(w, `{"data":[
+				{"id":"msg_reply","type":"assistant","time":{"created":2},"content":[{"type":"text","text":"reacted"}]},
+				{"id":"msg_ev","type":"synthetic","time":{"created":1},"text":"event"}
+			],"cursor":{"previous":null,"next":null}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_new/inbox":
+			// Pending on the first round; delivered later.
+			if round < 2 {
+				fmt.Fprint(w, `{"data":[{"id":"msg_ev","sessionID":"ses_new","type":"synthetic"}]}`)
+				return
+			}
+			fmt.Fprint(w, `{"data":[]}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	result, err := client.RunSyntheticTurn(context.Background(), "", SyntheticEvent{Text: "event"}, TurnConfig{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("RunSyntheticTurn: %v", err)
+	}
+	if round != 2 {
+		t.Errorf("wait calls = %d, want 2 (re-wait while pending)", round)
+	}
+	if result.ResponseText != "reacted" {
+		t.Errorf("response = %q, want %q", result.ResponseText, "reacted")
 	}
 }
 

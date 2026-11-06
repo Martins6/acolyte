@@ -237,20 +237,28 @@ func (c *Client) Context(ctx context.Context, sessionID string) ([]Message, erro
 	return resp.Data, nil
 }
 
+// Message pagination bounds, vars so tests can shrink them.
+var (
+	messagePageSize = 100
+	messageMaxPages = 20
+)
+
 // messagesAfter returns the chronological messages that follow markerID in the
 // session timeline. The collection stops at the first later input
 // (user/synthetic message): a later input starts a later turn, so its output
-// must not leak into this turn's reply. ok is false when markerID has not been
-// delivered yet.
-func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) ([]Message, bool, error) {
-	const pageSize = 100
-	const maxPages = 20
-
+// must not leak into this turn's reply. (Tradeoff: a turn whose output
+// straddles a later input keeps only the tail before that input — correct for
+// the serial queue/prompt paths in production; revisit if interleaved prompts
+// become common.) ok is false when markerID has not been delivered yet.
+// truncated is true when the marker was not found and the walk hit the page
+// cap with more of the timeline left, so delivery state is unknown.
+func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) ([]Message, bool, bool, error) {
 	var after []Message // newest-first while walking back
 	found := false
+	truncated := false
 	cursor := ""
-	for page := 0; page < maxPages; page++ {
-		path := fmt.Sprintf("/api/session/%s/message?order=desc&limit=%d", url.PathEscape(sessionID), pageSize)
+	for page := 0; page < messageMaxPages; page++ {
+		path := fmt.Sprintf("/api/session/%s/message?order=desc&limit=%d", url.PathEscape(sessionID), messagePageSize)
 		if cursor != "" {
 			path += "&cursor=" + url.QueryEscape(cursor)
 		}
@@ -262,7 +270,7 @@ func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) 
 			} `json:"cursor"`
 		}
 		if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 		for _, m := range resp.Data {
 			if m.ID == markerID {
@@ -280,6 +288,9 @@ func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) 
 		if found || resp.Cursor.Next == "" {
 			break
 		}
+		if page == messageMaxPages-1 {
+			truncated = true
+		}
 		cursor = resp.Cursor.Next
 	}
 
@@ -287,5 +298,23 @@ func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) 
 	for i, j := 0, len(after)-1; i < j; i, j = i+1, j-1 {
 		after[i], after[j] = after[j], after[i]
 	}
-	return after, found, nil
+	return after, found, truncated, nil
+}
+
+// InboxPending reports whether the given inbox item is still awaiting
+// delivery to the session.
+func (c *Client) InboxPending(ctx context.Context, sessionID, itemID string) (bool, error) {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/inbox"
+	var resp struct {
+		Data []InboxItem `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return false, err
+	}
+	for _, item := range resp.Data {
+		if item.ID == itemID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
