@@ -13,6 +13,7 @@ import (
 	"github.com/martins6/acolyte/internal/config"
 	"github.com/martins6/acolyte/internal/database"
 	"github.com/martins6/acolyte/internal/logger"
+	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/scheduler"
 	"github.com/martins6/acolyte/internal/updater"
 	"github.com/martins6/acolyte/internal/workspace"
@@ -26,7 +27,7 @@ var startCmd = &cobra.Command{
 
 The bot will:
 1. Initialize the Telegram bot
-2. Handle incoming messages using opencode run
+2. Handle incoming messages through the OpenCode V2 API
 
 Press Ctrl+C to stop the bot gracefully.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -53,6 +54,13 @@ Press Ctrl+C to stop the bot gracefully.`,
 		}
 
 		logger.LogDebug("Logger initialized in workspace: %s", workspacePath)
+
+		log.Println("Ensuring OpenCode service...")
+		ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer ensureCancel()
+		if _, err := opencode.Ensure(ensureCtx); err != nil {
+			return fmt.Errorf("opencode service unavailable: %w", err)
+		}
 
 		log.Println("Initializing Telegram bot...")
 		bot.SetConfig(cfg)
