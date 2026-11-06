@@ -94,7 +94,7 @@ jobs:
           # could be steered into.
           OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh pr review*": "allow", "gh pr edit*": "allow", "gh label*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny", "*$*": "deny" }, "edit": "deny", "write": "deny", "apply_patch": "deny", "patch": "deny", "multiedit": "deny", "webfetch": "deny", "websearch": "deny", "task": "deny" }'
         with:
-          model: opencode-go/mimo-v2.6-pro
+          model: opencode-go/gpt-6-luna
           agent: build
           use_github_token: true
           prompt: |
