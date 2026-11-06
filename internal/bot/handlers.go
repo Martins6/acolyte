@@ -185,8 +185,6 @@ func DefaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		provider = "minimax-coding-plan"
 	}
 
-	runner := opencode.NewRunner(workspace, agent, model, provider)
-
 	var sessionID string
 	if userSession.OpenCodeID != "" && !userSession.IsNewSession {
 		sessionID = userSession.OpenCodeID
@@ -199,17 +197,29 @@ func DefaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		userID, sessionID, agent, model, provider)
 	log.Printf("Sending prompt for user %d: %s", userID, userMessage)
 
-	result, err := runner.Execute(sessionID, userMessage)
+	client, err := opencode.Ensure(ctx)
+	if err != nil {
+		log.Printf("Error connecting to OpenCode for user %d: %v", userID, err)
+		logger.Log(logger.ERROR, userID, fmt.Sprintf("Failed to reach OpenCode service: %v", err))
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   "Error: Could not get response from OpenCode.",
+		})
+		return
+	}
+
+	result, err := client.RunUserTurn(ctx, sessionID, userMessage, opencode.TurnConfig{
+		Workspace: workspace,
+		Agent:     agent,
+		Provider:  provider,
+		Model:     model,
+	})
 	if err != nil {
 		log.Printf("Error running opencode for user %d: %v", userID, err)
 
-		errorMsg := "Error: Could not get response from OpenCode."
+		errorMsg := fmt.Sprintf("Error: Could not get response from OpenCode. %v", err)
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "invalid") {
 			errorMsg = fmt.Sprintf("Error: %v. Please check your model/provider settings with /set-model or /set-provider command.", err)
-		} else if strings.Contains(err.Error(), "no valid output") {
-			errorMsg = "Error: OpenCode returned no output. Please check your model/provider settings."
-		} else {
-			errorMsg = fmt.Sprintf("Error: Could not get response from OpenCode. %v", err)
 		}
 
 		logger.Log(logger.ERROR, userID, fmt.Sprintf("Failed to run opencode: %v", err))
@@ -273,20 +283,6 @@ func sendLongMessage(ctx context.Context, b *bot.Bot, chatID int64, text string,
 			text = text[1:]
 		}
 	}
-}
-
-func extractResponseText(resp *opencode.MessageResponse) string {
-	if resp == nil {
-		return ""
-	}
-
-	var text string
-	for _, part := range resp.Parts {
-		if part.Type == "text" {
-			text += part.Text
-		}
-	}
-	return text
 }
 
 func isUserAllowed(userID int64, username string) bool {

@@ -198,7 +198,12 @@ func (n *NotifierService) processMails() {
 			provider = "minimax-coding-plan"
 		}
 
-		runner := opencode.NewRunner(workspace, agent, model, provider)
+		client, err := opencode.Ensure(n.ctx)
+		if err != nil {
+			logger.LogDebug("Notifier: OpenCode service unavailable for mail %s: %v", mail.ID, err)
+			n.sendFallbackMailNotification(userChatID, mail)
+			continue
+		}
 
 		var sessionID string
 		if userSession.OpenCodeID != "" && !userSession.IsNewSession {
@@ -208,7 +213,22 @@ func (n *NotifierService) processMails() {
 		logger.LogDebug("Notifier: triggering agent for mail %s (session: %s, agent: %s, model: %s, provider: %s)",
 			mail.ID, sessionID, agent, model, provider)
 
-		result, err := runner.Execute(sessionID, agentMessage)
+		result, err := client.RunSyntheticTurn(n.ctx, sessionID, opencode.SyntheticEvent{
+			Text:        agentMessage,
+			Description: "New email received",
+			Metadata: map[string]any{
+				"source":  "mail",
+				"mail_id": mail.ID,
+				"sender":  mail.Sender,
+				"subject": mail.Subject,
+			},
+			Delivery: "queue",
+		}, opencode.TurnConfig{
+			Workspace: workspace,
+			Agent:     agent,
+			Provider:  provider,
+			Model:     model,
+		})
 		if err != nil {
 			logger.LogDebug("Notifier: agent failed for mail %s: %v", mail.ID, err)
 			n.sendFallbackMailNotification(userChatID, mail)
