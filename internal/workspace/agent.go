@@ -244,6 +244,34 @@ func writeIfMissing(workspace, rel, content string) error {
 	return nil
 }
 
+// checkNoSymlinkComponents verifies that no component under the workspace is a
+// symlink, without creating anything.
+func checkNoSymlinkComponents(workspace, rel string) error {
+	rel, err := safeRel(rel, true)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+
+	current := workspace
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("workspace: symlinked path component %s", current)
+		}
+	}
+	return nil
+}
+
 func safeRel(rel string, allowDot bool) (string, error) {
 	rel = filepath.Clean(rel)
 	if rel == "." {
@@ -330,6 +358,17 @@ func ValidateAgent(workspace string) error {
 		".acolyte.sqlite.db",
 	} {
 		path := filepath.Join(workspace, name)
+		if err := checkNoSymlinkComponents(workspace, name); err != nil {
+			if os.IsNotExist(err) {
+				missing = append(missing, name)
+				continue
+			}
+			if strings.Contains(err.Error(), "symlinked path component") {
+				missing = append(missing, name+" (symlink not allowed)")
+				continue
+			}
+			return err
+		}
 		fileInfo, err := os.Lstat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -346,7 +385,15 @@ func ValidateAgent(workspace string) error {
 			missing = append(missing, name+" (expected a file)")
 		}
 	}
-	if info, err := os.Lstat(filepath.Join(workspace, ".agents", "skills")); err != nil {
+	if err := checkNoSymlinkComponents(workspace, ".agents/skills"); err != nil {
+		if os.IsNotExist(err) {
+			missing = append(missing, ".agents/skills/")
+		} else if strings.Contains(err.Error(), "symlinked path component") {
+			missing = append(missing, ".agents/skills/ (symlink not allowed)")
+		} else {
+			return err
+		}
+	} else if info, err := os.Lstat(filepath.Join(workspace, ".agents", "skills")); err != nil {
 		missing = append(missing, ".agents/skills/")
 	} else if info.Mode()&os.ModeSymlink != 0 {
 		missing = append(missing, ".agents/skills/ (symlink not allowed)")

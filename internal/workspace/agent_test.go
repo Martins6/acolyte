@@ -275,6 +275,53 @@ func TestValidateAgentRejectsSymlinkedFile(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsSymlinkedPersonaDir(t *testing.T) {
+	ws := scaffoldTest(t, AgentOptions{Name: "valet"})
+	if err := os.WriteFile(filepath.Join(ws, ".acolyte.sqlite.db"), nil, 0600); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "CONFIG.md"), []byte("# config\n"), 0644); err != nil {
+		t.Fatalf("write outside config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "SOUL.md"), []byte("# soul\n"), 0644); err != nil {
+		t.Fatalf("write outside soul: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(ws, ".acolyte")); err != nil {
+		t.Fatalf("remove .acolyte: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, ".acolyte")); err != nil {
+		t.Fatalf("symlink .acolyte: %v", err)
+	}
+
+	err := ValidateAgent(ws)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ValidateAgent() error = %v, want symlink error", err)
+	}
+}
+
+func TestValidateRejectsSymlinkedSkillsParent(t *testing.T) {
+	ws := scaffoldTest(t, AgentOptions{Name: "valet"})
+	if err := os.WriteFile(filepath.Join(ws, ".acolyte.sqlite.db"), nil, 0600); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, "skills"), 0755); err != nil {
+		t.Fatalf("mkdir outside skills: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(ws, ".agents")); err != nil {
+		t.Fatalf("remove .agents: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, ".agents")); err != nil {
+		t.Fatalf("symlink .agents: %v", err)
+	}
+
+	err := ValidateAgent(ws)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ValidateAgent() error = %v, want symlink error", err)
+	}
+}
+
 func TestValidateAgent(t *testing.T) {
 	ws := scaffoldTest(t, AgentOptions{Name: "valet"})
 	if err := os.WriteFile(filepath.Join(ws, ".acolyte.sqlite.db"), nil, 0600); err != nil {
