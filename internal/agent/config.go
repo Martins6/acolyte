@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 )
@@ -222,26 +223,31 @@ func daysArg(memory *MemoryConfig) (int, error) {
 	if value <= 0 {
 		return 0, fmt.Errorf("config: memory-learn.days must be > 0")
 	}
-	if value > maxDreamDays {
+	if value > int64(maxDreamDays) {
 		return 0, fmt.Errorf("config: memory-learn.days must be <= %d", maxDreamDays)
 	}
-	return value, nil
+	return int(value), nil
 }
 
-func jsonInt(raw any) (int, error) {
+func jsonInt(raw any) (int64, error) {
 	switch value := raw.(type) {
 	case json.Number:
 		parsed, err := value.Int64()
 		if err != nil {
 			return 0, fmt.Errorf("must be an integer")
 		}
-		return int(parsed), nil
+		return parsed, nil
 	case float64:
-		if value != float64(int(value)) {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) {
 			return 0, fmt.Errorf("must be an integer")
 		}
-		return int(value), nil
+		if value > math.MaxInt64 || value < math.MinInt64 {
+			return 0, fmt.Errorf("must be an integer")
+		}
+		return int64(value), nil
 	case int:
+		return int64(value), nil
+	case int64:
 		return value, nil
 	default:
 		return 0, fmt.Errorf("must be an integer")
