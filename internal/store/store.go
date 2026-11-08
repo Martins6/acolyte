@@ -49,6 +49,10 @@ func Open(workspace string) (*Store, error) {
 	}
 
 	db := sql.OpenDB(verifyingConnector{dsn: fileDSN(path, ""), path: path, before: before})
+	// A single connection keeps fd verification unambiguous; SQLite serializes
+	// writes anyway, and the DSN busy timeout covers cross-process contention.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := prepare(db, path); err != nil {
 		db.Close()
 		return nil, err
@@ -85,6 +89,8 @@ func OpenReadOnly(workspace string) (*Store, error) {
 	}
 
 	db := sql.OpenDB(verifyingConnector{dsn: fileDSN(path, "mode=ro"), path: path, before: before})
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := prepareReadOnly(db, path); err != nil {
 		db.Close()
 		return nil, err
@@ -114,7 +120,9 @@ func fileDSN(path, extra string) string {
 }
 
 // verifyingConnector opens SQLite and then pins the file descriptor it
-// actually opened. It runs for every pooled connection, not just the first.
+// actually opened. Stores are limited to one connection, so the scan cannot
+// be satisfied by an older connection from this pool. SQLite's unix VFS also
+// opens the main DB, WAL, journal, and SHM with O_NOFOLLOW.
 type verifyingConnector struct {
 	dsn    string
 	path   string
