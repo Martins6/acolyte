@@ -3,17 +3,20 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
 
+	"github.com/martins6/acolyte/internal/fdverify"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/store/commtg"
 	"github.com/martins6/acolyte/internal/store/orch"
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 // ErrNoStore means the workspace has no per-agent database yet.
@@ -45,10 +48,7 @@ func Open(workspace string) (*Store, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", fileDSN(path, ""))
-	if err != nil {
-		return nil, fmt.Errorf("store: open %s: %w", path, err)
-	}
+	db := sql.OpenDB(verifyingConnector{dsn: fileDSN(path, ""), path: path, before: before})
 	if err := prepare(db, path); err != nil {
 		db.Close()
 		return nil, err
@@ -84,11 +84,7 @@ func OpenReadOnly(workspace string) (*Store, error) {
 		return nil, err
 	}
 
-	dsn := fileDSN(path, "mode=ro")
-	db, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("store: open read-only %s: %w", path, err)
-	}
+	db := sql.OpenDB(verifyingConnector{dsn: fileDSN(path, "mode=ro"), path: path, before: before})
 	if err := prepareReadOnly(db, path); err != nil {
 		db.Close()
 		return nil, err
@@ -115,6 +111,30 @@ func fileDSN(path, extra string) string {
 		}
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: values.Encode()}).String()
+}
+
+// verifyingConnector opens SQLite and then pins the file descriptor it
+// actually opened. It runs for every pooled connection, not just the first.
+type verifyingConnector struct {
+	dsn    string
+	path   string
+	before os.FileInfo
+}
+
+func (c verifyingConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := (&sqlite3.SQLiteDriver{}).Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := fdverify.VerifyOpen(c.path, c.before); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (c verifyingConnector) Driver() driver.Driver {
+	return &sqlite3.SQLiteDriver{}
 }
 
 func prepare(db *sql.DB, path string) error {

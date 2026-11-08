@@ -2,10 +2,13 @@ package workspace
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // AgentOptions carries the values baked into a new agent workspace.
@@ -23,11 +26,14 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 	if strings.TrimSpace(workspace) == "" {
 		return fmt.Errorf("workspace: empty agent workspace")
 	}
-	if err := ensureNoLegacyConfig(workspace); err != nil {
+	filesystem, err := openDirFS(workspace, true)
+	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(workspace, 0755); err != nil {
-		return fmt.Errorf("workspace: create %s: %w", workspace, err)
+	defer filesystem.Close()
+
+	if err := filesystem.ensureNoLegacyConfig(); err != nil {
+		return err
 	}
 
 	dirs := []string{
@@ -41,9 +47,11 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 		".logs",
 	}
 	for _, dir := range dirs {
-		if err := ensureDirNoSymlink(workspace, dir); err != nil {
+		created, err := filesystem.ensureDir(dir)
+		if err != nil {
 			return err
 		}
+		created.Close()
 	}
 
 	opencode, err := openCodeConfig(opts)
@@ -62,14 +70,11 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 		".gitignore":            agentGitignore,
 	}
 	for name, content := range files {
-		if err := writeIfMissing(workspace, name, content); err != nil {
+		if err := filesystem.createFileIfMissing(name, content); err != nil {
 			return err
 		}
 	}
-	if err := ensureGitignore(workspace); err != nil {
-		return err
-	}
-	return nil
+	return filesystem.ensureGitignore()
 }
 
 var requiredGitignore = []string{
@@ -83,23 +88,22 @@ var requiredGitignore = []string{
 
 // ensureGitignore merges the agent-state patterns into an existing .gitignore
 // instead of replacing the user's file.
-func ensureGitignore(workspace string) error {
-	path := filepath.Join(workspace, ".gitignore")
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return writeIfMissing(workspace, ".gitignore", agentGitignore)
+func (d *dirFS) ensureGitignore() error {
+	stat, err := d.statNoFollow(".gitignore")
+	if errors.Is(err, unix.ENOENT) {
+		return d.createFileIfMissing(".gitignore", agentGitignore)
 	}
 	if err != nil {
 		return fmt.Errorf("workspace: stat .gitignore: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
+	if isSymlink(stat) {
 		return fmt.Errorf("workspace: refusing symlinked .gitignore")
 	}
-	if !info.Mode().IsRegular() {
+	if !isRegular(stat) {
 		return fmt.Errorf("workspace: .gitignore is not a regular file")
 	}
 
-	raw, err := os.ReadFile(path)
+	raw, err := d.readFile(".gitignore")
 	if err != nil {
 		return fmt.Errorf("workspace: read .gitignore: %w", err)
 	}
@@ -114,26 +118,15 @@ func ensureGitignore(workspace string) error {
 		return nil
 	}
 
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("workspace: open .gitignore: %w", err)
-	}
-	defer file.Close()
-
+	var appendText strings.Builder
 	if len(raw) > 0 && !strings.HasSuffix(string(raw), "\n") {
-		if _, err := file.WriteString("\n"); err != nil {
-			return fmt.Errorf("workspace: append .gitignore: %w", err)
-		}
+		appendText.WriteString("\n")
 	}
-	if _, err := file.WriteString("\n# Acolyte agent state\n"); err != nil {
-		return fmt.Errorf("workspace: append .gitignore: %w", err)
-	}
+	appendText.WriteString("\n# Acolyte agent state\n")
 	for _, pattern := range missing {
-		if _, err := file.WriteString(pattern + "\n"); err != nil {
-			return fmt.Errorf("workspace: append .gitignore: %w", err)
-		}
+		appendText.WriteString(pattern + "\n")
 	}
-	return nil
+	return d.appendFile(".gitignore", appendText.String())
 }
 
 // ignoreRulePresent matches a required rule without conflating a file with a
@@ -154,132 +147,15 @@ func ignoreRulePresent(lines []string, required string) bool {
 	return false
 }
 
-func ensureNoLegacyConfig(workspace string) error {
-	legacy := filepath.Join(workspace, "opencode.json")
-	if _, err := os.Lstat(legacy); err == nil {
-		return fmt.Errorf("workspace: legacy opencode.json found; use opencode.jsonc and remove the legacy file before adopting this folder")
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("workspace: stat %s: %w", legacy, err)
-	}
-	return nil
-}
-
-// ensureDirNoSymlink creates one directory path under workspace without
-// following a symlinked component. It refuses paths that escape the workspace.
-func ensureDirNoSymlink(workspace, rel string) error {
-	rel, err := safeRel(rel, true)
-	if err != nil {
-		return err
-	}
-	if rel == "." {
-		return nil
-	}
-
-	current := workspace
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		if part == "" || part == "." {
-			continue
-		}
-		current = filepath.Join(current, part)
-
-		info, err := os.Lstat(current)
-		if err == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("workspace: refusing symlinked path component %s", current)
-			}
-			if !info.IsDir() {
-				return fmt.Errorf("workspace: %s is not a directory", current)
-			}
-			continue
-		}
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("workspace: stat %s: %w", current, err)
-		}
-
-		if err := os.Mkdir(current, 0755); err != nil {
-			if !os.IsExist(err) {
-				return fmt.Errorf("workspace: create %s: %w", current, err)
-			}
-			// A concurrent creator won the race; re-check without following it.
-			info, statErr := os.Lstat(current)
-			if statErr != nil {
-				return fmt.Errorf("workspace: stat %s: %w", current, statErr)
-			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("workspace: refusing symlinked path component %s", current)
-			}
-			if !info.IsDir() {
-				return fmt.Errorf("workspace: %s is not a directory", current)
-			}
-		}
-	}
-	return nil
-}
-
-func writeIfMissing(workspace, rel, content string) error {
-	rel, err := safeRel(rel, false)
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(workspace, rel)
-	if err := ensureDirNoSymlink(workspace, filepath.Dir(rel)); err != nil {
-		return err
-	}
-
-	info, err := os.Lstat(path)
+func (d *dirFS) ensureNoLegacyConfig() error {
+	_, err := d.statNoFollow("opencode.json")
 	if err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("workspace: refusing to overwrite symlink %s", path)
-		}
+		return fmt.Errorf("workspace: legacy opencode.json found; use opencode.jsonc and remove the legacy file before adopting this folder")
+	}
+	if errors.Is(err, unix.ENOENT) {
 		return nil
 	}
-	if !os.IsNotExist(err) {
-		return fmt.Errorf("workspace: stat %s: %w", path, err)
-	}
-
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		if os.IsExist(err) {
-			return nil
-		}
-		return fmt.Errorf("workspace: create %s: %w", path, err)
-	}
-	if _, err := file.WriteString(content); err != nil {
-		file.Close()
-		return fmt.Errorf("workspace: write %s: %w", path, err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("workspace: close %s: %w", path, err)
-	}
-	return nil
-}
-
-// checkNoSymlinkComponents verifies that no component under the workspace is a
-// symlink, without creating anything.
-func checkNoSymlinkComponents(workspace, rel string) error {
-	rel, err := safeRel(rel, true)
-	if err != nil {
-		return err
-	}
-	if rel == "." {
-		return nil
-	}
-
-	current := workspace
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		if part == "" || part == "." {
-			continue
-		}
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("workspace: symlinked path component %s", current)
-		}
-	}
-	return nil
+	return fmt.Errorf("workspace: stat opencode.json: %w", err)
 }
 
 func safeRel(rel string, allowDot bool) (string, error) {
@@ -359,6 +235,12 @@ func ValidateAgent(workspace string) error {
 		return fmt.Errorf("workspace: %s is not a directory", workspace)
 	}
 
+	filesystem, err := openDirFS(workspace, false)
+	if err != nil {
+		return err
+	}
+	defer filesystem.Close()
+
 	var missing []string
 	for _, name := range []string{
 		"AGENTS.md",
@@ -367,50 +249,42 @@ func ValidateAgent(workspace string) error {
 		".acolyte/SOUL.md",
 		".acolyte.sqlite.db",
 	} {
-		path := filepath.Join(workspace, name)
-		if err := checkNoSymlinkComponents(workspace, name); err != nil {
-			if os.IsNotExist(err) {
-				missing = append(missing, name)
-				continue
-			}
-			if strings.Contains(err.Error(), "symlinked path component") {
-				missing = append(missing, name+" (symlink not allowed)")
-				continue
-			}
-			return err
+		stat, err := filesystem.statNoFollow(name)
+		if errors.Is(err, unix.ENOENT) {
+			missing = append(missing, name)
+			continue
 		}
-		fileInfo, err := os.Lstat(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				missing = append(missing, name)
-				continue
-			}
-			return fmt.Errorf("workspace: stat %s: %w", name, err)
-		}
-		if fileInfo.Mode()&os.ModeSymlink != 0 {
+		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
 			missing = append(missing, name+" (symlink not allowed)")
 			continue
 		}
-		if fileInfo.IsDir() {
+		if err != nil {
+			return fmt.Errorf("workspace: stat %s: %w", name, err)
+		}
+		if isSymlink(stat) {
+			missing = append(missing, name+" (symlink not allowed)")
+			continue
+		}
+		if !isRegular(stat) {
 			missing = append(missing, name+" (expected a file)")
 		}
 	}
-	if err := checkNoSymlinkComponents(workspace, ".agents/skills"); err != nil {
-		if os.IsNotExist(err) {
-			missing = append(missing, ".agents/skills/")
-		} else if strings.Contains(err.Error(), "symlinked path component") {
-			missing = append(missing, ".agents/skills/ (symlink not allowed)")
-		} else {
-			return err
-		}
-	} else if info, err := os.Lstat(filepath.Join(workspace, ".agents", "skills")); err != nil {
+
+	stat, err := filesystem.statNoFollow(".agents/skills")
+	switch {
+	case errors.Is(err, unix.ENOENT):
 		missing = append(missing, ".agents/skills/")
-	} else if info.Mode()&os.ModeSymlink != 0 {
+	case errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR):
 		missing = append(missing, ".agents/skills/ (symlink not allowed)")
-	} else if !info.IsDir() {
+	case err != nil:
+		return fmt.Errorf("workspace: stat .agents/skills: %w", err)
+	case isSymlink(stat):
+		missing = append(missing, ".agents/skills/ (symlink not allowed)")
+	case !isDir(stat):
 		missing = append(missing, ".agents/skills/")
 	}
-	if err := ensureNoLegacyConfig(workspace); err != nil {
+
+	if err := filesystem.ensureNoLegacyConfig(); err != nil {
 		return err
 	}
 
