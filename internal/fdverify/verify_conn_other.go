@@ -4,10 +4,11 @@ package fdverify
 
 import (
 	"database/sql/driver"
+	"fmt"
 	"os"
 )
 
-// VerifyConn falls back to the path scan on unsupported platforms.
-func VerifyConn(_ driver.Conn, path string, before os.FileInfo) error {
-	return VerifyOpen(path, before)
+// VerifyConn fails closed on unsupported platforms.
+func VerifyConn(_ driver.Conn, _ string, _ os.FileInfo) error {
+	return fmt.Errorf("fdverify: unsupported platform")
 }

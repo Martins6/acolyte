@@ -246,6 +246,22 @@ func TestScaffoldRejectsLegacyConfig(t *testing.T) {
 	}
 }
 
+func TestScaffoldRejectsSymlinkedWorkspaceRoot(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "agent-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	err := ScaffoldAgent(link, AgentOptions{Name: "valet"})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ScaffoldAgent(symlinked root) error = %v, want symlink error", err)
+	}
+	if err := ValidateAgent(link); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ValidateAgent(symlinked root) error = %v, want symlink error", err)
+	}
+}
+
 func TestScaffoldRejectsSymlinkedDirectory(t *testing.T) {
 	ws := filepath.Join(t.TempDir(), "agent")
 	if err := os.MkdirAll(ws, 0755); err != nil {

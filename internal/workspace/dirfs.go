@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/martins6/acolyte/internal/paths"
 	"golang.org/x/sys/unix"
 )
 
@@ -19,16 +20,59 @@ type dirFS struct {
 }
 
 func openDirFS(workspace string, create bool) (*dirFS, error) {
-	if create {
-		if err := os.MkdirAll(workspace, 0755); err != nil {
-			return nil, fmt.Errorf("workspace: create %s: %w", workspace, err)
-		}
-	}
-	fd, err := unix.Open(workspace, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	abs, err := paths.Abs(workspace)
 	if err != nil {
-		return nil, fmt.Errorf("workspace: open %s: %w", workspace, err)
+		return nil, err
 	}
-	return &dirFS{root: os.NewFile(uintptr(fd), workspace)}, nil
+	if info, err := os.Lstat(abs); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("workspace: refusing symlinked workspace %s", abs)
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("workspace: stat %s: %w", abs, err)
+	}
+
+	// Resolve existing ancestors (system paths such as /var are symlinks),
+	// then traverse/create the canonical path with O_NOFOLLOW at every step.
+	canonical, err := paths.Canonical(abs)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := openDirPathCreate(canonical, create)
+	if err != nil {
+		return nil, err
+	}
+	return &dirFS{root: dir}, nil
+}
+
+func openDirPathCreate(path string, create bool) (*os.File, error) {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("workspace: %s is not absolute", path)
+	}
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: open root: %w", err)
+	}
+	current := os.NewFile(uintptr(fd), "/")
+	for _, part := range strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		next, err := openAtDir(current, part)
+		if errors.Is(err, unix.ENOENT) && create {
+			if mkErr := unix.Mkdirat(int(current.Fd()), part, 0755); mkErr != nil && !errors.Is(mkErr, unix.EEXIST) {
+				current.Close()
+				return nil, fmt.Errorf("workspace: create %s: %w", part, mkErr)
+			}
+			next, err = openAtDir(current, part)
+		}
+		if err != nil {
+			current.Close()
+			return nil, fmt.Errorf("workspace: open %s: %w", part, err)
+		}
+		current.Close()
+		current = next
+	}
+	return current, nil
 }
 
 func (d *dirFS) Close() error {

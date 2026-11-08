@@ -2,7 +2,12 @@
 
 package fdverify
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
-// Unsupported platforms fall back to the caller's pre/post path checks.
-func verifyFileOpen(string, os.FileInfo) error { return nil }
+// Unsupported platforms fail closed rather than silently trusting a path.
+func verifyFileOpen(string, os.FileInfo) error {
+	return fmt.Errorf("fdverify: unsupported platform")
+}
