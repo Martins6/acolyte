@@ -148,7 +148,9 @@ func lookup(reg *registry.Registry, name, workspace string) (registry.Agent, boo
 
 func saveIdentity(reg *registry.Registry, existing registry.Agent, adopted bool, name, workspace string, cfg Config) error {
 	if adopted {
-		existing.Description = cfg.Description
+		if cfg.Description != "" {
+			existing.Description = cfg.Description
+		}
 		existing.Engine = "opencode"
 		return reg.Update(existing)
 	}
@@ -163,7 +165,7 @@ func saveIdentity(reg *registry.Registry, existing registry.Agent, adopted bool,
 
 func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, error) {
 	if cfg.Schedule.Timezone != "" {
-		if err := st.Orch().SetSetting("schedule.timezone", cfg.Schedule.Timezone); err != nil {
+		if err := setSettingIfMissing(st.Orch(), "schedule.timezone", cfg.Schedule.Timezone); err != nil {
 			return nil, err
 		}
 	}
@@ -176,17 +178,21 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		if memory == nil {
 			continue
 		}
-		if err := st.Orch().SetSetting(key, mustJSON(memory)); err != nil {
+		if err := setSettingIfMissing(st.Orch(), key, mustJSON(memory)); err != nil {
 			return nil, err
 		}
 	}
 
 	if hasTelegram(cfg) && len(cfg.Communication.Telegram.AllowedUsers) > 0 {
-		if err := st.CommTG().SetSetting(
-			"telegram.allowed_users",
-			mustJSON(cfg.Communication.Telegram.AllowedUsers),
-		); err != nil {
+		if _, exists, err := st.CommTG().GetSetting("telegram.allowed_users"); err != nil {
 			return nil, err
+		} else if !exists {
+			if err := st.CommTG().SetSetting(
+				"telegram.allowed_users",
+				mustJSON(cfg.Communication.Telegram.AllowedUsers),
+			); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -245,6 +251,15 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		results = append(results, JobResult{Title: job.Title, Spec: job.Spec, Inserted: inserted})
 	}
 	return results, nil
+}
+
+func setSettingIfMissing(store *orch.Store, key, value string) error {
+	if _, exists, err := store.GetSetting(key); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
+	return store.SetSetting(key, value)
 }
 
 func hasTelegram(cfg Config) bool {

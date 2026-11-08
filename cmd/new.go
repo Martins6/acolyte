@@ -60,7 +60,7 @@ Example:
 		}
 		fmt.Printf("Agent %q %s.\n", result.Agent.Name, state)
 		fmt.Printf("  workspace: %s\n", result.Agent.Workspace)
-		fmt.Printf("  engine:    %s (%s)\n", result.Agent.Engine, config.Engine.Agent)
+		fmt.Printf("  engine:    %s\n", result.Agent.Engine)
 		fmt.Printf("  store:     %s\n", result.StorePath)
 		if len(result.Jobs) == 0 {
 			fmt.Println("  jobs:      none")

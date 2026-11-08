@@ -281,6 +281,74 @@ func TestCreateAdoptKeepsExistingJobs(t *testing.T) {
 	}
 }
 
+func TestCreateAdoptPreservesDescription(t *testing.T) {
+	_, ws := setup(t)
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    createTestConfig(t, `{"description": "first"}`),
+	}); err != nil {
+		t.Fatalf("Create(first) error: %v", err)
+	}
+
+	result, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    createTestConfig(t, `{}`),
+	})
+	if err != nil {
+		t.Fatalf("Create(second) error: %v", err)
+	}
+	if result.Agent.Description != "first" {
+		t.Errorf("description = %q, want first", result.Agent.Description)
+	}
+}
+
+func TestCreateAdoptPreservesSettings(t *testing.T) {
+	_, ws := setup(t)
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config: createTestConfig(t, `{
+			"memory-export": { "mode": "opencode-export" },
+			"communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["@you"] } },
+			"schedule": { "timezone": "UTC" }
+		}`),
+	}); err != nil {
+		t.Fatalf("Create(first) error: %v", err)
+	}
+
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config: createTestConfig(t, `{
+			"communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["@other"] } },
+			"schedule": { "timezone": "America/Sao_Paulo" }
+		}`),
+	}); err != nil {
+		t.Fatalf("Create(second) error: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	timezone, ok, err := st.Orch().GetSetting("schedule.timezone")
+	if err != nil || !ok || timezone != "UTC" {
+		t.Errorf("schedule.timezone = %q, %v, %v; want UTC", timezone, ok, err)
+	}
+	export, ok, err := st.Orch().GetSetting("memory.export")
+	if err != nil || !ok || !strings.Contains(export, "opencode-export") {
+		t.Errorf("memory.export = %q, %v, %v; want opencode-export", export, ok, err)
+	}
+	users, ok, err := st.CommTG().GetSetting("telegram.allowed_users")
+	if err != nil || !ok || users != `["@you"]` {
+		t.Errorf("allowed users = %q, %v, %v; want [\"@you\"]", users, ok, err)
+	}
+}
+
 func TestCreateDuplicateName(t *testing.T) {
 	_, first := setup(t)
 	second := filepath.Join(t.TempDir(), "other")
