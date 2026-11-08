@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -89,6 +90,70 @@ func TestResolveWorkspacePrecedence(t *testing.T) {
 	}
 	if got != envDir {
 		t.Errorf("ResolveWorkspace(env) = %q, want %q", got, envDir)
+	}
+}
+
+func TestCanonicalResolvesSymlink(t *testing.T) {
+	home := t.TempDir()
+	real := filepath.Join(home, "real")
+	if err := os.MkdirAll(real, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(home, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	got, err := Canonical(link)
+	if err != nil {
+		t.Fatalf("Canonical() error: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatalf("eval target: %v", err)
+	}
+	if got != want {
+		t.Errorf("Canonical() = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalMissingFinalComponent(t *testing.T) {
+	home := t.TempDir()
+	missing := filepath.Join(home, "not-created")
+
+	got, err := Canonical(missing)
+	if err != nil {
+		t.Fatalf("Canonical() error: %v", err)
+	}
+	parent, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("eval parent: %v", err)
+	}
+	want := filepath.Join(parent, "not-created")
+	if got != want {
+		t.Errorf("Canonical() = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalSymlinkToMissingTarget(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "target-not-created")
+	link := filepath.Join(home, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	got, err := Canonical(link)
+	if err != nil {
+		t.Fatalf("Canonical() error: %v", err)
+	}
+	parent, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("eval parent: %v", err)
+	}
+	want := filepath.Join(parent, "target-not-created")
+	if got != want {
+		t.Errorf("Canonical() = %q, want %q", got, want)
 	}
 }
 

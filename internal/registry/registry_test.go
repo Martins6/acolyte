@@ -41,8 +41,12 @@ func TestRegisterAndLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByName() error: %v", err)
 	}
-	if byName.Workspace != agent.Workspace {
-		t.Errorf("workspace = %q, want %q", byName.Workspace, agent.Workspace)
+	wantWorkspace, err := paths.Canonical(agent.Workspace)
+	if err != nil {
+		t.Fatalf("Canonical() error: %v", err)
+	}
+	if byName.Workspace != wantWorkspace {
+		t.Errorf("workspace = %q, want %q", byName.Workspace, wantWorkspace)
 	}
 	if byName.Engine != "opencode" {
 		t.Errorf("engine = %q, want opencode", byName.Engine)
@@ -99,8 +103,31 @@ func TestRegisterNormalizesWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByName() error: %v", err)
 	}
-	if agent.Workspace != absolute {
-		t.Errorf("workspace = %q, want %q", agent.Workspace, absolute)
+	want, err := paths.Canonical(absolute)
+	if err != nil {
+		t.Fatalf("Canonical() error: %v", err)
+	}
+	if agent.Workspace != want {
+		t.Errorf("workspace = %q, want %q", agent.Workspace, want)
+	}
+}
+
+func TestGetByWorkspaceResolvesSymlink(t *testing.T) {
+	r := openTest(t)
+	workspace := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(workspace, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := r.Register(Agent{Name: "valet", Workspace: workspace}); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+	agent, err := r.GetByWorkspace(link)
+	if err != nil {
+		t.Fatalf("GetByWorkspace(link) error: %v", err)
+	}
+	if agent.Name != "valet" {
+		t.Errorf("name = %q, want valet", agent.Name)
 	}
 }
 

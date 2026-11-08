@@ -74,6 +74,50 @@ func ResolveWorkspace(flag string) (string, error) {
 	return Abs(raw)
 }
 
+// Canonical returns an absolute path with symlinks resolved, including when
+// the final component does not exist yet. It is used for workspace identity so
+// two symlinked paths to the same folder cannot be registered separately.
+func Canonical(path string) (string, error) {
+	abs, err := Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return canonicalAbs(abs)
+}
+
+func canonicalAbs(abs string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	if !os.IsNotExist(err) {
+		return "", fmt.Errorf("paths: resolve symlinks for %q: %w", abs, err)
+	}
+
+	// If the final component is a symlink whose target does not exist yet,
+	// resolve the link itself rather than treating it as a normal basename.
+	if info, statErr := os.Lstat(abs); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		target, readErr := os.Readlink(abs)
+		if readErr != nil {
+			return "", fmt.Errorf("paths: read symlink %q: %w", abs, readErr)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(abs), target)
+		}
+		return canonicalAbs(filepath.Clean(target))
+	}
+
+	parent := filepath.Dir(abs)
+	if parent == abs {
+		return "", fmt.Errorf("paths: cannot resolve %q", abs)
+	}
+	resolvedParent, err := canonicalAbs(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolvedParent, filepath.Base(abs)), nil
+}
+
 // Abs expands a leading ~ and returns a clean absolute path.
 func Abs(path string) (string, error) {
 	path = strings.TrimSpace(path)

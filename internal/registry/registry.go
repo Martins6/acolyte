@@ -207,12 +207,12 @@ func (r *Registry) GetByWorkspace(workspace string) (Agent, error) {
 	if strings.TrimSpace(workspace) == "" {
 		return Agent{}, ErrNotFound
 	}
-	abs, err := filepath.Abs(workspace)
+	canonical, err := paths.Canonical(workspace)
 	if err != nil {
 		return Agent{}, fmt.Errorf("registry: resolve workspace %q: %w", workspace, err)
 	}
 	return r.get(`SELECT name, workspace, description, engine, enabled, registered_at, last_seen_at
-		FROM agents WHERE workspace = ?`, filepath.Clean(abs))
+		FROM agents WHERE workspace = ?`, canonical)
 }
 
 func (r *Registry) get(query string, arg string) (Agent, error) {
@@ -312,11 +312,11 @@ func (r *Registry) Delete(ref string) (Agent, error) {
 func normalize(agent Agent) (Agent, error) {
 	agent.Name = strings.TrimSpace(agent.Name)
 	if strings.TrimSpace(agent.Workspace) != "" {
-		abs, err := filepath.Abs(agent.Workspace)
+		canonical, err := paths.Canonical(agent.Workspace)
 		if err != nil {
 			return Agent{}, fmt.Errorf("registry: resolve workspace %q: %w", agent.Workspace, err)
 		}
-		agent.Workspace = filepath.Clean(abs)
+		agent.Workspace = canonical
 	} else {
 		agent.Workspace = ""
 	}
