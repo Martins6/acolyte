@@ -18,6 +18,7 @@ import (
 	"github.com/martins6/acolyte/internal/store/commtg"
 	"github.com/martins6/acolyte/internal/store/orch"
 	sqlite3 "github.com/mattn/go-sqlite3"
+	"golang.org/x/sys/unix"
 )
 
 // ErrNoStore means the workspace has no per-agent database yet.
@@ -37,14 +38,12 @@ type Store struct {
 // Open opens (and creates/migrates) <workspace>/.acolyte.sqlite.db. The
 // workspace directory must already exist.
 func Open(workspace string) (*Store, error) {
-	if _, err := os.Stat(workspace); err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("store: workspace %s does not exist", workspace)
-		}
-		return nil, fmt.Errorf("store: stat workspace %s: %w", workspace, err)
+	path, pin, before, err := openPinnedDB(workspace, true)
+	if err != nil {
+		return nil, err
 	}
+	defer pin.Close()
 
-	path := paths.WorkspaceDB(workspace)
 	release, err := claim(path)
 	if err != nil {
 		return nil, err
@@ -56,10 +55,6 @@ func Open(workspace string) (*Store, error) {
 		}
 	}()
 
-	before, err := ensureFile(path)
-	if err != nil {
-		return nil, err
-	}
 	if err := checkSidecars(path); err != nil {
 		return nil, err
 	}
@@ -70,10 +65,6 @@ func Open(workspace string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	if err := prepare(db, path); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := verifyFile(path, before); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -93,7 +84,12 @@ func Open(workspace string) (*Store, error) {
 // OpenReadOnly opens an existing database without creating or migrating it.
 // It returns ErrNoStore when the file does not exist.
 func OpenReadOnly(workspace string) (*Store, error) {
-	path := paths.WorkspaceDB(workspace)
+	path, pin, before, err := openPinnedDB(workspace, false)
+	if err != nil {
+		return nil, err
+	}
+	defer pin.Close()
+
 	release, err := claim(path)
 	if err != nil {
 		return nil, err
@@ -105,13 +101,6 @@ func OpenReadOnly(workspace string) (*Store, error) {
 		}
 	}()
 
-	before, err := inspectFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrNoStore
-		}
-		return nil, err
-	}
 	if err := checkSidecars(path); err != nil {
 		return nil, err
 	}
@@ -123,12 +112,67 @@ func OpenReadOnly(workspace string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if err := verifyFile(path, before); err != nil {
-		db.Close()
-		return nil, err
-	}
 	success = true
 	return &Store{db: db, path: path, readOnly: true}, nil
+}
+
+// openPinnedDB opens the workspace directory with O_NOFOLLOW, opens the
+// database relative to that directory fd, and returns the pinned file info.
+// SQLite later opens the same pathname; VerifyConn compares SQLite's actual
+// descriptor with this pinned inode.
+func openPinnedDB(workspace string, write bool) (string, *os.File, os.FileInfo, error) {
+	info, err := os.Lstat(workspace)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, nil, fmt.Errorf("store: workspace %s does not exist", workspace)
+		}
+		return "", nil, nil, fmt.Errorf("store: stat workspace %s: %w", workspace, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", nil, nil, fmt.Errorf("store: refusing symlinked workspace %s", workspace)
+	}
+	if !info.IsDir() {
+		return "", nil, nil, fmt.Errorf("store: workspace %s is not a directory", workspace)
+	}
+
+	dirFD, err := unix.Open(workspace, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("store: open workspace %s: %w", workspace, err)
+	}
+	defer unix.Close(dirFD)
+
+	const name = ".acolyte.sqlite.db"
+	var stat unix.Stat_t
+	if err := unix.Fstatat(dirFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+		switch stat.Mode & unix.S_IFMT {
+		case unix.S_IFLNK:
+			return "", nil, nil, fmt.Errorf("store: refusing symlink %s", paths.WorkspaceDB(workspace))
+		case unix.S_IFREG:
+		default:
+			return "", nil, nil, fmt.Errorf("store: %s is not a regular file", paths.WorkspaceDB(workspace))
+		}
+	} else if !errors.Is(err, unix.ENOENT) {
+		return "", nil, nil, fmt.Errorf("store: stat database: %w", err)
+	}
+
+	flags := unix.O_RDONLY
+	if write {
+		flags = unix.O_RDWR | unix.O_CREAT
+	}
+	dbFD, err := unix.Openat(dirFD, name, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	if err != nil {
+		if !write && errors.Is(err, unix.ENOENT) {
+			return "", nil, nil, ErrNoStore
+		}
+		return "", nil, nil, fmt.Errorf("store: open database: %w", err)
+	}
+	pin := os.NewFile(uintptr(dbFD), name)
+	pinInfo, err := pin.Stat()
+	if err != nil {
+		pin.Close()
+		return "", nil, nil, fmt.Errorf("store: stat database: %w", err)
+	}
+	return paths.WorkspaceDB(workspace), pin, pinInfo, nil
 }
 
 func claim(path string) (func(), error) {
@@ -201,45 +245,6 @@ func prepareReadOnly(db *sql.DB, path string) error {
 	return nil
 }
 
-func ensureFile(path string) (os.FileInfo, error) {
-	if info, err := os.Lstat(path); err == nil {
-		if err := regularFile(path, info); err != nil {
-			return nil, err
-		}
-		return info, nil
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("store: stat %s: %w", path, err)
-	}
-
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("store: create %s: %w", path, err)
-	}
-	info, statErr := file.Stat()
-	closeErr := file.Close()
-	if statErr != nil {
-		return nil, fmt.Errorf("store: stat created %s: %w", path, statErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("store: close created %s: %w", path, closeErr)
-	}
-	return info, nil
-}
-
-func inspectFile(path string) (os.FileInfo, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, os.ErrNotExist
-		}
-		return nil, fmt.Errorf("store: stat %s: %w", path, err)
-	}
-	if err := regularFile(path, info); err != nil {
-		return nil, err
-	}
-	return info, nil
-}
-
 func regularFile(path string, info os.FileInfo) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("store: refusing symlink %s", path)
@@ -248,21 +253,6 @@ func regularFile(path string, info os.FileInfo) error {
 		return fmt.Errorf("store: %s is not a regular file", path)
 	}
 	return nil
-}
-
-// verifyFile catches a path swap between the Lstat and SQLite opening the file.
-func verifyFile(path string, before os.FileInfo) error {
-	after, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("store: stat %s after open: %w", path, err)
-	}
-	if err := regularFile(path, after); err != nil {
-		return err
-	}
-	if !os.SameFile(before, after) {
-		return fmt.Errorf("store: %s changed while opening", path)
-	}
-	return checkSidecars(path)
 }
 
 // checkSidecars rejects symlinked WAL/SHM files that SQLite would otherwise

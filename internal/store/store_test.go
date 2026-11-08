@@ -92,6 +92,20 @@ func TestOpenIdempotent(t *testing.T) {
 	defer second.Close()
 }
 
+func TestOpenRejectsSymlinkedWorkspace(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := Open(link); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Open(symlinked workspace) error = %v, want symlink error", err)
+	}
+	if _, err := OpenReadOnly(link); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("OpenReadOnly(symlinked workspace) error = %v, want symlink error", err)
+	}
+}
+
 func TestOpenRejectsSymlink(t *testing.T) {
 	ws := t.TempDir()
 	target := filepath.Join(t.TempDir(), "outside.db")
