@@ -168,6 +168,48 @@ func TestScaffoldMergesExistingGitignore(t *testing.T) {
 	}
 }
 
+func TestScaffoldGitignoreFilePatternsNotSatisfiedByDirectories(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(ws, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".gitignore"), []byte(".env/\n.acolyte.sqlite.db/\n.logs\n"), 0644); err != nil {
+		t.Fatalf("write gitignore: %v", err)
+	}
+
+	if err := ScaffoldAgent(ws, AgentOptions{Name: "valet"}); err != nil {
+		t.Fatalf("ScaffoldAgent() error: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(ws, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read gitignore: %v", err)
+	}
+	text := string(raw)
+	if !hasExactLine(text, ".env") {
+		t.Error("directory-only .env/ did not receive a file .env rule")
+	}
+	if !hasExactLine(text, ".acolyte.sqlite.db") {
+		t.Error("directory-only .acolyte.sqlite.db/ did not receive a file rule")
+	}
+	if countExactLine(text, ".logs") != 1 {
+		t.Errorf(".logs line count = %d, want 1", countExactLine(text, ".logs"))
+	}
+}
+
+func hasExactLine(text, want string) bool {
+	return countExactLine(text, want) > 0
+}
+
+func countExactLine(text, want string) int {
+	count := 0
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == want {
+			count++
+		}
+	}
+	return count
+}
+
 func TestScaffoldRejectsSymlinkedGitignore(t *testing.T) {
 	ws := filepath.Join(t.TempDir(), "agent")
 	if err := os.MkdirAll(ws, 0755); err != nil {

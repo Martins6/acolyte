@@ -103,18 +103,10 @@ func ensureGitignore(workspace string) error {
 	if err != nil {
 		return fmt.Errorf("workspace: read .gitignore: %w", err)
 	}
-	present := make(map[string]bool)
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		present[strings.TrimSuffix(line, "/")] = true
-	}
-
+	lines := strings.Split(string(raw), "\n")
 	var missing []string
 	for _, pattern := range requiredGitignore {
-		if !present[strings.TrimSuffix(pattern, "/")] {
+		if !ignoreRulePresent(lines, pattern) {
 			missing = append(missing, pattern)
 		}
 	}
@@ -142,6 +134,24 @@ func ensureGitignore(workspace string) error {
 		}
 	}
 	return nil
+}
+
+// ignoreRulePresent matches a required rule without conflating a file with a
+// directory-only rule of the same name (for example .env vs .env/).
+func ignoreRulePresent(lines []string, required string) bool {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == required {
+			return true
+		}
+		if strings.HasSuffix(required, "/") && line == strings.TrimSuffix(required, "/") {
+			return true
+		}
+	}
+	return false
 }
 
 func ensureNoLegacyConfig(workspace string) error {
