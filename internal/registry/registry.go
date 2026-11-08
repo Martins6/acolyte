@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,10 @@ func Open(path string) (*Registry, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", path)
+	// busy_timeout is connection-local; set it in the DSN so every pooled
+	// connection gets it, not just the first one.
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "_busy_timeout=5000"}).String()
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("registry: open %s: %w", path, err)
 	}
