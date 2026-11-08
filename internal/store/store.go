@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/martins6/acolyte/internal/fdverify"
 	"github.com/martins6/acolyte/internal/paths"
@@ -21,6 +22,10 @@ import (
 
 // ErrNoStore means the workspace has no per-agent database yet.
 var ErrNoStore = errors.New("store: database not found")
+
+// openStores guarantees one store per database path in this process, which
+// makes the per-connection fd verification unambiguous.
+var openStores sync.Map
 
 // Store is one open per-agent database.
 type Store struct {
@@ -40,6 +45,17 @@ func Open(workspace string) (*Store, error) {
 	}
 
 	path := paths.WorkspaceDB(workspace)
+	release, err := claim(path)
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			release()
+		}
+	}()
+
 	before, err := ensureFile(path)
 	if err != nil {
 		return nil, err
@@ -70,6 +86,7 @@ func Open(workspace string) (*Store, error) {
 		return nil, err
 	}
 
+	success = true
 	return &Store{db: db, path: path}, nil
 }
 
@@ -77,6 +94,17 @@ func Open(workspace string) (*Store, error) {
 // It returns ErrNoStore when the file does not exist.
 func OpenReadOnly(workspace string) (*Store, error) {
 	path := paths.WorkspaceDB(workspace)
+	release, err := claim(path)
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			release()
+		}
+	}()
+
 	before, err := inspectFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -99,7 +127,15 @@ func OpenReadOnly(workspace string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	success = true
 	return &Store{db: db, path: path, readOnly: true}, nil
+}
+
+func claim(path string) (func(), error) {
+	if _, loaded := openStores.LoadOrStore(path, struct{}{}); loaded {
+		return nil, fmt.Errorf("store: %s is already open in this process", path)
+	}
+	return func() { openStores.Delete(path) }, nil
 }
 
 // fileDSN builds a SQLite URI with the connection-local busy timeout applied
@@ -268,5 +304,7 @@ func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	err := s.db.Close()
+	openStores.Delete(s.path)
+	return err
 }

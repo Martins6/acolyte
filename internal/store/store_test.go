@@ -141,8 +141,41 @@ func TestOpenRejectsSymlinkedSidecar(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsDuplicate(t *testing.T) {
+	s, ws := openTest(t)
+	if _, err := Open(ws); err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("Open(duplicate) error = %v, want already-open error", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	reopened, err := Open(ws)
+	if err != nil {
+		t.Fatalf("Open(reopen) error: %v", err)
+	}
+	defer reopened.Close()
+}
+
+func TestOpenReadOnlyRejectsDuplicate(t *testing.T) {
+	s, ws := openTest(t)
+	if _, err := OpenReadOnly(ws); err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("OpenReadOnly(duplicate) error = %v, want already-open error", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	ro, err := OpenReadOnly(ws)
+	if err != nil {
+		t.Fatalf("OpenReadOnly() error: %v", err)
+	}
+	defer ro.Close()
+}
+
 func TestOpenReadOnly(t *testing.T) {
-	_, ws := openTest(t)
+	s, ws := openTest(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
 
 	ro, err := OpenReadOnly(ws)
 	if err != nil {
