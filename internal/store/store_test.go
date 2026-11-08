@@ -185,6 +185,20 @@ func TestOpenReadOnlyRejectsDuplicate(t *testing.T) {
 	defer ro.Close()
 }
 
+func TestOpenRejectsSymlinkedJournal(t *testing.T) {
+	s, ws := openTest(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "outside-journal")
+	if err := os.Symlink(target, filepath.Join(ws, ".acolyte.sqlite.db-journal")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := Open(ws); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Open() error = %v, want journal symlink error", err)
+	}
+}
+
 func TestOpenReadOnly(t *testing.T) {
 	s, ws := openTest(t)
 	if err := s.Close(); err != nil {

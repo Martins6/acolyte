@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -121,25 +122,12 @@ func OpenReadOnly(workspace string) (*Store, error) {
 // SQLite later opens the same pathname; VerifyConn compares SQLite's actual
 // descriptor with this pinned inode.
 func openPinnedDB(workspace string, write bool) (string, *os.File, os.FileInfo, error) {
-	info, err := os.Lstat(workspace)
+	dir, err := openWorkspaceDir(workspace)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil, nil, fmt.Errorf("store: workspace %s does not exist", workspace)
-		}
-		return "", nil, nil, fmt.Errorf("store: stat workspace %s: %w", workspace, err)
+		return "", nil, nil, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", nil, nil, fmt.Errorf("store: refusing symlinked workspace %s", workspace)
-	}
-	if !info.IsDir() {
-		return "", nil, nil, fmt.Errorf("store: workspace %s is not a directory", workspace)
-	}
-
-	dirFD, err := unix.Open(workspace, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("store: open workspace %s: %w", workspace, err)
-	}
-	defer unix.Close(dirFD)
+	defer dir.Close()
+	dirFD := int(dir.Fd())
 
 	const name = ".acolyte.sqlite.db"
 	var stat unix.Stat_t
@@ -255,10 +243,55 @@ func regularFile(path string, info os.FileInfo) error {
 	return nil
 }
 
-// checkSidecars rejects symlinked WAL/SHM files that SQLite would otherwise
-// follow when it creates or opens the sidecars.
+func openWorkspaceDir(workspace string) (*os.File, error) {
+	abs, err := paths.Abs(workspace)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("store: workspace %s does not exist", workspace)
+		}
+		return nil, fmt.Errorf("store: stat workspace %s: %w", workspace, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("store: refusing symlinked workspace %s", workspace)
+	}
+	canonical, err := paths.Canonical(abs)
+	if err != nil {
+		return nil, err
+	}
+
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("store: open root: %w", err)
+	}
+	current := os.NewFile(uintptr(fd), "/")
+	for _, part := range strings.Split(strings.TrimPrefix(canonical, string(filepath.Separator)), string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		next, err := unix.Openat(
+			int(current.Fd()),
+			part,
+			unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+			0,
+		)
+		if err != nil {
+			current.Close()
+			return nil, fmt.Errorf("store: open workspace component %s: %w", part, err)
+		}
+		current.Close()
+		current = os.NewFile(uintptr(next), part)
+	}
+	return current, nil
+}
+
+// checkSidecars rejects symlinked WAL/SHM/journal files that SQLite would
+// otherwise follow when it creates or opens the sidecars.
 func checkSidecars(path string) error {
-	for _, suffix := range []string{"-wal", "-shm"} {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
 		sidecar := path + suffix
 		info, err := os.Lstat(sidecar)
 		if err != nil {
