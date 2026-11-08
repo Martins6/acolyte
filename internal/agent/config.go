@@ -56,8 +56,12 @@ type ScheduleConfig struct {
 // ParseConfig decodes and validates a --config JSON object. Unknown keys are
 // rejected so typos do not silently bake the wrong capabilities.
 func ParseConfig(raw string) (Config, error) {
-	if strings.TrimSpace(raw) == "" {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		raw = "{}"
+	}
+	if !strings.HasPrefix(raw, "{") {
+		return Config{}, fmt.Errorf("config: top-level value must be a JSON object")
 	}
 
 	decoder := json.NewDecoder(strings.NewReader(raw))

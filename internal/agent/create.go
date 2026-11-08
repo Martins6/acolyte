@@ -222,11 +222,39 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		})
 	}
 
-	if cfg.Schedule.Timezone != "" {
-		if err := setSettingIfMissing(st.Orch(), "schedule.timezone", cfg.Schedule.Timezone); err != nil {
-			return nil, err
+	dream, dreamExists, err := existingJob(st.Orch(), "dream")
+	if err != nil {
+		return nil, err
+	}
+	heartbeat, heartbeatExists, err := existingJob(st.Orch(), "heartbeat")
+	if err != nil {
+		return nil, err
+	}
+
+	// Derive the shared timezone from preserved jobs, not from the new
+	// config, so an existing job and its setting cannot contradict each other.
+	timezones := map[string]bool{}
+	if dreamExists && dream.Timezone != "" {
+		timezones[dream.Timezone] = true
+	}
+	if heartbeatExists && heartbeat.Timezone != "" {
+		timezones[heartbeat.Timezone] = true
+	}
+	switch len(timezones) {
+	case 0:
+		if cfg.Schedule.Timezone != "" {
+			if err := setSettingIfMissing(st.Orch(), "schedule.timezone", cfg.Schedule.Timezone); err != nil {
+				return nil, err
+			}
+		}
+	case 1:
+		for timezone := range timezones {
+			if err := setSettingIfMissing(st.Orch(), "schedule.timezone", timezone); err != nil {
+				return nil, err
+			}
 		}
 	}
+
 	for key, memory := range map[string]*MemoryConfig{
 		"memory.load":   cfg.MemoryLoad,
 		"memory.access": cfg.MemoryAccess,
@@ -234,6 +262,11 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		"memory.export": cfg.MemoryExport,
 	} {
 		if memory == nil {
+			continue
+		}
+		// The dream job is the source of truth for simple-dreaming; do not
+		// seed a setting that contradicts a preserved job.
+		if key == "memory.learn" && dreamExists {
 			continue
 		}
 		if err := setSettingIfMissing(st.Orch(), key, mustJSON(memory)); err != nil {
@@ -263,6 +296,17 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		results = append(results, JobResult{Title: job.Title, Spec: job.Spec, Inserted: inserted})
 	}
 	return results, nil
+}
+
+func existingJob(store *orch.Store, title string) (orch.CronJob, bool, error) {
+	job, err := store.GetCronJobByTitle(title)
+	if errors.Is(err, orch.ErrJobNotFound) {
+		return orch.CronJob{}, false, nil
+	}
+	if err != nil {
+		return orch.CronJob{}, false, err
+	}
+	return job, true, nil
 }
 
 func setSettingIfMissing(store *orch.Store, key, value string) error {

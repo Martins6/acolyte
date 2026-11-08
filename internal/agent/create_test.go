@@ -418,6 +418,61 @@ func TestCreateCanonicalizesWorkspace(t *testing.T) {
 	}
 }
 
+func TestCreateAdoptPreservesExistingJobSettings(t *testing.T) {
+	_, ws := setup(t)
+	first := createTestConfig(t, `{
+		"memory-learn": { "mode": "simple-dreaming", "args": { "days": 5 } },
+		"schedule": { "timezone": "America/Sao_Paulo", "heartbeat_minutes": 30 }
+	}`)
+	if _, err := Create(context.Background(), CreateOptions{Name: "valet", Workspace: ws, Config: first}); err != nil {
+		t.Fatalf("Create(first) error: %v", err)
+	}
+
+	// Simulate an older/adopted workspace whose job exists but whose settings
+	// were never written.
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.DB().Exec(`DELETE FROM orch_settings`); err != nil {
+		t.Fatalf("delete settings: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	second := createTestConfig(t, `{
+		"memory-learn": { "mode": "simple-dreaming", "args": { "days": 3 } },
+		"schedule": { "timezone": "UTC", "heartbeat_minutes": 60 }
+	}`)
+	result, err := Create(context.Background(), CreateOptions{Name: "valet", Workspace: ws, Config: second})
+	if err != nil {
+		t.Fatalf("Create(second) error: %v", err)
+	}
+	for _, job := range result.Jobs {
+		if job.Inserted {
+			t.Errorf("job %s was inserted again on adopt", job.Title)
+		}
+	}
+
+	st, err = store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	timezone, ok, err := st.Orch().GetSetting("schedule.timezone")
+	if err != nil || !ok {
+		t.Fatalf("schedule.timezone = %q, %v, %v", timezone, ok, err)
+	}
+	if timezone != "America/Sao_Paulo" {
+		t.Errorf("schedule.timezone = %q, want the existing job timezone", timezone)
+	}
+	if _, ok, err := st.Orch().GetSetting("memory.learn"); err != nil || ok {
+		t.Errorf("memory.learn = ok:%v err:%v, want absent (job is the source of truth)", ok, err)
+	}
+}
+
 func TestCreateDuplicateName(t *testing.T) {
 	_, first := setup(t)
 	second := filepath.Join(t.TempDir(), "other")

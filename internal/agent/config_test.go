@@ -60,6 +60,14 @@ func TestParseConfigFull(t *testing.T) {
 	}
 }
 
+func TestParseConfigRejectsNonObject(t *testing.T) {
+	for _, raw := range []string{`null`, `[]`, `"config"`, `3`} {
+		if _, err := ParseConfig(raw); err == nil || !strings.Contains(err.Error(), "JSON object") {
+			t.Errorf("ParseConfig(%s) error = %v, want JSON object error", raw, err)
+		}
+	}
+}
+
 func TestParseConfigUnknownField(t *testing.T) {
 	if _, err := ParseConfig(`{"typo": true}`); err == nil {
 		t.Fatal("ParseConfig(unknown field) error = nil, want error")
