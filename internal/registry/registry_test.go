@@ -131,6 +131,33 @@ func TestGetByWorkspaceResolvesSymlink(t *testing.T) {
 	}
 }
 
+func TestRegisterAdoptsExistingIdentity(t *testing.T) {
+	r := openTest(t)
+	agent := testAgent(t, "valet")
+	if err := r.Register(agent); err != nil {
+		t.Fatalf("Register(first) error: %v", err)
+	}
+
+	agent.Description = "updated"
+	if err := r.Register(agent); err != nil {
+		t.Fatalf("Register(adopt) error: %v", err)
+	}
+	got, err := r.GetByName("valet")
+	if err != nil {
+		t.Fatalf("GetByName() error: %v", err)
+	}
+	if got.Description != "updated" {
+		t.Errorf("description = %q, want updated", got.Description)
+	}
+	agents, err := r.List()
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Errorf("agents = %d, want 1", len(agents))
+	}
+}
+
 func TestDuplicateName(t *testing.T) {
 	r := openTest(t)
 	first := testAgent(t, "valet")

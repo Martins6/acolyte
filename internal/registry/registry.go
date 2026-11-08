@@ -148,6 +148,14 @@ func (r *Registry) Register(agent Agent) error {
 	}
 	agent.LastSeenAt = now
 
+	// Re-registering the exact same identity adopts it: refresh metadata
+	// instead of failing on the unique constraint.
+	if err := r.adoptExisting(agent); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+
 	_, err = r.db.Exec(
 		`INSERT INTO agents (name, workspace, description, engine, enabled, registered_at, last_seen_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -158,9 +166,41 @@ func (r *Registry) Register(agent Agent) error {
 		return nil
 	}
 	if isUnique(err) {
+		// Another process may have inserted the same identity between the
+		// pre-check and the insert; adopt it if it is an exact match.
+		if adoptErr := r.adoptExisting(agent); adoptErr == nil {
+			return nil
+		} else if !errors.Is(adoptErr, ErrNotFound) {
+			return adoptErr
+		}
 		return r.uniqueConflict(agent.Name, agent.Workspace)
 	}
 	return fmt.Errorf("registry: register %q: %w", agent.Name, err)
+}
+
+func (r *Registry) adoptExisting(agent Agent) error {
+	existing, err := r.GetByName(agent.Name)
+	if err == nil {
+		if existing.Workspace != agent.Workspace {
+			return ErrNameTaken
+		}
+		return r.Update(agent)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+
+	existing, err = r.GetByWorkspace(agent.Workspace)
+	if err == nil {
+		if existing.Name != agent.Name {
+			return ErrWorkspaceTaken
+		}
+		return r.Update(agent)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return ErrNotFound
 }
 
 // Update refreshes mutable fields for an existing agent, looked up by name.
