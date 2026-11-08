@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/store/commtg"
@@ -44,7 +45,7 @@ func Open(workspace string) (*Store, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite3", fileDSN(path, ""))
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
@@ -83,7 +84,7 @@ func OpenReadOnly(workspace string) (*Store, error) {
 		return nil, err
 	}
 
-	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
+	dsn := fileDSN(path, "mode=ro")
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open read-only %s: %w", path, err)
@@ -97,6 +98,23 @@ func OpenReadOnly(workspace string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db, path: path, readOnly: true}, nil
+}
+
+// fileDSN builds a SQLite URI with the connection-local busy timeout applied
+// to every pooled connection.
+func fileDSN(path, extra string) string {
+	values := url.Values{}
+	values.Set("_busy_timeout", "5000")
+	for _, pair := range strings.Split(extra, "&") {
+		if pair == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(pair, "=")
+		if ok {
+			values.Set(key, value)
+		}
+	}
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: values.Encode()}).String()
 }
 
 func prepare(db *sql.DB, path string) error {
