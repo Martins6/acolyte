@@ -66,6 +66,81 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 			return err
 		}
 	}
+	if err := ensureGitignore(workspace); err != nil {
+		return err
+	}
+	return nil
+}
+
+var requiredGitignore = []string{
+	".env",
+	".acolyte.sqlite.db",
+	".acolyte.sqlite.db-shm",
+	".acolyte.sqlite.db-wal",
+	".logs/",
+	"downloads/",
+}
+
+// ensureGitignore merges the agent-state patterns into an existing .gitignore
+// instead of replacing the user's file.
+func ensureGitignore(workspace string) error {
+	path := filepath.Join(workspace, ".gitignore")
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return writeIfMissing(workspace, ".gitignore", agentGitignore)
+	}
+	if err != nil {
+		return fmt.Errorf("workspace: stat .gitignore: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("workspace: refusing symlinked .gitignore")
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("workspace: .gitignore is not a regular file")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("workspace: read .gitignore: %w", err)
+	}
+	present := make(map[string]bool)
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		present[strings.TrimSuffix(line, "/")] = true
+	}
+
+	var missing []string
+	for _, pattern := range requiredGitignore {
+		if !present[strings.TrimSuffix(pattern, "/")] {
+			missing = append(missing, pattern)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("workspace: open .gitignore: %w", err)
+	}
+	defer file.Close()
+
+	if len(raw) > 0 && !strings.HasSuffix(string(raw), "\n") {
+		if _, err := file.WriteString("\n"); err != nil {
+			return fmt.Errorf("workspace: append .gitignore: %w", err)
+		}
+	}
+	if _, err := file.WriteString("\n# Acolyte agent state\n"); err != nil {
+		return fmt.Errorf("workspace: append .gitignore: %w", err)
+	}
+	for _, pattern := range missing {
+		if _, err := file.WriteString(pattern + "\n"); err != nil {
+			return fmt.Errorf("workspace: append .gitignore: %w", err)
+		}
+	}
 	return nil
 }
 

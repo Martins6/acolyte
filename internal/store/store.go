@@ -36,7 +36,11 @@ func Open(workspace string) (*Store, error) {
 	}
 
 	path := paths.WorkspaceDB(workspace)
-	if err := ensureFile(path); err != nil {
+	before, err := ensureFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSidecars(path); err != nil {
 		return nil, err
 	}
 
@@ -45,6 +49,10 @@ func Open(workspace string) (*Store, error) {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
 	if err := prepare(db, path); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := verifyFile(path, before); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -64,11 +72,15 @@ func Open(workspace string) (*Store, error) {
 // It returns ErrNoStore when the file does not exist.
 func OpenReadOnly(workspace string) (*Store, error) {
 	path := paths.WorkspaceDB(workspace)
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
+	before, err := inspectFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNoStore
 		}
-		return nil, fmt.Errorf("store: stat %s: %w", path, err)
+		return nil, err
+	}
+	if err := checkSidecars(path); err != nil {
+		return nil, err
 	}
 
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
@@ -77,6 +89,10 @@ func OpenReadOnly(workspace string) (*Store, error) {
 		return nil, fmt.Errorf("store: open read-only %s: %w", path, err)
 	}
 	if err := prepareReadOnly(db, path); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := verifyFile(path, before); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -103,17 +119,87 @@ func prepareReadOnly(db *sql.DB, path string) error {
 	return nil
 }
 
-func ensureFile(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
+func ensureFile(path string) (os.FileInfo, error) {
+	if info, err := os.Lstat(path); err == nil {
+		if err := regularFile(path, info); err != nil {
+			return nil, err
+		}
+		return info, nil
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("store: stat %s: %w", path, err)
+		return nil, fmt.Errorf("store: stat %s: %w", path, err)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
-		return fmt.Errorf("store: create %s: %w", path, err)
+		return nil, fmt.Errorf("store: create %s: %w", path, err)
 	}
-	return file.Close()
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return nil, fmt.Errorf("store: stat created %s: %w", path, statErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("store: close created %s: %w", path, closeErr)
+	}
+	return info, nil
+}
+
+func inspectFile(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, os.ErrNotExist
+		}
+		return nil, fmt.Errorf("store: stat %s: %w", path, err)
+	}
+	if err := regularFile(path, info); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+func regularFile(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("store: refusing symlink %s", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("store: %s is not a regular file", path)
+	}
+	return nil
+}
+
+// verifyFile catches a path swap between the Lstat and SQLite opening the file.
+func verifyFile(path string, before os.FileInfo) error {
+	after, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("store: stat %s after open: %w", path, err)
+	}
+	if err := regularFile(path, after); err != nil {
+		return err
+	}
+	if !os.SameFile(before, after) {
+		return fmt.Errorf("store: %s changed while opening", path)
+	}
+	return checkSidecars(path)
+}
+
+// checkSidecars rejects symlinked WAL/SHM files that SQLite would otherwise
+// follow when it creates or opens the sidecars.
+func checkSidecars(path string) error {
+	for _, suffix := range []string{"-wal", "-shm"} {
+		sidecar := path + suffix
+		info, err := os.Lstat(sidecar)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("store: stat %s: %w", sidecar, err)
+		}
+		if err := regularFile(sidecar, info); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DB returns the underlying database handle.

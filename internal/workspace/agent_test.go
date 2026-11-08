@@ -129,6 +129,64 @@ func TestScaffoldIdempotentAndNonDestructive(t *testing.T) {
 	}
 }
 
+func TestScaffoldMergesExistingGitignore(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(ws, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".gitignore"), []byte("node_modules\n"), 0644); err != nil {
+		t.Fatalf("write gitignore: %v", err)
+	}
+
+	if err := ScaffoldAgent(ws, AgentOptions{Name: "valet"}); err != nil {
+		t.Fatalf("ScaffoldAgent() error: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(ws, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read gitignore: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "node_modules") {
+		t.Error("existing gitignore content was removed")
+	}
+	for _, pattern := range requiredGitignore {
+		if !strings.Contains(text, pattern) {
+			t.Errorf("gitignore missing %q", pattern)
+		}
+	}
+
+	// Idempotent: a second scaffold must not duplicate the patterns.
+	if err := ScaffoldAgent(ws, AgentOptions{Name: "valet"}); err != nil {
+		t.Fatalf("ScaffoldAgent(second) error: %v", err)
+	}
+	raw, err = os.ReadFile(filepath.Join(ws, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read gitignore: %v", err)
+	}
+	if count := strings.Count(string(raw), ".acolyte.sqlite.db\n"); count != 1 {
+		t.Errorf("db pattern appears %d times, want 1", count)
+	}
+}
+
+func TestScaffoldRejectsSymlinkedGitignore(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(ws, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "gitignore")
+	if err := os.WriteFile(target, []byte("node_modules\n"), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(ws, ".gitignore")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	err := ScaffoldAgent(ws, AgentOptions{Name: "valet"})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ScaffoldAgent() error = %v, want symlink error", err)
+	}
+}
+
 func TestScaffoldRejectsLegacyConfig(t *testing.T) {
 	ws := filepath.Join(t.TempDir(), "agent")
 	if err := os.MkdirAll(ws, 0755); err != nil {

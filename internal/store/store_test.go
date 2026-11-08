@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,55 @@ func TestOpenIdempotent(t *testing.T) {
 		t.Fatalf("Open(second) error: %v", err)
 	}
 	defer second.Close()
+}
+
+func TestOpenRejectsSymlink(t *testing.T) {
+	ws := t.TempDir()
+	target := filepath.Join(t.TempDir(), "outside.db")
+	if err := os.Symlink(target, filepath.Join(ws, ".acolyte.sqlite.db")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := Open(ws); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Open() error = %v, want symlink error", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("target was created: %v", err)
+	}
+}
+
+func TestOpenReadOnlyRejectsSymlink(t *testing.T) {
+	ws := t.TempDir()
+	target := filepath.Join(t.TempDir(), "outside.db")
+	if err := os.Symlink(target, filepath.Join(ws, ".acolyte.sqlite.db")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := OpenReadOnly(ws); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("OpenReadOnly() error = %v, want symlink error", err)
+	}
+}
+
+func TestOpenRejectsNonRegular(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.Mkdir(filepath.Join(ws, ".acolyte.sqlite.db"), 0755); err != nil {
+		t.Fatalf("mkdir db path: %v", err)
+	}
+	if _, err := Open(ws); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("Open() error = %v, want non-regular error", err)
+	}
+}
+
+func TestOpenRejectsSymlinkedSidecar(t *testing.T) {
+	s, ws := openTest(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "outside-wal")
+	if err := os.Symlink(target, filepath.Join(ws, ".acolyte.sqlite.db-wal")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := Open(ws); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Open() error = %v, want sidecar symlink error", err)
+	}
 }
 
 func TestOpenReadOnly(t *testing.T) {
