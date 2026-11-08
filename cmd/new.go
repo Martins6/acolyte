@@ -2,51 +2,85 @@ package cmd
 
 import (
 	"fmt"
-	"os"
+	"strings"
 
-	"github.com/martins6/acolyte/internal/config"
-	"github.com/martins6/acolyte/internal/workspace"
+	"github.com/martins6/acolyte/internal/agent"
 	"github.com/spf13/cobra"
+)
+
+var (
+	newName            string
+	newWorkspaceFolder string
+	newConfigJSON      string
 )
 
 var newCmd = &cobra.Command{
 	Use:   "new",
-	Short: "Initialize new workspace from template",
-	Long: `Creates a new workspace directory with all required template files.
+	Short: "Scaffold, validate, and register an agent",
+	Long: `Create a new agent workspace or adopt an existing one.
 
-This will create:
-- AGENTS.md (agent definitions)
-- SOUL.md (system operator behavior)
-- USER.md (user information)
-- IDENTITY.md (model identity)
-- BOOTSTRAP.md (first-time setup)
-- TOOLS.md (tool definitions)
-- downloads/ directory structure`,
+The workspace is an OpenCode project plus an Acolyte overlay. The chosen
+capabilities are baked as concrete artifacts (opencode.jsonc, persona files,
+cron jobs) and the agent is registered in $ACOLYTE_HOME/registry.sqlite.db.
+
+Example:
+  acolyte new --name valet --workspace-folder ~/agents/valet --config '{
+    "description": "Personal assistant",
+    "engine": { "model": "minimax-coding-plan/MiniMax-M3", "agent": "build" },
+    "memory-learn": { "mode": "simple-dreaming", "args": { "days": 3 } },
+    "communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["@you"] } },
+    "schedule": { "timezone": "America/Sao_Paulo", "heartbeat_minutes": 60 }
+  }'`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := ""
-		if len(args) > 0 {
-			path = args[0]
-		} else {
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("failed to get home directory: %w", err)
+		if strings.TrimSpace(newName) == "" {
+			return fmt.Errorf("--name is required")
+		}
+		if strings.TrimSpace(newWorkspaceFolder) == "" {
+			return fmt.Errorf("--workspace-folder is required")
+		}
+
+		config, err := agent.ParseConfig(newConfigJSON)
+		if err != nil {
+			return err
+		}
+
+		result, err := agent.Create(cmd.Context(), agent.CreateOptions{
+			Name:      newName,
+			Workspace: newWorkspaceFolder,
+			Config:    config,
+		})
+		if err != nil {
+			return err
+		}
+
+		state := "registered"
+		if result.Adopted {
+			state = "adopted"
+		}
+		fmt.Printf("Agent %q %s.\n", result.Agent.Name, state)
+		fmt.Printf("  workspace: %s\n", result.Agent.Workspace)
+		fmt.Printf("  engine:    %s\n", result.Agent.Engine)
+		fmt.Printf("  store:     %s\n", result.StorePath)
+		if len(result.Jobs) == 0 {
+			fmt.Println("  jobs:      none")
+		}
+		for _, job := range result.Jobs {
+			jobState := "created"
+			if !job.Inserted {
+				jobState = "existing (capability updates deferred)"
 			}
-			path = homeDir + "/.acolyte"
+			fmt.Printf("  job:       %s %s [%s]\n", job.Title, job.Spec, jobState)
 		}
-
-		if err := workspace.CreateTemplate(path); err != nil {
-			return fmt.Errorf("failed to create workspace: %w", err)
-		}
-
-		if _, err := config.Load(""); err != nil {
-			return fmt.Errorf("failed to create config: %w", err)
-		}
-
-		fmt.Printf("Workspace created at: %s\n", path)
 		return nil
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(newCmd)
+	newCmd.Flags().StringVar(&newName, "name", "", "unique agent name (required)")
+	newCmd.Flags().StringVar(&newWorkspaceFolder, "workspace-folder", "", "agent workspace folder (required)")
+	newCmd.Flags().StringVar(&newConfigJSON, "config", "{}", "capability selector JSON")
+	_ = newCmd.MarkFlagRequired("name")
+	_ = newCmd.MarkFlagRequired("workspace-folder")
 }
