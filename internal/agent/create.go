@@ -183,6 +183,10 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 	if err != nil {
 		return nil, err
 	}
+	existingLearn, err := memoryLearnSetting(st.Orch())
+	if err != nil {
+		return nil, err
+	}
 
 	// Derive the shared timezone from preserved jobs, not from the new
 	// config, so an existing job and its setting cannot contradict each other.
@@ -208,9 +212,14 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 
 	// Build and validate every schedule before persisting capability settings,
 	// so a bad spec can never leave half-applied state.
+	learnConfig := cfg.MemoryLearn
+	if existingLearn != nil {
+		learnConfig = existingLearn
+	}
+
 	var jobs []orch.CronJob
-	if cfg.MemoryLearn != nil {
-		days, err := cfg.Days()
+	if learnConfig != nil {
+		days, err := daysArg(learnConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -300,6 +309,21 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		results = append(results, JobResult{Title: job.Title, Spec: job.Spec, Inserted: inserted})
 	}
 	return results, nil
+}
+
+func memoryLearnSetting(store *orch.Store) (*MemoryConfig, error) {
+	raw, ok, err := store.GetSetting("memory.learn")
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return nil, err
+	}
+	var memory MemoryConfig
+	if err := json.Unmarshal([]byte(raw), &memory); err != nil {
+		return nil, fmt.Errorf("agent: parse memory.learn setting: %w", err)
+	}
+	if err := validateMemoryLearn(&memory); err != nil {
+		return nil, err
+	}
+	return &memory, nil
 }
 
 func existingJob(store *orch.Store, title string) (orch.CronJob, bool, error) {

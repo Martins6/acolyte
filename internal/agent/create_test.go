@@ -555,6 +555,56 @@ func TestCreateAdoptUsesExistingTimezoneSetting(t *testing.T) {
 	}
 }
 
+func TestCreateAdoptUsesExistingMemoryLearnSetting(t *testing.T) {
+	_, ws := setup(t)
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    createTestConfig(t, `{"memory-learn": {"args": {"days": 3}}, "schedule": {"timezone": "UTC"}}`),
+	}); err != nil {
+		t.Fatalf("Create(first) error: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.DB().Exec(`DELETE FROM orch_cron_jobs WHERE title = 'dream'`); err != nil {
+		t.Fatalf("delete dream job: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    createTestConfig(t, `{"memory-learn": {"args": {"days": 5}}, "schedule": {"timezone": "UTC"}}`),
+	}); err != nil {
+		t.Fatalf("Create(second) error: %v", err)
+	}
+
+	st, err = store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("dream")
+	if err != nil {
+		t.Fatalf("get dream: %v", err)
+	}
+	if job.Spec != "@every 72h" {
+		t.Errorf("dream spec = %q, want the existing setting's 72h", job.Spec)
+	}
+	var args map[string]int
+	if err := json.Unmarshal([]byte(job.RoutineArgs), &args); err != nil {
+		t.Fatalf("unmarshal args: %v", err)
+	}
+	if args["days"] != 3 {
+		t.Errorf("dream days = %d, want the existing setting's 3", args["days"])
+	}
+}
+
 func TestCreateDuplicateName(t *testing.T) {
 	_, first := setup(t)
 	second := filepath.Join(t.TempDir(), "other")
