@@ -114,6 +114,20 @@ func TestParseConfigDaysInvalid(t *testing.T) {
 	}
 }
 
+func TestParseConfigDaysTooLarge(t *testing.T) {
+	raw := `{"memory-learn":{"args":{"days":4611686018427387905}},"schedule":{"timezone":"UTC"}}`
+	if _, err := ParseConfig(raw); err == nil || !strings.Contains(err.Error(), "must be <=") {
+		t.Fatalf("ParseConfig(too many days) error = %v, want bound error", err)
+	}
+}
+
+func TestParseConfigDaysMaxAccepted(t *testing.T) {
+	raw := `{"memory-learn":{"args":{"days":36500}},"schedule":{"timezone":"UTC"}}`
+	if _, err := ParseConfig(raw); err != nil {
+		t.Fatalf("ParseConfig(max days) error: %v", err)
+	}
+}
+
 func TestParseConfigNullMemory(t *testing.T) {
 	cfg, err := ParseConfig(`{"memory-learn":null}`)
 	if err != nil {

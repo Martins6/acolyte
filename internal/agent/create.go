@@ -164,6 +164,53 @@ func saveIdentity(reg *registry.Registry, existing registry.Agent, adopted bool,
 }
 
 func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, error) {
+	// Build and validate every schedule before persisting capability settings,
+	// so a bad spec can never leave half-applied state.
+	var jobs []orch.CronJob
+	if cfg.MemoryLearn != nil {
+		days, err := cfg.Days()
+		if err != nil {
+			return nil, err
+		}
+		spec := fmt.Sprintf("@every %dh", days*24)
+		next, err := nextRun(spec, cfg.Schedule.Timezone)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, orch.CronJob{
+			Title:       "dream",
+			Owner:       "memory-learn",
+			Kind:        "routine",
+			Spec:        spec,
+			Routine:     "dream",
+			RoutineArgs: mustJSON(map[string]int{"days": days}),
+			AgentTarget: name,
+			Timezone:    cfg.Schedule.Timezone,
+			Enabled:     true,
+			NextRunAt:   next,
+		})
+	}
+
+	if cfg.Schedule.HeartbeatMinutes > 0 {
+		spec := fmt.Sprintf("@every %dm", cfg.Schedule.HeartbeatMinutes)
+		next, err := nextRun(spec, cfg.Schedule.Timezone)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, orch.CronJob{
+			Title:       "heartbeat",
+			Owner:       "heartbeat",
+			Kind:        "routine",
+			Spec:        spec,
+			Routine:     "heartbeat",
+			RoutineArgs: mustJSON(map[string]int{"interval": cfg.Schedule.HeartbeatMinutes}),
+			AgentTarget: name,
+			Timezone:    cfg.Schedule.Timezone,
+			Enabled:     true,
+			NextRunAt:   next,
+		})
+	}
+
 	if cfg.Schedule.Timezone != "" {
 		if err := setSettingIfMissing(st.Orch(), "schedule.timezone", cfg.Schedule.Timezone); err != nil {
 			return nil, err
@@ -197,53 +244,7 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 	}
 
 	var results []JobResult
-	if cfg.MemoryLearn != nil {
-		days, err := cfg.Days()
-		if err != nil {
-			return nil, err
-		}
-		spec := fmt.Sprintf("@every %dh", days*24)
-		next, err := nextRun(spec, cfg.Schedule.Timezone)
-		if err != nil {
-			return nil, err
-		}
-		job := orch.CronJob{
-			Title:       "dream",
-			Owner:       "memory-learn",
-			Kind:        "routine",
-			Spec:        spec,
-			Routine:     "dream",
-			RoutineArgs: mustJSON(map[string]int{"days": days}),
-			AgentTarget: name,
-			Timezone:    cfg.Schedule.Timezone,
-			Enabled:     true,
-			NextRunAt:   next,
-		}
-		inserted, err := st.Orch().AddCronJobIfMissing(job)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, JobResult{Title: job.Title, Spec: job.Spec, Inserted: inserted})
-	}
-
-	if cfg.Schedule.HeartbeatMinutes > 0 {
-		spec := fmt.Sprintf("@every %dm", cfg.Schedule.HeartbeatMinutes)
-		next, err := nextRun(spec, cfg.Schedule.Timezone)
-		if err != nil {
-			return nil, err
-		}
-		job := orch.CronJob{
-			Title:       "heartbeat",
-			Owner:       "heartbeat",
-			Kind:        "routine",
-			Spec:        spec,
-			Routine:     "heartbeat",
-			RoutineArgs: mustJSON(map[string]int{"interval": cfg.Schedule.HeartbeatMinutes}),
-			AgentTarget: name,
-			Timezone:    cfg.Schedule.Timezone,
-			Enabled:     true,
-			NextRunAt:   next,
-		}
+	for _, job := range jobs {
 		inserted, err := st.Orch().AddCronJobIfMissing(job)
 		if err != nil {
 			return nil, err

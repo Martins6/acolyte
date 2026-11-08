@@ -201,6 +201,10 @@ func (c Config) Days() (int, error) {
 	return daysArg(c.MemoryLearn)
 }
 
+// maxDreamDays keeps @every <days*24>h inside time.Duration and is a sane
+// upper bound for a lookback/interval window (100 years).
+const maxDreamDays = 36500
+
 func daysArg(memory *MemoryConfig) (int, error) {
 	if memory == nil || len(memory.Args) == 0 {
 		return 3, nil
@@ -217,6 +221,9 @@ func daysArg(memory *MemoryConfig) (int, error) {
 	}
 	if value <= 0 {
 		return 0, fmt.Errorf("config: memory-learn.days must be > 0")
+	}
+	if value > maxDreamDays {
+		return 0, fmt.Errorf("config: memory-learn.days must be <= %d", maxDreamDays)
 	}
 	return value, nil
 }
