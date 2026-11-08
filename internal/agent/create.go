@@ -57,13 +57,17 @@ func Create(ctx context.Context, opts CreateOptions) (*CreateResult, error) {
 		return nil, err
 	}
 
-	ws, err := paths.Abs(opts.Workspace)
+	ws, err := paths.Canonical(opts.Workspace)
 	if err != nil {
 		return nil, fmt.Errorf("agent: resolve workspace: %w", err)
 	}
 	home, err := paths.Home()
 	if err != nil {
 		return nil, err
+	}
+	home, err = paths.Canonical(home)
+	if err != nil {
+		return nil, fmt.Errorf("agent: resolve ACOLYTE_HOME: %w", err)
 	}
 	if ws == home {
 		return nil, fmt.Errorf("agent: workspace must not be ACOLYTE_HOME (%s); choose a separate agent folder", home)

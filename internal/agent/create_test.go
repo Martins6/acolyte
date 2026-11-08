@@ -52,7 +52,11 @@ func TestCreateFresh(t *testing.T) {
 	if result.Adopted {
 		t.Error("Adopted = true, want false")
 	}
-	if result.Agent.Name != "valet" || result.Agent.Workspace != ws {
+	wantWorkspace, err := paths.Canonical(ws)
+	if err != nil {
+		t.Fatalf("Canonical(workspace) error: %v", err)
+	}
+	if result.Agent.Name != "valet" || result.Agent.Workspace != wantWorkspace {
 		t.Errorf("agent = %+v", result.Agent)
 	}
 	if result.Agent.Description != "Personal assistant" {
@@ -346,6 +350,71 @@ func TestCreateAdoptPreservesSettings(t *testing.T) {
 	users, ok, err := st.CommTG().GetSetting("telegram.allowed_users")
 	if err != nil || !ok || users != `["@you"]` {
 		t.Errorf("allowed users = %q, %v, %v; want [\"@you\"]", users, ok, err)
+	}
+}
+
+func TestCreateRejectsSymlinkedHome(t *testing.T) {
+	home, _ := setup(t)
+	link := filepath.Join(t.TempDir(), "home-link")
+	if err := os.Symlink(home, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: link,
+		Config:    createTestConfig(t, `{}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "ACOLYTE_HOME") {
+		t.Fatalf("Create(symlinked home) error = %v, want ACOLYTE_HOME error", err)
+	}
+}
+
+func TestCreateRejectsSymlinkedWorkspaceAlias(t *testing.T) {
+	_, ws := setup(t)
+	cfg := createTestConfig(t, `{}`)
+	if _, err := Create(context.Background(), CreateOptions{Name: "one", Workspace: ws, Config: cfg}); err != nil {
+		t.Fatalf("Create(one) error: %v", err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(ws, alias); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := Create(context.Background(), CreateOptions{Name: "two", Workspace: alias, Config: cfg})
+	if err == nil || !strings.Contains(err.Error(), "already registered as") {
+		t.Fatalf("Create(symlink alias) error = %v, want duplicate workspace error", err)
+	}
+}
+
+func TestCreateCanonicalizesWorkspace(t *testing.T) {
+	setup(t)
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	result, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: alias,
+		Config:    createTestConfig(t, `{}`),
+	})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+	want, err := paths.Canonical(target)
+	if err != nil {
+		t.Fatalf("Canonical() error: %v", err)
+	}
+	if result.Agent.Workspace != want {
+		t.Errorf("workspace = %q, want %q", result.Agent.Workspace, want)
+	}
+	if _, err := os.Stat(filepath.Join(target, "AGENTS.md")); err != nil {
+		t.Errorf("target was not scaffolded: %v", err)
 	}
 }
 

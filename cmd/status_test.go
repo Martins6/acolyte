@@ -77,10 +77,14 @@ func TestRunStatusDetail(t *testing.T) {
 	if err := runStatus(&out, "valet"); err != nil {
 		t.Fatalf("runStatus() error: %v", err)
 	}
+	wantWorkspace, err := paths.Canonical(ws)
+	if err != nil {
+		t.Fatalf("Canonical(workspace) error: %v", err)
+	}
 	text := out.String()
 	for _, want := range []string{
 		"Name:        valet",
-		"Workspace:   " + ws,
+		"Workspace:   " + wantWorkspace,
 		"Description: Personal assistant",
 		"Jobs:        2",
 		"dream",
