@@ -170,7 +170,7 @@ func (c verifyingConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := fdverify.VerifyOpen(c.path, c.before); err != nil {
+	if err := fdverify.VerifyConn(conn, c.path, c.before); err != nil {
 		conn.Close()
 		return nil, err
 	}
