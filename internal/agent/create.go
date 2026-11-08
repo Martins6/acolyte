@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/martins6/acolyte/internal/lock"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
@@ -72,6 +73,12 @@ func Create(ctx context.Context, opts CreateOptions) (*CreateResult, error) {
 	if ws == home {
 		return nil, fmt.Errorf("agent: workspace must not be ACOLYTE_HOME (%s); choose a separate agent folder", home)
 	}
+
+	held, err := lock.Acquire(ws)
+	if err != nil {
+		return nil, err
+	}
+	defer held.Release()
 
 	reg, err := registry.OpenDefault()
 	if err != nil {
