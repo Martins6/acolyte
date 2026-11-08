@@ -1,0 +1,212 @@
+package orch
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// ErrJobNotFound means no cron job matches the title.
+var ErrJobNotFound = errors.New("orch: cron job not found")
+
+// CronJob is one row of orch_cron_jobs.
+type CronJob struct {
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Owner       string     `json:"owner"`
+	Kind        string     `json:"kind"`
+	Spec        string     `json:"spec"`
+	Prompt      string     `json:"prompt"`
+	ShellPath   string     `json:"shell_path"`
+	Routine     string     `json:"routine"`
+	RoutineArgs string     `json:"routine_args"`
+	AgentTarget string     `json:"agent_target"`
+	SessionID   string     `json:"session_id"`
+	Timezone    string     `json:"timezone"`
+	Enabled     bool       `json:"enabled"`
+	LastRunAt   *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt   *time.Time `json:"next_run_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	Meta        string     `json:"meta"`
+}
+
+// Stats is the summary used by `acolyte status`.
+type Stats struct {
+	JobCount     int        `json:"job_count"`
+	NextJobAt    *time.Time `json:"next_job_at,omitempty"`
+	LastActiveAt *time.Time `json:"last_active_at,omitempty"`
+}
+
+// Store gives access to the orchestrator tables.
+type Store struct {
+	db *sql.DB
+}
+
+// New returns an orchestrator store on an open database.
+func New(db *sql.DB) *Store { return &Store{db: db} }
+
+const cronColumns = `id, title, owner, kind, spec, prompt, shell_path, routine,
+	routine_args, agent_target, session_id, timezone, enabled, last_run_at,
+	next_run_at, created_at, meta`
+
+// AddCronJobIfMissing inserts a job unless its title already exists. It
+// returns false when a job with the same title is already present.
+func (s *Store) AddCronJobIfMissing(job CronJob) (bool, error) {
+	job.Title = strings.TrimSpace(job.Title)
+	job.Kind = strings.TrimSpace(job.Kind)
+	job.Spec = strings.TrimSpace(job.Spec)
+	if job.Title == "" {
+		return false, fmt.Errorf("orch: cron job title is required")
+	}
+	if job.Kind == "" {
+		return false, fmt.Errorf("orch: cron job kind is required")
+	}
+	if job.Spec == "" {
+		return false, fmt.Errorf("orch: cron job spec is required")
+	}
+	if job.ID == "" {
+		job.ID = newID()
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
+	}
+
+	result, err := s.db.Exec(
+		`INSERT INTO orch_cron_jobs (`+cronColumns+`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(title) DO NOTHING`,
+		job.ID, job.Title, job.Owner, job.Kind, job.Spec, job.Prompt, job.ShellPath,
+		job.Routine, defaultString(job.RoutineArgs, "{}"), job.AgentTarget, job.SessionID,
+		job.Timezone, boolInt(job.Enabled), job.LastRunAt, job.NextRunAt, job.CreatedAt,
+		defaultString(job.Meta, "{}"),
+	)
+	if err != nil {
+		return false, fmt.Errorf("orch: add cron job %q: %w", job.Title, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: add cron job %q: %w", job.Title, err)
+	}
+	return affected > 0, nil
+}
+
+// GetCronJobByTitle returns one job by title.
+func (s *Store) GetCronJobByTitle(title string) (CronJob, error) {
+	row := s.db.QueryRow(`SELECT `+cronColumns+` FROM orch_cron_jobs WHERE title = ?`, strings.TrimSpace(title))
+	job, err := scanJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CronJob{}, ErrJobNotFound
+	}
+	if err != nil {
+		return CronJob{}, fmt.Errorf("orch: get cron job %q: %w", title, err)
+	}
+	return job, nil
+}
+
+// ListCronJobs returns every job ordered by title.
+func (s *Store) ListCronJobs() ([]CronJob, error) {
+	rows, err := s.db.Query(`SELECT ` + cronColumns + ` FROM orch_cron_jobs ORDER BY title`)
+	if err != nil {
+		return nil, fmt.Errorf("orch: list cron jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []CronJob
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("orch: scan cron job: %w", err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("orch: list cron jobs: %w", err)
+	}
+	return jobs, nil
+}
+
+// Stats returns the job count, next enabled job, and latest session activity.
+func (s *Store) Stats() (Stats, error) {
+	var stats Stats
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM orch_cron_jobs WHERE enabled = 1`).Scan(&stats.JobCount); err != nil {
+		return Stats{}, fmt.Errorf("orch: count cron jobs: %w", err)
+	}
+
+	var next sql.NullTime
+	err := s.db.QueryRow(`SELECT next_run_at FROM orch_cron_jobs
+		WHERE enabled = 1 AND next_run_at IS NOT NULL
+		ORDER BY next_run_at ASC LIMIT 1`).Scan(&next)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Stats{}, fmt.Errorf("orch: read next job: %w", err)
+	}
+	if next.Valid {
+		value := next.Time
+		stats.NextJobAt = &value
+	}
+
+	var last sql.NullTime
+	err = s.db.QueryRow(`SELECT last_active_at FROM orch_sessions
+		ORDER BY last_active_at DESC LIMIT 1`).Scan(&last)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Stats{}, fmt.Errorf("orch: read last activity: %w", err)
+	}
+	if last.Valid {
+		value := last.Time
+		stats.LastActiveAt = &value
+	}
+	return stats, nil
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanJob(row scanner) (CronJob, error) {
+	var job CronJob
+	var enabled int
+	var last, next sql.NullTime
+	if err := row.Scan(
+		&job.ID, &job.Title, &job.Owner, &job.Kind, &job.Spec, &job.Prompt,
+		&job.ShellPath, &job.Routine, &job.RoutineArgs, &job.AgentTarget,
+		&job.SessionID, &job.Timezone, &enabled, &last, &next, &job.CreatedAt,
+		&job.Meta,
+	); err != nil {
+		return CronJob{}, err
+	}
+	job.Enabled = enabled != 0
+	if last.Valid {
+		value := last.Time
+		job.LastRunAt = &value
+	}
+	if next.Valid {
+		value := next.Time
+		job.NextRunAt = &value
+	}
+	return job, nil
+}
+
+func newID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("job-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func defaultString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
