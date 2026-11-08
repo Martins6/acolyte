@@ -208,6 +208,27 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
+func TestUpdateRequiresExactIdentity(t *testing.T) {
+	r := openTest(t)
+	agent := testAgent(t, "valet")
+	if err := r.Register(agent); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+
+	agent.Workspace = t.TempDir()
+	agent.Description = "replacement"
+	if err := r.Update(agent); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Update(different workspace) error = %v, want ErrNotFound", err)
+	}
+	got, err := r.GetByName("valet")
+	if err != nil {
+		t.Fatalf("GetByName() error: %v", err)
+	}
+	if got.Description == "replacement" {
+		t.Error("Update mutated an agent with a different workspace")
+	}
+}
+
 func TestResolve(t *testing.T) {
 	r := openTest(t)
 	agent := testAgent(t, "valet")

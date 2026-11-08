@@ -203,7 +203,8 @@ func (r *Registry) adoptExisting(agent Agent) error {
 	return ErrNotFound
 }
 
-// Update refreshes mutable fields for an existing agent, looked up by name.
+// Update refreshes mutable fields for an existing agent, looked up by the full
+// name + workspace identity so a concurrent replacement cannot be mutated.
 func (r *Registry) Update(agent Agent) error {
 	normalized, err := normalize(agent)
 	if err != nil {
@@ -213,6 +214,9 @@ func (r *Registry) Update(agent Agent) error {
 	if agent.Name == "" {
 		return fmt.Errorf("registry: agent name is required")
 	}
+	if agent.Workspace == "" {
+		return fmt.Errorf("registry: agent workspace is required")
+	}
 	if agent.Engine == "" {
 		agent.Engine = "opencode"
 	}
@@ -220,8 +224,9 @@ func (r *Registry) Update(agent Agent) error {
 
 	result, err := r.db.Exec(
 		`UPDATE agents SET description = ?, engine = ?, enabled = ?, last_seen_at = ?
-		 WHERE name = ?`,
-		agent.Description, agent.Engine, boolInt(agent.Enabled), now, agent.Name,
+		 WHERE name = ? AND workspace = ?`,
+		agent.Description, agent.Engine, boolInt(agent.Enabled), now,
+		agent.Name, agent.Workspace,
 	)
 	if err != nil {
 		return fmt.Errorf("registry: update %q: %w", agent.Name, err)
