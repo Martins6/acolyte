@@ -187,6 +187,11 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 	// Derive the shared timezone from preserved jobs, not from the new
 	// config, so an existing job and its setting cannot contradict each other.
 	timezones := map[string]bool{}
+	if setting, ok, err := st.Orch().GetSetting("schedule.timezone"); err != nil {
+		return nil, err
+	} else if ok && strings.TrimSpace(setting) != "" {
+		timezones[setting] = true
+	}
 	if dreamExists && dream.Timezone != "" {
 		timezones[dream.Timezone] = true
 	}
@@ -194,7 +199,7 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		timezones[heartbeat.Timezone] = true
 	}
 	if len(timezones) > 1 {
-		return nil, fmt.Errorf("agent: existing jobs use conflicting timezones")
+		return nil, fmt.Errorf("agent: existing jobs/settings use conflicting timezones")
 	}
 	effectiveTimezone := cfg.Schedule.Timezone
 	for timezone := range timezones {

@@ -515,6 +515,46 @@ func TestCreateAdoptUsesPreservedTimezoneForNewJob(t *testing.T) {
 	}
 }
 
+func TestCreateAdoptUsesExistingTimezoneSetting(t *testing.T) {
+	_, ws := setup(t)
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    createTestConfig(t, `{"schedule": {"timezone": "UTC"}}`),
+	}); err != nil {
+		t.Fatalf("Create(first) error: %v", err)
+	}
+
+	result, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    createTestConfig(t, `{"schedule": {"timezone": "America/Sao_Paulo", "heartbeat_minutes": 60}}`),
+	})
+	if err != nil {
+		t.Fatalf("Create(second) error: %v", err)
+	}
+	if len(result.Jobs) != 1 || result.Jobs[0].Title != "heartbeat" || !result.Jobs[0].Inserted {
+		t.Fatalf("jobs = %+v, want inserted heartbeat", result.Jobs)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("heartbeat")
+	if err != nil {
+		t.Fatalf("get heartbeat: %v", err)
+	}
+	if job.Timezone != "UTC" {
+		t.Errorf("heartbeat timezone = %q, want the existing setting UTC", job.Timezone)
+	}
+	setting, ok, err := st.Orch().GetSetting("schedule.timezone")
+	if err != nil || !ok || setting != "UTC" {
+		t.Errorf("schedule.timezone = %q, %v, %v; want UTC", setting, ok, err)
+	}
+}
+
 func TestCreateDuplicateName(t *testing.T) {
 	_, first := setup(t)
 	second := filepath.Join(t.TempDir(), "other")
