@@ -64,6 +64,23 @@ func TestRunStatusList(t *testing.T) {
 	}
 }
 
+func TestRunStatusListUnavailable(t *testing.T) {
+	setupAgentHome(t)
+	ws := filepath.Join(t.TempDir(), "valet")
+	createTestAgent(t, "valet", ws, `{}`)
+	if err := os.Remove(filepath.Join(ws, ".acolyte.sqlite.db")); err != nil {
+		t.Fatalf("remove store: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runStatus(&out, ""); err != nil {
+		t.Fatalf("runStatus() error: %v", err)
+	}
+	if !strings.Contains(out.String(), "unavailable") {
+		t.Errorf("output does not report unavailable stats:\n%s", out.String())
+	}
+}
+
 func TestRunStatusDetail(t *testing.T) {
 	setupAgentHome(t)
 	ws := filepath.Join(t.TempDir(), "valet")

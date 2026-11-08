@@ -67,15 +67,23 @@ func runStatus(w io.Writer, ref string) error {
 	}
 
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "NAME\tWORKSPACE\tJOBS\tNEXT JOB\tLAST ACTIVE\tDESCRIPTION")
+	fmt.Fprintln(table, "NAME\tWORKSPACE\tJOBS\tNEXT JOB\tLAST ACTIVE\tSTATUS\tDESCRIPTION")
 	for _, agent := range agents {
-		stats := readStats(agent.Workspace)
-		fmt.Fprintf(table, "%s\t%s\t%d\t%s\t%s\t%s\n",
+		stats, err := readStats(agent.Workspace)
+		jobs := "—"
+		status := "ok"
+		if err != nil {
+			status = "unavailable"
+		} else {
+			jobs = fmt.Sprintf("%d", stats.JobCount)
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			agent.Name,
 			agent.Workspace,
-			stats.JobCount,
+			jobs,
 			formatTime(stats.NextJobAt),
 			formatTime(stats.LastActiveAt),
+			status,
 			agent.Description,
 		)
 	}
@@ -91,8 +99,16 @@ func printAgent(w io.Writer, agent registry.Agent) error {
 	fmt.Fprintf(w, "Registered:  %s\n", formatTimeValue(agent.RegisteredAt))
 	fmt.Fprintf(w, "Last seen:   %s\n", formatTimeValue(agent.LastSeenAt))
 
-	stats := readStats(agent.Workspace)
-	fmt.Fprintf(w, "Last active: %s\n", formatTime(stats.LastActiveAt))
+	stats, statsErr := readStats(agent.Workspace)
+	if statsErr != nil {
+		if errors.Is(statsErr, store.ErrNoStore) {
+			fmt.Fprintln(w, "Last active: —")
+		} else {
+			fmt.Fprintf(w, "Last active: unavailable (%v)\n", statsErr)
+		}
+	} else {
+		fmt.Fprintf(w, "Last active: %s\n", formatTime(stats.LastActiveAt))
+	}
 
 	st, err := store.OpenReadOnly(agent.Workspace)
 	if err != nil {
@@ -137,18 +153,13 @@ func openExistingRegistry() (*registry.Registry, error) {
 	return registry.Open(path)
 }
 
-func readStats(workspace string) orch.Stats {
+func readStats(workspace string) (orch.Stats, error) {
 	st, err := store.OpenReadOnly(workspace)
 	if err != nil {
-		return orch.Stats{}
+		return orch.Stats{}, err
 	}
 	defer st.Close()
-
-	stats, err := st.Orch().Stats()
-	if err != nil {
-		return orch.Stats{}
-	}
-	return stats
+	return st.Orch().Stats()
 }
 
 func formatTime(value *time.Time) string {
