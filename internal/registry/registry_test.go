@@ -63,6 +63,47 @@ func TestRegisterAndLookup(t *testing.T) {
 	}
 }
 
+func TestRegisterRejectsBlankIdentity(t *testing.T) {
+	r := openTest(t)
+
+	if err := r.Register(Agent{Name: "  ", Workspace: t.TempDir()}); err == nil {
+		t.Error("Register(blank name) error = nil, want error")
+	}
+	if err := r.Register(Agent{Name: "valet", Workspace: "  "}); err == nil {
+		t.Error("Register(blank workspace) error = nil, want error")
+	}
+	if err := r.Update(Agent{Name: "  "}); err == nil {
+		t.Error("Update(blank name) error = nil, want error")
+	}
+	if _, err := r.GetByWorkspace("  "); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByWorkspace(blank) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRegisterNormalizesWorkspace(t *testing.T) {
+	r := openTest(t)
+	absolute := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	relative, err := filepath.Rel(cwd, absolute)
+	if err != nil {
+		t.Fatalf("rel: %v", err)
+	}
+
+	if err := r.Register(Agent{Name: "valet", Workspace: relative}); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+	agent, err := r.GetByName("valet")
+	if err != nil {
+		t.Fatalf("GetByName() error: %v", err)
+	}
+	if agent.Workspace != absolute {
+		t.Errorf("workspace = %q, want %q", agent.Workspace, absolute)
+	}
+}
+
 func TestDuplicateName(t *testing.T) {
 	r := openTest(t)
 	first := testAgent(t, "valet")

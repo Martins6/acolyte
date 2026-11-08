@@ -122,7 +122,17 @@ func (r *Registry) Close() error {
 // Register inserts a new agent. It returns ErrNameTaken or ErrWorkspaceTaken
 // when the identity is already in use.
 func (r *Registry) Register(agent Agent) error {
-	agent = normalize(agent)
+	normalized, err := normalize(agent)
+	if err != nil {
+		return err
+	}
+	agent = normalized
+	if agent.Name == "" {
+		return fmt.Errorf("registry: agent name is required")
+	}
+	if agent.Workspace == "" {
+		return fmt.Errorf("registry: agent workspace is required")
+	}
 	if agent.Engine == "" {
 		agent.Engine = "opencode"
 	}
@@ -134,7 +144,7 @@ func (r *Registry) Register(agent Agent) error {
 	}
 	agent.LastSeenAt = now
 
-	_, err := r.db.Exec(
+	_, err = r.db.Exec(
 		`INSERT INTO agents (name, workspace, description, engine, enabled, registered_at, last_seen_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		agent.Name, agent.Workspace, agent.Description, agent.Engine, boolInt(agent.Enabled),
@@ -151,7 +161,14 @@ func (r *Registry) Register(agent Agent) error {
 
 // Update refreshes mutable fields for an existing agent, looked up by name.
 func (r *Registry) Update(agent Agent) error {
-	agent = normalize(agent)
+	normalized, err := normalize(agent)
+	if err != nil {
+		return err
+	}
+	agent = normalized
+	if agent.Name == "" {
+		return fmt.Errorf("registry: agent name is required")
+	}
 	if agent.Engine == "" {
 		agent.Engine = "opencode"
 	}
@@ -183,6 +200,9 @@ func (r *Registry) GetByName(name string) (Agent, error) {
 
 // GetByWorkspace returns one agent by absolute workspace path.
 func (r *Registry) GetByWorkspace(workspace string) (Agent, error) {
+	if strings.TrimSpace(workspace) == "" {
+		return Agent{}, ErrNotFound
+	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
 		return Agent{}, fmt.Errorf("registry: resolve workspace %q: %w", workspace, err)
@@ -283,16 +303,20 @@ func (r *Registry) Delete(ref string) (Agent, error) {
 	return agent, nil
 }
 
-func normalize(agent Agent) Agent {
+func normalize(agent Agent) (Agent, error) {
 	agent.Name = strings.TrimSpace(agent.Name)
-	if agent.Workspace != "" {
-		if abs, err := filepath.Abs(agent.Workspace); err == nil {
-			agent.Workspace = filepath.Clean(abs)
+	if strings.TrimSpace(agent.Workspace) != "" {
+		abs, err := filepath.Abs(agent.Workspace)
+		if err != nil {
+			return Agent{}, fmt.Errorf("registry: resolve workspace %q: %w", agent.Workspace, err)
 		}
+		agent.Workspace = filepath.Clean(abs)
+	} else {
+		agent.Workspace = ""
 	}
 	agent.Description = strings.TrimSpace(agent.Description)
 	agent.Engine = strings.TrimSpace(agent.Engine)
-	return agent
+	return agent, nil
 }
 
 func boolInt(value bool) int {
