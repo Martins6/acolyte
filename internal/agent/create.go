@@ -175,53 +175,6 @@ func saveIdentity(reg *registry.Registry, existing registry.Agent, adopted bool,
 }
 
 func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, error) {
-	// Build and validate every schedule before persisting capability settings,
-	// so a bad spec can never leave half-applied state.
-	var jobs []orch.CronJob
-	if cfg.MemoryLearn != nil {
-		days, err := cfg.Days()
-		if err != nil {
-			return nil, err
-		}
-		spec := fmt.Sprintf("@every %dh", days*24)
-		next, err := nextRun(spec, cfg.Schedule.Timezone)
-		if err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, orch.CronJob{
-			Title:       "dream",
-			Owner:       "memory-learn",
-			Kind:        "routine",
-			Spec:        spec,
-			Routine:     "dream",
-			RoutineArgs: mustJSON(map[string]int{"days": days}),
-			AgentTarget: name,
-			Timezone:    cfg.Schedule.Timezone,
-			Enabled:     true,
-			NextRunAt:   next,
-		})
-	}
-
-	if cfg.Schedule.HeartbeatMinutes > 0 {
-		spec := fmt.Sprintf("@every %dm", cfg.Schedule.HeartbeatMinutes)
-		next, err := nextRun(spec, cfg.Schedule.Timezone)
-		if err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, orch.CronJob{
-			Title:       "heartbeat",
-			Owner:       "heartbeat",
-			Kind:        "routine",
-			Spec:        spec,
-			Routine:     "heartbeat",
-			RoutineArgs: mustJSON(map[string]int{"interval": cfg.Schedule.HeartbeatMinutes}),
-			AgentTarget: name,
-			Timezone:    cfg.Schedule.Timezone,
-			Enabled:     true,
-			NextRunAt:   next,
-		})
-	}
-
 	dream, dreamExists, err := existingJob(st.Orch(), "dream")
 	if err != nil {
 		return nil, err
@@ -240,18 +193,64 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 	if heartbeatExists && heartbeat.Timezone != "" {
 		timezones[heartbeat.Timezone] = true
 	}
-	switch len(timezones) {
-	case 0:
-		if cfg.Schedule.Timezone != "" {
-			if err := setSettingIfMissing(st.Orch(), "schedule.timezone", cfg.Schedule.Timezone); err != nil {
-				return nil, err
-			}
+	if len(timezones) > 1 {
+		return nil, fmt.Errorf("agent: existing jobs use conflicting timezones")
+	}
+	effectiveTimezone := cfg.Schedule.Timezone
+	for timezone := range timezones {
+		effectiveTimezone = timezone
+	}
+
+	// Build and validate every schedule before persisting capability settings,
+	// so a bad spec can never leave half-applied state.
+	var jobs []orch.CronJob
+	if cfg.MemoryLearn != nil {
+		days, err := cfg.Days()
+		if err != nil {
+			return nil, err
 		}
-	case 1:
-		for timezone := range timezones {
-			if err := setSettingIfMissing(st.Orch(), "schedule.timezone", timezone); err != nil {
-				return nil, err
-			}
+		spec := fmt.Sprintf("@every %dh", days*24)
+		next, err := nextRun(spec, effectiveTimezone)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, orch.CronJob{
+			Title:       "dream",
+			Owner:       "memory-learn",
+			Kind:        "routine",
+			Spec:        spec,
+			Routine:     "dream",
+			RoutineArgs: mustJSON(map[string]int{"days": days}),
+			AgentTarget: name,
+			Timezone:    effectiveTimezone,
+			Enabled:     true,
+			NextRunAt:   next,
+		})
+	}
+
+	if cfg.Schedule.HeartbeatMinutes > 0 {
+		spec := fmt.Sprintf("@every %dm", cfg.Schedule.HeartbeatMinutes)
+		next, err := nextRun(spec, effectiveTimezone)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, orch.CronJob{
+			Title:       "heartbeat",
+			Owner:       "heartbeat",
+			Kind:        "routine",
+			Spec:        spec,
+			Routine:     "heartbeat",
+			RoutineArgs: mustJSON(map[string]int{"interval": cfg.Schedule.HeartbeatMinutes}),
+			AgentTarget: name,
+			Timezone:    effectiveTimezone,
+			Enabled:     true,
+			NextRunAt:   next,
+		})
+	}
+
+	if effectiveTimezone != "" {
+		if err := setSettingIfMissing(st.Orch(), "schedule.timezone", effectiveTimezone); err != nil {
+			return nil, err
 		}
 	}
 

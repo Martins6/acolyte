@@ -473,6 +473,48 @@ func TestCreateAdoptPreservesExistingJobSettings(t *testing.T) {
 	}
 }
 
+func TestCreateAdoptUsesPreservedTimezoneForNewJob(t *testing.T) {
+	_, ws := setup(t)
+	first := createTestConfig(t, `{
+		"memory-learn": { "mode": "simple-dreaming", "args": { "days": 3 } },
+		"schedule": { "timezone": "America/Sao_Paulo" }
+	}`)
+	if _, err := Create(context.Background(), CreateOptions{Name: "valet", Workspace: ws, Config: first}); err != nil {
+		t.Fatalf("Create(first) error: %v", err)
+	}
+
+	second := createTestConfig(t, `{
+		"memory-learn": { "mode": "simple-dreaming", "args": { "days": 3 } },
+		"schedule": { "timezone": "UTC", "heartbeat_minutes": 60 }
+	}`)
+	result, err := Create(context.Background(), CreateOptions{Name: "valet", Workspace: ws, Config: second})
+	if err != nil {
+		t.Fatalf("Create(second) error: %v", err)
+	}
+	inserted := false
+	for _, job := range result.Jobs {
+		if job.Title == "heartbeat" && job.Inserted {
+			inserted = true
+		}
+	}
+	if !inserted {
+		t.Fatalf("heartbeat was not inserted: %+v", result.Jobs)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("heartbeat")
+	if err != nil {
+		t.Fatalf("get heartbeat: %v", err)
+	}
+	if job.Timezone != "America/Sao_Paulo" {
+		t.Errorf("heartbeat timezone = %q, want the preserved job timezone", job.Timezone)
+	}
+}
+
 func TestCreateDuplicateName(t *testing.T) {
 	_, first := setup(t)
 	second := filepath.Join(t.TempDir(), "other")
