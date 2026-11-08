@@ -289,7 +289,9 @@ func (r *Registry) Delete(ref string) (Agent, error) {
 		return Agent{}, err
 	}
 
-	result, err := r.db.Exec(`DELETE FROM agents WHERE name = ?`, agent.Name)
+	// Delete the exact resolved identity, not just the name: another process
+	// could have replaced the name with a different workspace in between.
+	result, err := r.db.Exec(`DELETE FROM agents WHERE name = ? AND workspace = ?`, agent.Name, agent.Workspace)
 	if err != nil {
 		return Agent{}, fmt.Errorf("registry: delete %q: %w", agent.Name, err)
 	}
