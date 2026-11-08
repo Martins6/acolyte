@@ -146,6 +146,77 @@ func TestScaffoldRejectsLegacyConfig(t *testing.T) {
 	}
 }
 
+func TestScaffoldRejectsSymlinkedDirectory(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(ws, 0755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(ws, ".acolyte")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	err := ScaffoldAgent(ws, AgentOptions{Name: "valet"})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ScaffoldAgent() error = %v, want symlink error", err)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatalf("read outside: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("scaffold wrote %d entries outside the workspace", len(entries))
+	}
+}
+
+func TestScaffoldRejectsSymlinkedFile(t *testing.T) {
+	ws := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(filepath.Join(ws, ".acolyte"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "target.md")
+	if err := os.WriteFile(target, []byte("original"), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(ws, ".acolyte", "SOUL.md")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	err := ScaffoldAgent(ws, AgentOptions{Name: "valet"})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ScaffoldAgent() error = %v, want symlink error", err)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(raw) != "original" {
+		t.Errorf("target = %q, want original", raw)
+	}
+}
+
+func TestValidateAgentRejectsSymlinkedFile(t *testing.T) {
+	ws := scaffoldTest(t, AgentOptions{Name: "valet"})
+	if err := os.WriteFile(filepath.Join(ws, ".acolyte.sqlite.db"), nil, 0600); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "agents.md")
+	if err := os.WriteFile(target, []byte("# target\n"), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Remove(filepath.Join(ws, "AGENTS.md")); err != nil {
+		t.Fatalf("remove AGENTS.md: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(ws, "AGENTS.md")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	err := ValidateAgent(ws)
+	if err == nil || !strings.Contains(err.Error(), "symlink not allowed") {
+		t.Fatalf("ValidateAgent() error = %v, want symlink error", err)
+	}
+}
+
 func TestValidateAgent(t *testing.T) {
 	ws := scaffoldTest(t, AgentOptions{Name: "valet"})
 	if err := os.WriteFile(filepath.Join(ws, ".acolyte.sqlite.db"), nil, 0600); err != nil {
