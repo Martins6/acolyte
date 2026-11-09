@@ -295,6 +295,20 @@ func TestPersistRouteMemoryFallback(t *testing.T) {
 	}
 }
 
+func TestHasMemoryRouteForJob(t *testing.T) {
+	service := &Service{}
+	service.addMemoryRoute("/ws/a", orch.CronRoute{ID: "env", ChatID: 10, Text: "x"}, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	if !service.hasMemoryRouteForJob("/ws/a", "job_a") {
+		t.Error("hasMemoryRouteForJob() = false, want true")
+	}
+	if service.hasMemoryRouteForJob("/ws/b", "job_a") {
+		t.Error("hasMemoryRouteForJob(other workspace) = true, want false")
+	}
+	if service.hasMemoryRouteForJob("/ws/a", "job_b") {
+		t.Error("hasMemoryRouteForJob(other job) = true, want false")
+	}
+}
+
 func TestShellJobUsesConfiguredShell(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	dir := t.TempDir()

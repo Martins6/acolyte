@@ -319,6 +319,10 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 	agent := pair.agent
 	key := agent.Name + "/" + job.ID
 
+	if s.hasMemoryRouteForJob(agent.Workspace, job.ID) {
+		return false
+	}
+
 	// Bound dispatched work before claiming: a large due backlog must not
 	// create an unbounded number of blocked goroutines.
 	select {
@@ -661,6 +665,20 @@ func (s *Service) keepMemoryRoute(pending memoryRoute) {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
 	s.memoryRoutes = append(s.memoryRoutes, pending)
+}
+
+func (s *Service) hasMemoryRouteForJob(workspace, jobID string) bool {
+	if jobID == "" {
+		return false
+	}
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	for _, pending := range s.memoryRoutes {
+		if pending.workspace == workspace && pending.jobID == jobID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) restoreRequeuedJob(pair *agentStore, pending memoryRoute) {
