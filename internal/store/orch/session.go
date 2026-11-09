@@ -77,6 +77,23 @@ func (s *Store) LatestSession() (Session, bool, error) {
 	return session, true, nil
 }
 
+// LatestUserSession returns the most recently active non-cron session.
+func (s *Store) LatestUserSession() (Session, bool, error) {
+	var session Session
+	err := s.db.QueryRow(`SELECT `+sessionColumns+` FROM orch_sessions
+		WHERE thread NOT LIKE 'cron:%' AND thread NOT LIKE 'heartbeat:%'
+		ORDER BY last_active_at DESC LIMIT 1`).Scan(
+		&session.ID, &session.Thread, &session.OpenCodeSessionID, &session.CreatedAt, &session.LastActiveAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, false, nil
+	}
+	if err != nil {
+		return Session{}, false, fmt.Errorf("orch: get latest user session: %w", err)
+	}
+	return session, true, nil
+}
+
 // UpsertSession creates or updates the thread mapping and returns it.
 func (s *Store) UpsertSession(thread, opencodeSessionID string, at time.Time) (Session, error) {
 	thread = strings.TrimSpace(thread)

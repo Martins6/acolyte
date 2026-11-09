@@ -419,11 +419,6 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	}
 	text, sessionID, err := s.runJob(ctx, agent, st, job, meta)
 
-	if errors.Is(err, routine.ErrPendingPhase4) {
-		_ = st.Orch().MarkCronJobRun(job.ID, s.now())
-		s.logJob(st, job, "info", fmt.Sprintf("pending Phase 4: %v", err))
-		return
-	}
 	if err != nil {
 		if strings.TrimSpace(text) == "" {
 			text = fmt.Sprintf("cron job %q failed: %v", job.Title, err)

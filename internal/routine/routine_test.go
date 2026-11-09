@@ -3,7 +3,6 @@ package routine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 )
@@ -111,10 +110,6 @@ func TestDefaultBuiltins(t *testing.T) {
 		}
 		if len(value.Args()) == 0 {
 			t.Errorf("%s has no args", name)
-		}
-		_, err := value.Run(context.Background(), Env{}, nil)
-		if !errors.Is(err, ErrPendingPhase4) {
-			t.Errorf("%s Run() error = %v, want ErrPendingPhase4", name, err)
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
@@ -34,12 +35,24 @@ type CatalogEntry struct {
 type Env struct {
 	Agent      registry.Agent
 	Workspace  string
+	Thread     string
 	SessionID  string
+	Meta       map[string]any
+	Now        func() time.Time
 	Store      *store.Store
 	OpenCode   *opencode.Client
 	NotifyUser func(ctx context.Context, text string) error
 	Inbox      func(ctx context.Context, text string, meta map[string]any) (string, string, error)
-	Log        func(level, message string, meta map[string]any)
+	// InboxSession delivers an external event to a specific session.
+	InboxSession func(ctx context.Context, sessionID, text string, meta map[string]any) (string, string, error)
+	Log          func(level, message string, meta map[string]any)
+}
+
+func (e Env) Clock() time.Time {
+	if e.Now == nil {
+		return time.Now().UTC()
+	}
+	return e.Now()
 }
 
 // Routine is one named headless behavior.

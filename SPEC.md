@@ -234,7 +234,9 @@ it produces**, documented in `docs/memory/…`.
   `args.days` days reviews the **last `args.days` days** of sessions and decides whether to distill
   anything into the **persona files** (`.acolyte/*.md`) or a **skill** (`.agents/skills/<id>/SKILL.md`).
   **Conservative:** when in doubt, don't write — only when it's *super extra clear*; and be **super
-  compact** when there are many sessions. Rides the scheduler shown by `acolyte cron list`.
+  compact** when there are many sessions. The run is prompt-guided and uses its own cron session;
+  every run records a `mem_dreams` audit row (sessions scanned, skills created, dry-run, changed
+  paths). `acolyte cron --dry-run` makes the same prompt proposal-only.
 - *Other modes (planned):* `post-session`, `inline` (`acolyte learn` tool), `plugin-hook`,
   `consolidate`. See `docs/memory/memory-learn/simple-dreaming.md`.
 
@@ -364,7 +366,8 @@ CREATE TABLE comm_tg_outbox ( id TEXT PRIMARY KEY, envelope_id TEXT, chat_id INT
 CREATE TABLE comm_tg_media  ( file_path TEXT PRIMARY KEY, tg_file_id TEXT, type TEXT, chat_id INTEGER, saved_at DATETIME );
 
 -- Memory (prefix: mem_)  -- optional; most memory lives in files + OpenCode
-CREATE TABLE mem_dreams ( id TEXT PRIMARY KEY, ran_at DATETIME, sessions_scanned INTEGER, skills_created INTEGER, note TEXT );
+CREATE TABLE mem_dreams ( id TEXT PRIMARY KEY, ran_at DATETIME, sessions_scanned INTEGER,
+  skills_created INTEGER, dry_run INTEGER DEFAULT 0, note TEXT );
 ```
 
 **Table prefixes = module boundaries.** A module's schema doc lives in `docs/<module>/`. New module =
@@ -404,11 +407,12 @@ capability is enabled, or manually via `acolyte cron --routine <name> [--routine
 - Examples: `dream` (owner `memory-learn`, args `{days}`), `heartbeat` (args `{interval}`).
 
 ### 10.3 Heartbeat (the `heartbeat` routine)
-Runs every `schedule.heartbeat_minutes` minutes **in its own session**. It inspects the **latest
-session** + the notes in **`HEARTBEAT.md`** and decides whether to surface anything to the user —
-**erring toward silence** ("didn't find anything particularly interesting… not sending"). Only when
-something is genuinely interesting does it **send it to the user on the latest session** (via
-`acolyte inbox` on the latest session). See `docs/orchestrator/heartbeat.md`.
+Runs every `schedule.heartbeat_minutes` minutes **in its own session**. It reads the latest
+**non-cron** session + the notes in **`HEARTBEAT.md`** and runs a **prompt-guided** check. The default
+prompt instructs the agent to use
+`acolyte inbox --agent-name <agent> --session-id <latest-user-session> "<message>"` only when
+something is genuinely interesting; otherwise it replies exactly `NO_ACTION`. The routine returns
+empty so cron does not double-notify. See `docs/orchestrator/heartbeat.md`.
 
 ### 10.4 Message primitives
 Two ways to move a message (both target an agent/session like the CLI below):
@@ -427,7 +431,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte new --name <name> --workspace-folder <path> --config '<json>'` | **Scaffold + validate + register** a fresh agent with the capabilities chosen in `--config` (full key reference in [`docs/README.md`](docs/README.md)). On an existing folder it validates + adopts. |
 | `acolyte status [name \| workspace]` | All agents, or one: name, workspace, last message, job count + next job. |
 | `acolyte delete <name \| workspace>` | Remove from the registry **only**. Folder untouched. |
-| `acolyte cron --title <t> --datetime <cron> (--prompt <text> \| --shell <path> \| --routine <name>) [--routine-args '<json>'] [--agent-name\|--workspace-folder] [--session-id] [--timezone <IANA>] [--on-success inbox\|notify-user\|log] [--on-failure inbox\|notify-user\|log]` | Create a job. `--title` unique per agent; `--datetime` cron syntax; actions mutually exclusive; agent-name/workspace-folder mutually exclusive. |
+| `acolyte cron --title <t> --datetime <cron> (--prompt <text> \| --shell <path> \| --routine <name>) [--routine-args '<json>'] [--dry-run] [--agent-name\|--workspace-folder] [--session-id] [--timezone <IANA>] [--on-success inbox\|notify-user\|log] [--on-failure inbox\|notify-user\|log]` | Create a job. `--title` unique per agent; `--datetime` cron syntax; actions mutually exclusive; agent-name/workspace-folder mutually exclusive; `--dry-run` only with `--routine`. |
 | `acolyte cron list` | Markdown table of **all** jobs: `title \| datetime \| agent \| owner \| kind \| prompt \| shell \| session` (routine jobs show `routine:<name>`; prompt jobs show `prompt:<text>`). |
 | `acolyte cron view <title>` | Full JSON of one job; target-aware when titles collide across agents. |
 | `acolyte cron routine-list` | JSON catalog of registered routines + their arguments. |
@@ -603,8 +607,14 @@ admit a synthetic event; output is routed via Communication.
 23. **One daemon serves all registered agents** (§1/§14); per-agent isolation and supervision
     hardening is deferred (`FUTURE-IDEAS.md`).
 24. **`acolyte status` uses fan-out reads in v0** (§12); the `agent_status` snapshot cache is deferred.
+25. **Dream writes** are prompt-guided and direct/conservative by default; `dry_run` meta +
+    `acolyte cron --dry-run` make the run proposal-only. Every run records `mem_dreams` with the
+    changed paths (§6.3).
+26. **Heartbeat delivery** is prompt-guided: the default prompt instructs `acolyte inbox` on the
+    latest non-cron session when genuinely interesting; otherwise `NO_ACTION`. The routine returns
+    empty so cron does not double-notify (§10.3).
 
 **[OPEN] forks:**
-1. **Heartbeat delivery** (§10.3): via `inbox` (in-session) vs `notify-user` (user-only)? — currently
-   modeled as `inbox` on the latest session.
+None.
+
 ```
