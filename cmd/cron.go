@@ -35,6 +35,7 @@ var (
 	cronTimezone      string
 	cronOnSuccess     string
 	cronOnFailure     string
+	cronDryRun        bool
 	cronViewAgent     string
 	cronViewWorkspace string
 	cronRmAgent       string
@@ -56,11 +57,13 @@ type cronCreateOptions struct {
 	Timezone    string
 	OnSuccess   string
 	OnFailure   string
+	DryRun      bool
 }
 
 type cronJobMeta struct {
 	OnSuccess string `json:"on_success,omitempty"`
 	OnFailure string `json:"on_failure,omitempty"`
+	DryRun    bool   `json:"dry_run,omitempty"`
 }
 
 var cronCmd = &cobra.Command{
@@ -84,6 +87,7 @@ var cronCmd = &cobra.Command{
 			Timezone:    cronTimezone,
 			OnSuccess:   cronOnSuccess,
 			OnFailure:   cronOnFailure,
+			DryRun:      cronDryRun,
 		})
 	},
 }
@@ -149,6 +153,7 @@ func init() {
 	cronCmd.Flags().StringVar(&cronTimezone, "timezone", "", "IANA timezone (default: agent schedule.timezone)")
 	cronCmd.Flags().StringVar(&cronOnSuccess, "on-success", "", "inbox | notify-user | log")
 	cronCmd.Flags().StringVar(&cronOnFailure, "on-failure", "", "inbox | notify-user | log")
+	cronCmd.Flags().BoolVar(&cronDryRun, "dry-run", false, "routine jobs: propose changes without writing (dream)")
 
 	cronViewCmd.Flags().StringVar(&cronViewAgent, "agent-name", "", "target agent name")
 	cronViewCmd.Flags().StringVar(&cronViewWorkspace, "workspace-folder", "", "target agent workspace")
@@ -174,6 +179,9 @@ func runCronCreate(w io.Writer, opts cronCreateOptions) error {
 	}
 	if actions != 1 {
 		return fmt.Errorf("use exactly one of --prompt, --shell, or --routine")
+	}
+	if opts.DryRun && strings.TrimSpace(opts.Routine) == "" {
+		return fmt.Errorf("--dry-run is only supported with --routine")
 	}
 
 	agent, err := resolveTargetAgent(opts.AgentName, opts.Workspace)
@@ -229,7 +237,7 @@ func runCronCreate(w io.Writer, opts cronCreateOptions) error {
 		Enabled:     true,
 		NextRunAt:   &next,
 	}
-	jobMeta := cronJobMeta{OnSuccess: strings.TrimSpace(opts.OnSuccess), OnFailure: strings.TrimSpace(opts.OnFailure)}
+	jobMeta := cronJobMeta{OnSuccess: strings.TrimSpace(opts.OnSuccess), OnFailure: strings.TrimSpace(opts.OnFailure), DryRun: opts.DryRun}
 
 	switch {
 	case strings.TrimSpace(opts.Prompt) != "":

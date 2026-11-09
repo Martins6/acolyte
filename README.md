@@ -207,6 +207,8 @@ sends back to the user is currently text-only; sender-side media is deferred.
 | `acolyte update`                             | Check & apply updates                          |
 | `acolyte version`                            | Print binary version                           |
 
+> Routine jobs support `acolyte cron --dry-run` (dream proposal-only runs).
+
 > Runtime capability edits are not exposed yet: `acolyte new` preserves existing
 > settings/jobs when adopting an agent. See `FUTURE-IDEAS.md`.
 

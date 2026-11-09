@@ -98,13 +98,14 @@ gitignored and are never scaffolded by `acolyte new`; secrets belong there, neve
 them with an argument schema; `acolyte cron routine-list` dumps the catalog as JSON. Schedule one with
 `acolyte cron --title <t> --datetime <cron> --routine <name> [--routine-args '<json>'] …`.
 
-> Phase 2 registers the `dream`/`heartbeat` catalog and schemas; their actual behavior lands in Phase 4.
-> Firing one logs `pending Phase 4` and advances its schedule.
+> Dream and heartbeat are implemented as prompt-guided routines. Dream writes conservatively by
+> default and supports `acolyte cron --dry-run`; heartbeat surfaces findings via `acolyte inbox` and
+> otherwise stays silent.
 
 | Routine | Owner | Args | What it does | Doc |
 | ------- | ----- | ---- | ------------ | --- |
-| `dream` | `memory-learn` | `days:int` | Every `days` days, review the last `days` days and distill skills/persona (conservative). | [`memory-learn/simple-dreaming.md`](memory/memory-learn/simple-dreaming.md) |
-| `heartbeat` | `heartbeat` | `interval:int` | Every `interval` minutes, inspect the latest session + `HEARTBEAT.md`; err toward silence; surface via `inbox`. | [`heartbeat.md`](orchestrator/heartbeat.md) |
+| `dream` | `memory-learn` | `days:int` | Every `days` days, review the last `days` days and conservatively distill persona/skills (direct write; `--dry-run` for proposals). | [`memory-learn/simple-dreaming.md`](memory/memory-learn/simple-dreaming.md) |
+| `heartbeat` | `heartbeat` | `interval:int` | Every `interval` minutes, review `HEARTBEAT.md` + the latest non-cron session; inbox the user only when something is genuinely interesting. | [`heartbeat.md`](orchestrator/heartbeat.md) |
 
 `acolyte cron routine-list` output shape (per routine):
 

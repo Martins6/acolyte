@@ -7,12 +7,13 @@ cron job) that runs every `schedule.heartbeat_minutes` minutes.
 ## How it works
 1. The `heartbeat` routine (owner `heartbeat`, `kind: routine`) fires every X minutes.
 2. It runs in **its own session** (separate from the user's conversations).
-3. It inspects:
-   - the **latest session** in particular, and
-   - any notes left in the **`HEARTBEAT.md`** persona file.
-4. It decides whether to surface anything — defaulting to **not**.
-5. If (and only if) it finds something genuinely interesting, it **sends it to the user on the latest
-   session** via `acolyte inbox` (§ `SPEC.md` §10.4) — an external event the agent/user see.
+3. It reads the **`HEARTBEAT.md`** persona file and the latest **non-cron** session.
+4. It runs a **prompt-guided turn**. The default prompt instructs the agent:
+   - if something is genuinely interesting, use
+     `acolyte inbox --agent-name <agent> --session-id <latest-user-session> "<message>"`;
+   - otherwise reply exactly `NO_ACTION` and do not notify anyone.
+5. The routine returns empty, so cron does not send a second notification. Delivery is the agent's
+   explicit `acolyte inbox` call.
 
 ## Err on silence
 The heartbeat **always errs on the side of not sending anything**: "didn't find anything particularly
