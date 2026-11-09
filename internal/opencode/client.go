@@ -23,9 +23,23 @@ type ModelRef struct {
 
 // SessionInfo is the public session projection (OpenCode Session.Info).
 type SessionInfo struct {
-	ID    string    `json:"id"`
-	Agent string    `json:"agent"`
-	Model *ModelRef `json:"model"`
+	ID       string          `json:"id"`
+	Agent    string          `json:"agent"`
+	Model    *ModelRef       `json:"model"`
+	Title    string          `json:"title,omitempty"`
+	Time     SessionTime     `json:"time,omitempty"`
+	Location SessionLocation `json:"location,omitempty"`
+}
+
+// SessionTime holds session epoch-millisecond timestamps.
+type SessionTime struct {
+	Created float64 `json:"created"`
+	Updated float64 `json:"updated"`
+}
+
+// SessionLocation is the project directory a session belongs to.
+type SessionLocation struct {
+	Directory string `json:"directory,omitempty"`
 }
 
 // Message is one projected session message (OpenCode Session.Message.Info
@@ -157,6 +171,17 @@ func (c *Client) CreateSession(ctx context.Context, workspace, agent string, mod
 		return nil, err
 	}
 	return &resp.Data, nil
+}
+
+// ListSessions returns every OpenCode session visible to the service.
+func (c *Client) ListSessions(ctx context.Context) ([]SessionInfo, error) {
+	var resp struct {
+		Data []SessionInfo `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/session", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
 }
 
 // GetSession retrieves the session projection (agent, model, ...).

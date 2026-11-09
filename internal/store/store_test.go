@@ -50,22 +50,25 @@ func TestOpenCreatesSchema(t *testing.T) {
 	for _, want := range []string{
 		"schema_meta", "orch_sessions", "orch_cron_jobs", "orch_logs",
 		"orch_settings", "orch_cron_routes", "comm_tg_settings", "comm_tg_chats",
-		"comm_tg_inbox", "comm_tg_outbox", "comm_tg_media",
+		"comm_tg_inbox", "comm_tg_outbox", "comm_tg_media", "mem_dreams",
 	} {
 		if !got[want] {
 			t.Errorf("missing table %q", want)
 		}
 	}
 
-	var orchVersion, commVersion int
+	var orchVersion, commVersion, memVersion int
 	if err := s.DB().QueryRow(`SELECT version FROM schema_meta WHERE module = 'orch'`).Scan(&orchVersion); err != nil {
 		t.Fatalf("read orch version: %v", err)
 	}
 	if err := s.DB().QueryRow(`SELECT version FROM schema_meta WHERE module = 'comm_tg'`).Scan(&commVersion); err != nil {
 		t.Fatalf("read comm_tg version: %v", err)
 	}
-	if orchVersion != 2 || commVersion != 7 {
-		t.Errorf("versions = orch:%d comm_tg:%d, want 2/7", orchVersion, commVersion)
+	if err := s.DB().QueryRow(`SELECT version FROM schema_meta WHERE module = 'mem'`).Scan(&memVersion); err != nil {
+		t.Fatalf("read mem version: %v", err)
+	}
+	if orchVersion != 2 || commVersion != 7 || memVersion != 1 {
+		t.Errorf("versions = orch:%d comm_tg:%d mem:%d, want 2/7/1", orchVersion, commVersion, memVersion)
 	}
 }
 

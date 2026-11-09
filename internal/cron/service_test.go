@@ -310,6 +310,62 @@ func TestHasMemoryRouteForJob(t *testing.T) {
 	}
 }
 
+type envRoutine struct {
+	captured *routine.Env
+}
+
+func (envRoutine) Name() string        { return "capture-env" }
+func (envRoutine) Owner() string       { return "test" }
+func (envRoutine) Description() string { return "capture env" }
+func (envRoutine) Args() []routine.ArgSpec {
+	return nil
+}
+func (r envRoutine) Run(_ context.Context, env routine.Env, _ map[string]any) (string, error) {
+	*r.captured = env
+	return "ok", nil
+}
+
+func TestRoutineEnvPlumbing(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "capture", Kind: "routine", Spec: "@every 1h", Routine: "capture-env",
+		RoutineArgs: `{}`, AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"log","dry_run":true}`,
+	})
+	var captured routine.Env
+	routines := routine.NewRegistry()
+	if err := routines.Register(envRoutine{captured: &captured}); err != nil {
+		t.Fatalf("register routine: %v", err)
+	}
+	service := startTestService(t, reg, routines, &fakeSink{}, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	job, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer job.Close()
+	stored, err := job.Orch().GetCronJobByTitle("capture")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if captured.Thread != "cron:"+stored.ID {
+		t.Errorf("thread = %q, want cron:%s", captured.Thread, stored.ID)
+	}
+	if captured.Meta["dry_run"] != true {
+		t.Errorf("meta = %+v, want dry_run true", captured.Meta)
+	}
+	if captured.Now == nil {
+		t.Error("Now is nil")
+	}
+	if captured.InboxSession == nil {
+		t.Error("InboxSession is nil")
+	}
+}
+
 func TestShellJobUsesConfiguredShell(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	dir := t.TempDir()
