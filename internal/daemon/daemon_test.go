@@ -403,6 +403,63 @@ func TestSendOutboundFallsBackToOutbox(t *testing.T) {
 	}
 }
 
+func TestSendOutboundUsesActiveWorkspace(t *testing.T) {
+	reg, pool, workspaces := setupDaemon(t, "valet")
+	factory := newFakeFactory()
+	svc := startDaemon(t, reg, pool, &fakeTurn{}, factory.make)
+	oldAgent := registry.Agent{Name: "valet", Workspace: workspaces["valet"]}
+
+	newWS := filepath.Join(t.TempDir(), "valet-new")
+	if err := os.MkdirAll(newWS, 0755); err != nil {
+		t.Fatalf("mkdir new workspace: %v", err)
+	}
+	st, err := store.Open(newWS)
+	if err != nil {
+		t.Fatalf("open new store: %v", err)
+	}
+	_ = st.CommTG().SetSetting("channels", `["telegram"]`)
+	_ = st.CommTG().SetSetting("telegram.allowed_users", `["@alice"]`)
+	_ = st.Close()
+	if err := os.WriteFile(filepath.Join(newWS, ".env"), []byte("TELEGRAM_BOT_TOKEN=token-new\n"), 0600); err != nil {
+		t.Fatalf("write new .env: %v", err)
+	}
+	if _, err := reg.Delete("valet"); err != nil {
+		t.Fatalf("delete old agent: %v", err)
+	}
+	if err := reg.Register(registry.Agent{Name: "valet", Workspace: newWS}); err != nil {
+		t.Fatalf("register new workspace: %v", err)
+	}
+	svc.refresh()
+
+	env := envelope.New(envelope.DirectionOut, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Party{Kind: envelope.PartyUser, ID: "10"},
+		envelope.Content{Type: envelope.ContentText, Text: "reply after move"})
+	if err := svc.sendOutbound(context.Background(), oldAgent, env); err != nil {
+		t.Fatalf("sendOutbound() error: %v", err)
+	}
+
+	oldStore, releaseOld, err := pool.Acquire(workspaces["valet"])
+	if err != nil {
+		t.Fatalf("Acquire(old) error: %v", err)
+	}
+	oldOutbox, err := oldStore.CommTG().ListOutbox(10)
+	releaseOld()
+	if err != nil || len(oldOutbox) != 0 {
+		t.Errorf("old outbox = %+v, %v; want none", oldOutbox, err)
+	}
+
+	newStore, releaseNew, err := pool.Acquire(newWS)
+	if err != nil {
+		t.Fatalf("Acquire(new) error: %v", err)
+	}
+	defer releaseNew()
+	newOutbox, err := newStore.CommTG().ListOutbox(10)
+	if err != nil || len(newOutbox) != 1 || newOutbox[0].Text != "reply after move" {
+		t.Errorf("new outbox = %+v, %v; want reply", newOutbox, err)
+	}
+}
+
 func TestDaemonRefreshAddsAndRemovesAgents(t *testing.T) {
 	reg, pool, _ := setupDaemon(t, "one")
 	factory := newFakeFactory()
