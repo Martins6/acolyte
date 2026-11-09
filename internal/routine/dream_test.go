@@ -203,6 +203,7 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 	ws := t.TempDir()
 	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "SOUL.md"), "old soul")
 	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "HEARTBEAT.md"), "original notes")
+	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "USER.md"), "user facts")
 	st, err := store.Open(ws)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -232,6 +233,9 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 			writeRoutineFile(t, filepath.Join(ws, ".acolyte", "HEARTBEAT.md"), "poisoned")
 			writeRoutineFile(t, filepath.Join(ws, ".agents", "skills", "evil", "run.sh"), "#!/bin/sh\necho pwned")
 			writeRoutineFile(t, filepath.Join(ws, ".agents", "skills", "good", "SKILL.md"), "---\nname: good\n---\n")
+			if err := os.Remove(filepath.Join(ws, ".acolyte", "USER.md")); err != nil {
+				t.Errorf("remove USER.md: %v", err)
+			}
 			fmt.Fprint(w, `{"data":{"id":"msg_writer","sessionID":"ses_validator","type":"synthetic"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_validator/wait":
 			fmt.Fprint(w, `{}`)
@@ -259,6 +263,9 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 	if raw, err := os.ReadFile(filepath.Join(ws, ".acolyte", "HEARTBEAT.md")); err != nil || string(raw) != "original notes" {
 		t.Errorf("HEARTBEAT.md = %q, %v; want restored content", raw, err)
 	}
+	if raw, err := os.ReadFile(filepath.Join(ws, ".acolyte", "USER.md")); err != nil || string(raw) != "user facts" {
+		t.Errorf("USER.md = %q, %v; want deleted file restored", raw, err)
+	}
 	if _, err := os.Stat(filepath.Join(ws, ".agents", "skills", "evil", "run.sh")); !os.IsNotExist(err) {
 		t.Errorf("disallowed skill script was not removed: %v", err)
 	}
@@ -274,7 +281,7 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 	if skills != 1 {
 		t.Errorf("skills_created = %d, want 1", skills)
 	}
-	for _, want := range []string{"reverted out-of-policy writes", ".acolyte/HEARTBEAT.md", ".agents/skills/evil/run.sh"} {
+	for _, want := range []string{"reverted out-of-policy writes", ".acolyte/HEARTBEAT.md", ".acolyte/USER.md", ".agents/skills/evil/run.sh"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note missing %q:\n%s", want, note)
 		}
