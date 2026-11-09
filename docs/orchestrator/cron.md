@@ -11,7 +11,7 @@
 | kind | runs the model? | authored by | what runs | output |
 | ---- | --------------- | ----------- | --------- | ------ |
 | `prompt` | yes | user | `--prompt <text>` run through the agent | delivered to the user |
-| `shell`  | no  | user | `--shell <path>` run with **`$SHELL`** (never `sh`) | routed (mail/notify) |
+| `shell`  | no  | user | `--shell <path>` run with **`$SHELL`** (never `sh`) | routed (`inbox` / `notify-user` / `log`; default success `inbox`, failure `notify-user`) |
 | `routine`| yes | module | `--routine <name>` + args (a registered routine) | internal / by routine |
 
 - **`$SHELL`** — shell jobs run the script with the user's `$SHELL` (e.g. zsh), never hardcoded `sh`.
@@ -24,17 +24,29 @@
 Named, headless behaviors registered by modules (`dream`, `heartbeat`) with an argument schema. See
 the [routines catalog](../README.md#routines) and `acolyte cron routine-list`.
 
+In Phase 2 the catalog and schemas are live, but the actual `dream`/`heartbeat` behavior is deferred to
+Phase 4. Firing one writes a `pending Phase 4` audit row and advances its schedule.
+
 ## CLI
 ```bash
-acolyte cron --title <t> --datetime <cron> (--prompt <text> | --shell <path> | --routine <name>) [--agent-name <n> | --workspace-folder <p>] [--session-id <id>]
-acolyte cron list              # markdown table: title | datetime | prompt | shell | agent-name | session-id
-acolyte cron view <title>      # full JSON of one job
+acolyte cron --title <t> --datetime <cron> (--prompt <text> | --shell <path> | --routine <name>) \
+  [--routine-args '<json>'] [--agent-name <n> | --workspace-folder <p>] [--session-id <id>] \
+  [--timezone <IANA>] [--on-success inbox|notify-user|log] [--on-failure inbox|notify-user|log]
+acolyte cron list              # markdown table: title | datetime | agent | owner | kind | prompt | shell | session
+acolyte cron view <title>      # full JSON of one job (target-aware when titles collide)
 acolyte cron routine-list      # JSON catalog of routines + args
-acolyte cron rm <title>        # remove a job
+acolyte cron rm <title>        # remove a job (target-aware when titles collide)
+acolyte cron tick              # run one due-job pass (testing/debugging)
 ```
 
 `acolyte cron list` shows every job with its `owner`/`kind`, so capability-owned jobs (dream/heartbeat)
-are visible alongside user tasks. Routine jobs show `routine:<name>` in the prompt column.
+are visible alongside user tasks. Routine jobs show `routine:<name>` in the prompt column; prompt jobs
+show `prompt:<text>`.
+
+## Delivery (transitional)
+Phase 2 routes output through the existing legacy notifier queue and the legacy resolved user chat ID:
+`notify-user` queues a user-only notification, and `inbox` runs a synthetic turn and queues the reply.
+Per-agent Telegram routing and the Envelope/Communication bus land in Phase 3.
 
 ## Data model
 `orch_cron_jobs(id, title, owner, kind, spec, prompt, shell_path, routine, routine_args,

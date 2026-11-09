@@ -11,9 +11,12 @@ import (
 
 	"github.com/martins6/acolyte/internal/bot"
 	"github.com/martins6/acolyte/internal/config"
+	"github.com/martins6/acolyte/internal/cron"
 	"github.com/martins6/acolyte/internal/database"
 	"github.com/martins6/acolyte/internal/logger"
 	"github.com/martins6/acolyte/internal/opencode"
+	"github.com/martins6/acolyte/internal/registry"
+	"github.com/martins6/acolyte/internal/routine"
 	"github.com/martins6/acolyte/internal/scheduler"
 	"github.com/martins6/acolyte/internal/secrets"
 	"github.com/martins6/acolyte/internal/updater"
@@ -60,7 +63,8 @@ Press Ctrl+C to stop the bot gracefully.`,
 		log.Println("Ensuring OpenCode service...")
 		ensureCtx, ensureCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer ensureCancel()
-		if _, err := opencode.Ensure(ensureCtx); err != nil {
+		opencodeClient, err := opencode.Ensure(ensureCtx)
+		if err != nil {
 			return fmt.Errorf("opencode service unavailable: %w", err)
 		}
 
@@ -88,6 +92,28 @@ Press Ctrl+C to stop the bot gracefully.`,
 
 		if err := scheduler.StartScheduler(ctx, telegramBot, workspacePath); err != nil {
 			log.Printf("Warning: Failed to start scheduler service: %v", err)
+		}
+
+		reg, err := registry.OpenDefault()
+		if err != nil {
+			log.Printf("Warning: Failed to open agent registry for cron: %v", err)
+		} else {
+			cronService, err := cron.Start(ctx, cron.Options{
+				Registry: reg,
+				Routines: routine.Default(),
+				Sink: cron.LegacySink{
+					UserIDFunc: config.GetAllowedUserChatID,
+					Turn:       opencodeClient,
+				},
+				OpenCode: opencodeClient,
+			})
+			if err != nil {
+				log.Printf("Warning: Failed to start cron service: %v", err)
+				reg.Close()
+			} else {
+				defer cronService.Stop()
+				defer reg.Close()
+			}
 		}
 
 		go checkForUpdatesAsync(ctx)

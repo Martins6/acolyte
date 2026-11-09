@@ -20,16 +20,21 @@ type Sink interface {
 // the legacy notifier database and runs inbox events through the OpenCode turn
 // runner. Phase 3 replaces it with the Communication/Envelope adapter.
 type LegacySink struct {
-	UserID int64
-	Turn   TurnRunner
+	UserID     int64
+	UserIDFunc func() int64
+	Turn       TurnRunner
 }
 
 // NotifyUser queues a user-only notification.
 func (s LegacySink) NotifyUser(_ context.Context, _ registry.Agent, text string) error {
-	if s.UserID == 0 {
+	userID := s.UserID
+	if s.UserIDFunc != nil {
+		userID = s.UserIDFunc()
+	}
+	if userID == 0 {
 		return fmt.Errorf("cron: no legacy user chat id is resolved yet")
 	}
-	if _, err := database.InsertNotification(s.UserID, text); err != nil {
+	if _, err := database.InsertNotification(userID, text); err != nil {
 		return fmt.Errorf("cron: queue notification: %w", err)
 	}
 	return nil
