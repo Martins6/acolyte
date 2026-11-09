@@ -264,6 +264,22 @@ func TestUnclaimedFailureDoesNotClearClaim(t *testing.T) {
 	}
 }
 
+func TestEnqueueOutboundIdempotent(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	item := OutboxItem{EnvelopeID: "env_same", ChatID: 10, Text: "hello", CreatedAt: now}
+	if _, err := store.EnqueueOutbound(item); err != nil {
+		t.Fatalf("EnqueueOutbound() error: %v", err)
+	}
+	if _, err := store.EnqueueOutbound(item); err != nil {
+		t.Fatalf("EnqueueOutbound(duplicate) error: %v", err)
+	}
+	outbox, err := store.ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Errorf("outbox = %+v, %v; want one row", outbox, err)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	store := migrateTestDB(t)
 	if err := store.SetSetting("telegram.allowed_users", `["@alice"]`); err != nil {

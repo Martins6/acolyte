@@ -19,3 +19,13 @@ type Communication interface {
 	Send(envelope.Envelope) error
 	Stop() error
 }
+
+// PendingReply is the durable reply payload stored on an inbound row when
+// outbox enqueue fails. Replay uses the same ID, making enqueue idempotent.
+type PendingReply struct {
+	ID                string `json:"id"`
+	Text              string `json:"text"`
+	ReplyTo           *int64 `json:"reply_to,omitempty"`
+	OpenCodeSessionID string `json:"opencode_session_id,omitempty"`
+	SourceMessageID   string `json:"source_message_id,omitempty"`
+}

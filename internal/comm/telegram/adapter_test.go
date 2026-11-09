@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/martins6/acolyte/internal/comm"
 	"github.com/martins6/acolyte/internal/envelope"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
@@ -366,6 +367,35 @@ func TestReplaySkipsLinkedRow(t *testing.T) {
 	item, _, _ := st.CommTG().GetInboxByEnvelope(env.ID)
 	if item.ProcessedAt == nil {
 		t.Error("linked row was not marked processed")
+	}
+}
+
+func TestReplayPendingReplyEnqueuesOutbox(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "42")
+	reply := comm.PendingReply{
+		ID: "comm_out_fixed", Text: "recovered", OpenCodeSessionID: "ses_x", SourceMessageID: "msg_in",
+	}
+	rawReply, _ := json.Marshal(reply)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 206, ChatID: 10, EnvelopeID: "env_reply", PendingEnvelope: "{}",
+		OpenCodeSessionID: "ses_x", OpenCodeMessageID: "msg_in", PendingReply: string(rawReply),
+		ReceivedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	calls := 0
+	adapter.sink = func(context.Context, envelope.Envelope) error { calls++; return nil }
+	adapter.replayPending(context.Background())
+	if calls != 0 {
+		t.Errorf("sink calls = %d, want 0 for a linked row with a pending reply", calls)
+	}
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 || outbox[0].Text != "recovered" {
+		t.Fatalf("outbox = %+v, %v; want recovered reply", outbox, err)
+	}
+	item, _, _ := st.CommTG().GetInboxByEnvelope("env_reply")
+	if item.ProcessedAt == nil || item.PendingReply != "" {
+		t.Errorf("inbox = %+v, want processed with cleared reply", item)
 	}
 }
 

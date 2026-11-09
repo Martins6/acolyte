@@ -66,7 +66,8 @@ func (s *Store) EnqueueOutbound(item OutboxItem) (OutboxItem, error) {
 		(id, envelope_id, chat_id, text, reply_to, chunks_sent, attempts,
 		 next_attempt_at, last_error, delivery, tg_message_id,
 		 opencode_session_id, source_message_id, created_at, sent_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT DO NOTHING`,
 		item.ID, item.EnvelopeID, item.ChatID, item.Text, nullableInt64(item.ReplyTo),
 		item.ChunksSent, item.Attempts, nullableTime(item.NextAttemptAt), item.LastError,
 		item.Delivery, nullableInt64(item.TGMessageID), item.OpenCodeSessionID,

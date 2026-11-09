@@ -250,6 +250,37 @@ func TestRouterBoundsDifferentThreads(t *testing.T) {
 	}
 }
 
+func TestRouterOutboundFailureKeepsPendingReply(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.outbound = func(context.Context, registry.Agent, envelope.Envelope) error {
+		return errors.New("database busy")
+	}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(50),
+		envelope.Party{Kind: envelope.PartyUser, ID: "50"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 300)
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
+		t.Fatal("HandleInbound() error = nil, want outbound error")
+	}
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	item, ok, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil || !ok {
+		t.Fatalf("inbox = %+v, %v, %v", item, ok, err)
+	}
+	if item.PendingReply == "" {
+		t.Error("pending reply was not recorded for replay")
+	}
+	if item.OpenCodeMessageID == "" {
+		t.Error("turn input was not linked")
+	}
+}
+
 func TestRouterWithoutOutboundStillPersists(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.router.outbound = nil
