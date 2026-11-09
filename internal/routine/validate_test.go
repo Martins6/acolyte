@@ -1,7 +1,9 @@
 package routine
 
 import (
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +38,83 @@ func TestValidateArgs(t *testing.T) {
 	} {
 		if _, err := ValidateArgs(specs, args); err == nil {
 			t.Errorf("ValidateArgs(%+v) error = nil, want error", args)
+		}
+	}
+}
+
+func TestDecodeArgsPreservesLargeIntegers(t *testing.T) {
+	args, err := DecodeArgs(`{"n":9007199254740993}`)
+	if err != nil {
+		t.Fatalf("DecodeArgs() error: %v", err)
+	}
+	raw, ok := args["n"].(json.Number)
+	if !ok || raw.String() != "9007199254740993" {
+		t.Fatalf("decoded n = %#v, want exact json.Number", args["n"])
+	}
+	normalized, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, args)
+	if err != nil {
+		t.Fatalf("ValidateArgs() error: %v", err)
+	}
+	if normalized["n"] != 9007199254740993 {
+		t.Errorf("normalized n = %v, want 9007199254740993", normalized["n"])
+	}
+}
+
+func TestDecodeArgsAcceptsIntegralDecimalsAndExponents(t *testing.T) {
+	for raw, want := range map[string]int{
+		`{"n":1.0}`:   1,
+		`{"n":1e3}`:   1000,
+		`{"n":1.5e2}`: 150,
+		`{"n":-2.0}`:  -2,
+	} {
+		args, err := DecodeArgs(raw)
+		if err != nil {
+			t.Fatalf("DecodeArgs(%s) error: %v", raw, err)
+		}
+		normalized, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, args)
+		if err != nil {
+			t.Fatalf("ValidateArgs(%s) error: %v", raw, err)
+		}
+		if normalized["n"] != want {
+			t.Errorf("ValidateArgs(%s) = %v, want %d", raw, normalized["n"], want)
+		}
+	}
+	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number("1.2")}); err == nil {
+		t.Error("ValidateArgs(1.2) error = nil, want error")
+	}
+	cancelled := "0." + strings.Repeat("0", 1000) + "1e1001"
+	args, err := DecodeArgs(`{"n":` + cancelled + `}`)
+	if err != nil {
+		t.Fatalf("DecodeArgs(cancelled exponent) error: %v", err)
+	}
+	normalized, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, args)
+	if err != nil || normalized["n"] != 1 {
+		t.Errorf("ValidateArgs(cancelled exponent) = %v, %v; want 1", normalized["n"], err)
+	}
+	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number("1e1000000000")}); err == nil {
+		t.Error("ValidateArgs(extreme exponent) error = nil, want error")
+	}
+	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number("1e19")}); err == nil {
+		t.Error("ValidateArgs(1e19) error = nil, want error")
+	}
+	for _, raw := range []string{
+		"1.1e-9223372036854775808",
+		"1.1e9223372036854775807",
+		"-1.1e-9223372036854775808",
+	} {
+		if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number(raw)}); err == nil {
+			t.Errorf("ValidateArgs(%s) error = nil, want error", raw)
+		}
+	}
+	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number(strings.Repeat("9", 2000))}); err == nil {
+		t.Error("ValidateArgs(huge significand) error = nil, want error")
+	}
+}
+
+func TestDecodeArgsRejectsInvalid(t *testing.T) {
+	for _, raw := range []string{`{`, `{} {}`, `[]`} {
+		if _, err := DecodeArgs(raw); err == nil {
+			t.Errorf("DecodeArgs(%s) error = nil, want error", raw)
 		}
 	}
 }

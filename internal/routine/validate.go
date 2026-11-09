@@ -3,8 +3,32 @@ package routine
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"strconv"
+	"strings"
 )
+
+// DecodeArgs parses a routine argument object without losing integer precision.
+func DecodeArgs(raw string) (map[string]any, error) {
+	args := map[string]any{}
+	if strings.TrimSpace(raw) == "" {
+		return args, nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&args); err != nil {
+		return nil, fmt.Errorf("routine: parse args: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("routine: unexpected trailing args")
+		}
+		return nil, fmt.Errorf("routine: parse args: %w", err)
+	}
+	return args, nil
+}
 
 // ValidateArgs applies defaults, type-checks known args, and rejects unknown
 // arguments. The returned map is the normalized execution argument set.
@@ -87,14 +111,92 @@ func asInt(raw any) (int, bool) {
 		}
 		return boundedInt(int64(value))
 	case json.Number:
-		parsed, err := value.Int64()
-		if err != nil {
-			return 0, false
-		}
-		return boundedInt(parsed)
+		return parseJSONInteger(value.String())
 	default:
 		return 0, false
 	}
+}
+
+// maxJSONExponent bounds the parsed exponent well above any value that can
+// cancel a decimal fraction in the 4096-byte input, keeping exponent
+// arithmetic and the final allocation small.
+const maxJSONExponent = int64(1 << 20)
+
+// parseJSONInteger evaluates a JSON number exactly without constructing large
+// powers of ten. Decimal/exponent forms are accepted only when the exact value
+// is an integer that fits the platform int.
+func parseJSONInteger(raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 4096 {
+		return 0, false
+	}
+
+	negative := false
+	if raw[0] == '-' {
+		negative = true
+		raw = raw[1:]
+	}
+	if raw == "" {
+		return 0, false
+	}
+
+	exponent := int64(0)
+	if index := strings.IndexAny(raw, "eE"); index >= 0 {
+		parsed, err := strconv.ParseInt(raw[index+1:], 10, 64)
+		// Bound the exponent before any arithmetic: a large negative value
+		// (e.g. MinInt64) would otherwise overflow when the fraction length is
+		// subtracted, and a huge positive value would drive allocation.
+		if err != nil || parsed > maxJSONExponent || parsed < -maxJSONExponent {
+			return 0, false
+		}
+		exponent = parsed
+		raw = raw[:index]
+	}
+
+	fractionLen := int64(0)
+	if index := strings.IndexByte(raw, '.'); index >= 0 {
+		fractionLen = int64(len(raw) - index - 1)
+		raw = raw[:index] + raw[index+1:]
+	}
+
+	digits := strings.TrimLeft(raw, "0")
+	if digits == "" {
+		return 0, true
+	}
+	for len(digits) > 0 && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+		exponent++
+	}
+	exponent -= fractionLen
+	if exponent < 0 {
+		return 0, false
+	}
+	// 19 decimal digits is enough for uint64; the platform int bound is
+	// checked after parsing. Compare against 19-len(digits) rather than
+	// len(digits)+exponent so the check itself cannot overflow.
+	if exponent > 19-int64(len(digits)) {
+		return 0, false
+	}
+	numeric := digits + strings.Repeat("0", int(exponent))
+	value, err := strconv.ParseUint(numeric, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	maxInt := uint64(^uint(0) >> 1)
+	if negative {
+		if value > maxInt+1 {
+			return 0, false
+		}
+		if value == maxInt+1 {
+			return -int(maxInt) - 1, true
+		}
+		return -int(value), true
+	}
+	if value > maxInt {
+		return 0, false
+	}
+	return int(value), true
 }
 
 func boundedInt(value int64) (int, bool) {

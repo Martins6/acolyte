@@ -273,11 +273,9 @@ func runCronCreate(w io.Writer, opts cronCreateOptions) error {
 		if !ok {
 			return fmt.Errorf("routine %q is not registered; see 'acolyte cron routine-list'", name)
 		}
-		args := map[string]any{}
-		if strings.TrimSpace(opts.RoutineArgs) != "" {
-			if err := json.Unmarshal([]byte(opts.RoutineArgs), &args); err != nil {
-				return fmt.Errorf("parse --routine-args: %w", err)
-			}
+		args, err := routine.DecodeArgs(opts.RoutineArgs)
+		if err != nil {
+			return fmt.Errorf("parse --routine-args: %w", err)
 		}
 		normalized, err := routine.ValidateArgs(routineValue.Args(), args)
 		if err != nil {
