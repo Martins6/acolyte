@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,7 +76,7 @@ type FileAPI interface {
 func DownloadFile(ctx context.Context, api FileAPI, fileID string) ([]byte, string, error) {
 	file, err := api.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to get file: %w", err)
+		return nil, "", fmt.Errorf("failed to get file: %s", redactToken(err, api.Token()))
 	}
 
 	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", api.Token(), file.FilePath)
@@ -83,7 +84,7 @@ func DownloadFile(ctx context.Context, api FileAPI, fileID string) ([]byte, stri
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to download file: %w", err)
+		return nil, "", fmt.Errorf("failed to download file: %s", redactToken(err, api.Token()))
 	}
 	defer resp.Body.Close()
 
@@ -97,6 +98,19 @@ func DownloadFile(ctx context.Context, api FileAPI, fileID string) ([]byte, stri
 
 func SaveFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0644)
+}
+
+// redactToken removes the bot token from error text; HTTP client errors can
+// include the request URL, which embeds the token.
+func redactToken(err error, token string) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if token != "" {
+		message = strings.ReplaceAll(message, token, "[redacted]")
+	}
+	return errors.New(message)
 }
 
 func BuildPrompt(mediaPath string, meta MediaMetadata, userMessage string) string {

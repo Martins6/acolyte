@@ -18,6 +18,9 @@ import (
 )
 
 func (a *Adapter) deliverDue(ctx context.Context) error {
+	a.deliverMu.Lock()
+	defer a.deliverMu.Unlock()
+
 	items, err := a.store.CommTG().DueOutbound(a.now(), 20)
 	if err != nil {
 		return err

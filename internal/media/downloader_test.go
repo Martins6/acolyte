@@ -1,6 +1,7 @@
 package media
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -9,6 +10,16 @@ import (
 
 	"github.com/go-telegram/bot/models"
 )
+
+func TestRedactToken(t *testing.T) {
+	err := redactToken(errors.New(`Get "https://api.telegram.org/file/bot123:secret/files/x": boom`), "123:secret")
+	if strings.Contains(err.Error(), "123:secret") {
+		t.Errorf("redacted error still contains token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Errorf("redacted error = %v, want [redacted] marker", err)
+	}
+}
 
 func TestGetMediaType_Photo(t *testing.T) {
 	msg := &models.Message{

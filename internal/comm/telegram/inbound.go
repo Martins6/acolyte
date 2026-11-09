@@ -32,7 +32,7 @@ func (a *Adapter) handleUpdate(ctx context.Context, _ *bot.Bot, update *models.U
 	text, mediaPath, contentType, err := a.buildContent(ctx, msg)
 	if err != nil {
 		log.Printf("telegram: build content for %s: %v", a.agent.Name, err)
-		a.reply(ctx, msg.Chat.ID, fmt.Sprintf("Error processing message: %v", err), int64(msg.ID))
+		a.reply(ctx, msg.Chat.ID, "Error processing message; the daemon log has details.", int64(msg.ID))
 		return
 	}
 	if strings.TrimSpace(text) == "" && mediaPath == "" {

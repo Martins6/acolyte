@@ -67,6 +67,8 @@ type Adapter struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	done   chan struct{}
+
+	deliverMu sync.Mutex
 }
 
 // New validates options and builds an adapter. Start performs the network
@@ -200,7 +202,10 @@ func (a *Adapter) Send(env envelope.Envelope) error {
 	if err != nil {
 		return err
 	}
-	if err := a.deliverItem(context.Background(), item); err != nil {
+	a.deliverMu.Lock()
+	err = a.deliverItem(context.Background(), item)
+	a.deliverMu.Unlock()
+	if err != nil {
 		log.Printf("telegram: immediate delivery for %s: %v", a.agent.Name, err)
 	}
 	return nil
