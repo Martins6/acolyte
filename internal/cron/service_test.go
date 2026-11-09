@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -206,6 +207,68 @@ func TestCronDeliveryErrorPersistsRouteAndRetries(t *testing.T) {
 	}
 	if routes, _ := st.Orch().DueCronRoutes(now.Add(time.Hour), 10); len(routes) != 0 {
 		t.Errorf("routes after retry = %+v, want none", routes)
+	}
+}
+
+func TestRouteFallbackFile(t *testing.T) {
+	workspace := t.TempDir()
+	route := orch.CronRoute{
+		ID: "env_fallback", AgentTarget: "valet", ChatID: 10, Text: "output",
+		OpenCodeSessionID: "ses_x", SourceMessageID: "msg_x", CreatedAt: time.Now().UTC(),
+	}
+	if err := writeRouteFallback(workspace, route); err != nil {
+		t.Fatalf("writeRouteFallback() error: %v", err)
+	}
+	routes, err := readRouteFallbacks(workspace)
+	if err != nil || len(routes) != 1 || routes[0].ID != route.ID || routes[0].Text != "output" {
+		t.Fatalf("readRouteFallbacks() = %+v, %v", routes, err)
+	}
+	if err := removeRouteFallback(workspace, route.ID); err != nil {
+		t.Fatalf("removeRouteFallback() error: %v", err)
+	}
+	if routes, err := readRouteFallbacks(workspace); err != nil || len(routes) != 0 {
+		t.Errorf("readRouteFallbacks(after remove) = %+v, %v", routes, err)
+	}
+}
+
+func TestRouteFallbackRejectsUnsafeID(t *testing.T) {
+	workspace := t.TempDir()
+	if err := writeRouteFallback(workspace, orch.CronRoute{ID: "../evil", ChatID: 10, Text: "x"}); err == nil {
+		t.Fatal("writeRouteFallback(unsafe id) error = nil, want error")
+	}
+	if err := removeRouteFallback(workspace, "../../outside"); err == nil {
+		t.Fatal("removeRouteFallback(unsafe id) error = nil, want error")
+	}
+	dir := filepath.Join(workspace, routeFallbackDir)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("mkdir fallback dir: %v", err)
+	}
+	raw, _ := json.Marshal(orch.CronRoute{ID: "../evil", ChatID: 10, Text: "x"})
+	if err := os.WriteFile(filepath.Join(dir, "evil.json"), raw, 0600); err != nil {
+		t.Fatalf("write crafted fallback: %v", err)
+	}
+	if routes, err := readRouteFallbacks(workspace); err != nil || len(routes) != 0 {
+		t.Errorf("readRouteFallbacks(crafted) = %+v, %v; want none", routes, err)
+	}
+}
+
+func TestMemoryRouteFallback(t *testing.T) {
+	service := &Service{}
+	routeA := orch.CronRoute{ID: "env_a", AgentTarget: "a", ChatID: 10, Text: "a"}
+	routeB := orch.CronRoute{ID: "env_b", AgentTarget: "b", ChatID: 20, Text: "b"}
+	service.addMemoryRoute("/ws/a", routeA)
+	service.addMemoryRoute("/ws/a", routeA)
+	service.addMemoryRoute("/ws/b", routeB)
+	routesA := service.takeMemoryRoutes("/ws/a")
+	if len(routesA) != 1 || routesA[0].ID != routeA.ID {
+		t.Fatalf("memory routes A = %+v, want one", routesA)
+	}
+	routesB := service.takeMemoryRoutes("/ws/b")
+	if len(routesB) != 1 || routesB[0].ID != routeB.ID {
+		t.Fatalf("memory routes B = %+v, want one", routesB)
+	}
+	if remaining := service.takeMemoryRoutes("/ws/a"); len(remaining) != 0 {
+		t.Errorf("memory routes after take = %+v, want empty", remaining)
 	}
 }
 
