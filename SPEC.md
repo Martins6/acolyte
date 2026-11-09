@@ -241,7 +241,8 @@ it produces**, documented in `docs/memory/…`.
 ### 6.4 `memory-export` — portability
 - **`opencode-export` (v0):** bundles the agent's memory (skills + persona + hub) into an
   **OpenCode-native** portable format — a drop-in skills/instructions set another OpenCode workspace
-  or Acolyte agent can import. Exposed as a CLI (`acolyte memory export`) and/or a skill.
+  or Acolyte agent can import. A future CLI entry (`acolyte memory export`) is planned but not
+  registered yet; the mode can still be run through its documented skill/artifacts.
 - *Other modes (planned):* `portable-archive`, `remote-catalog`. See `docs/memory/memory-export/`.
 
 > Because Memory is contract-free, adding a mode = adding a documented recipe under `docs/memory/…`
