@@ -249,7 +249,8 @@ func (s *Service) refresh() {
 	for name, st := range s.agents {
 		wantedAgent, ok := wanted[name]
 		if ok && wantedAgent.Workspace == st.agent.Workspace {
-			st.agent = wantedAgent
+			// Keep the cached agent snapshot immutable; Tick reads it
+			// without holding s.mu. A workspace change replaces the entry.
 			continue
 		}
 		delete(s.agents, name)
