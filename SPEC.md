@@ -130,7 +130,7 @@ No engine interface/adapter. Acolyte builds directly on OpenCode V2 primitives
 | **Skills**      | `.agents/skills/` (project source); dir with `SKILL.md` (frontmatter `name`, `description`, `metadata.opencode/autoinvoke`) or flat `.md`. ID = path-derived. Loaded on demand via the `skill` tool. Extra sources via `skills: []`. | Learned skills in `.agents/skills/` (memory-access). |
 | **Instructions**| `AGENTS.md` (global + workspace-up) plus `instructions: [files, globs, URLs]`. Combined. Live-edited. | Persona (`.acolyte/*.md`) surfaced here (memory-load). |
 | **Sessions**    | Client–server service owns sessions; driven via API / `@opencode/client` / SDK / `opencode run`. **Sessions keep the full conversation + tool activity.** | Orchestrator maps threads → OpenCode session IDs (§9). |
-| **Tools**       | Built-in + `skill` + `subagent` + MCP + plugin tools.                               | Acolyte adds CLI tools (`notify`, `mail`, `schedule`, `cron`). |
+| **Tools**       | Built-in + `skill` + `subagent` + MCP + plugin tools.                               | Acolyte adds CLI tools (`notify-user`, `inbox`, `cron`, `inspect`, `attach`). |
 | **Plugins**     | Hooks/transforms/tools via `plugins` + JS/Effect.                                   | Candidate host for `memory-learn` / `memory-export`. |
 
 **How a turn runs:** the Orchestrator drives one turn through the **OpenCode V2 API**, supplying an
