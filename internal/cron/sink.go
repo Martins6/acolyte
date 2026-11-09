@@ -12,7 +12,8 @@ import (
 // Sink routes cron output into the user channel or the agent inbox.
 type Sink interface {
 	NotifyUser(ctx context.Context, agent registry.Agent, text string) error
-	Inbox(ctx context.Context, agent registry.Agent, sessionID, text string, meta map[string]any) (string, error)
+	// Inbox returns the agent reply and the OpenCode session used for the turn.
+	Inbox(ctx context.Context, agent registry.Agent, sessionID, text string, meta map[string]any) (string, string, error)
 }
 
 // LegacySink is the transitional Phase 2 sink. It queues user notifications in
@@ -35,9 +36,9 @@ func (s LegacySink) NotifyUser(_ context.Context, _ registry.Agent, text string)
 }
 
 // Inbox admits a synthetic event and queues the agent's reply for the user.
-func (s LegacySink) Inbox(ctx context.Context, agent registry.Agent, sessionID, text string, meta map[string]any) (string, error) {
+func (s LegacySink) Inbox(ctx context.Context, agent registry.Agent, sessionID, text string, meta map[string]any) (string, string, error) {
 	if s.Turn == nil {
-		return "", fmt.Errorf("cron: inbox turn runner is not configured")
+		return "", "", fmt.Errorf("cron: inbox turn runner is not configured")
 	}
 	result, err := s.Turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        text,
@@ -45,12 +46,12 @@ func (s LegacySink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 		Metadata:    meta,
 	}, opencode.TurnConfig{Workspace: agent.Workspace})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if result.ResponseText != "" {
 		if err := s.NotifyUser(ctx, agent, result.ResponseText); err != nil {
-			return result.ResponseText, err
+			return result.ResponseText, result.SessionID, err
 		}
 	}
-	return result.ResponseText, nil
+	return result.ResponseText, result.SessionID, nil
 }

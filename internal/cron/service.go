@@ -418,8 +418,15 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 	}
 	switch action {
 	case "inbox":
-		if _, err := s.sink.Inbox(ctx, agent, sessionID, text, map[string]any{"cron_job": job.Title}); err != nil {
+		_, inboxSession, err := s.sink.Inbox(ctx, agent, sessionID, text, map[string]any{"cron_job": job.Title})
+		if err != nil {
 			log.Printf("cron: route job %s to inbox: %v", job.Title, err)
+			break
+		}
+		if inboxSession != "" {
+			if _, err := st.Orch().UpsertSession(cronThread(job), inboxSession, s.now()); err != nil {
+				log.Printf("cron: persist inbox session for %s: %v", job.Title, err)
+			}
 		}
 	case "notify-user":
 		if err := s.sink.NotifyUser(ctx, agent, text); err != nil {

@@ -53,8 +53,17 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		NotifyUser: func(ctx context.Context, text string) error {
 			return s.sink.NotifyUser(ctx, agent, text)
 		},
-		Inbox: func(ctx context.Context, text string, meta map[string]any) (string, error) {
-			return s.sink.Inbox(ctx, agent, sessionID, text, meta)
+		Inbox: func(ctx context.Context, text string, meta map[string]any) (string, string, error) {
+			reply, inboxSession, err := s.sink.Inbox(ctx, agent, sessionID, text, meta)
+			if err != nil {
+				return reply, inboxSession, err
+			}
+			if inboxSession != "" {
+				if _, err := st.Orch().UpsertSession(thread, inboxSession, s.now()); err != nil {
+					return reply, inboxSession, err
+				}
+			}
+			return reply, inboxSession, nil
 		},
 		Log: func(level, message string, meta map[string]any) {
 			raw, _ := json.Marshal(meta)
