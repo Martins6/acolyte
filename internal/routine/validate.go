@@ -3,8 +3,31 @@ package routine
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"strings"
 )
+
+// DecodeArgs parses a routine argument object without losing integer precision.
+func DecodeArgs(raw string) (map[string]any, error) {
+	args := map[string]any{}
+	if strings.TrimSpace(raw) == "" {
+		return args, nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&args); err != nil {
+		return nil, fmt.Errorf("routine: parse args: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("routine: unexpected trailing args")
+		}
+		return nil, fmt.Errorf("routine: parse args: %w", err)
+	}
+	return args, nil
+}
 
 // ValidateArgs applies defaults, type-checks known args, and rejects unknown
 // arguments. The returned map is the normalized execution argument set.

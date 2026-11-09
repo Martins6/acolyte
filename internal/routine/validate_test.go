@@ -1,6 +1,7 @@
 package routine
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 )
@@ -36,6 +37,32 @@ func TestValidateArgs(t *testing.T) {
 	} {
 		if _, err := ValidateArgs(specs, args); err == nil {
 			t.Errorf("ValidateArgs(%+v) error = nil, want error", args)
+		}
+	}
+}
+
+func TestDecodeArgsPreservesLargeIntegers(t *testing.T) {
+	args, err := DecodeArgs(`{"n":9007199254740993}`)
+	if err != nil {
+		t.Fatalf("DecodeArgs() error: %v", err)
+	}
+	raw, ok := args["n"].(json.Number)
+	if !ok || raw.String() != "9007199254740993" {
+		t.Fatalf("decoded n = %#v, want exact json.Number", args["n"])
+	}
+	normalized, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, args)
+	if err != nil {
+		t.Fatalf("ValidateArgs() error: %v", err)
+	}
+	if normalized["n"] != 9007199254740993 {
+		t.Errorf("normalized n = %v, want 9007199254740993", normalized["n"])
+	}
+}
+
+func TestDecodeArgsRejectsInvalid(t *testing.T) {
+	for _, raw := range []string{`{`, `{} {}`, `[]`} {
+		if _, err := DecodeArgs(raw); err == nil {
+			t.Errorf("DecodeArgs(%s) error = nil, want error", raw)
 		}
 	}
 }

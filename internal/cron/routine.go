@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
@@ -22,11 +21,9 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		return "", "", fmt.Errorf("cron: routine %q is not registered", job.Routine)
 	}
 
-	args := map[string]any{}
-	if strings.TrimSpace(job.RoutineArgs) != "" {
-		if err := json.Unmarshal([]byte(job.RoutineArgs), &args); err != nil {
-			return "", "", fmt.Errorf("cron: parse routine args for %s: %w", job.Title, err)
-		}
+	args, err := routine.DecodeArgs(job.RoutineArgs)
+	if err != nil {
+		return "", "", fmt.Errorf("cron: parse routine args for %s: %w", job.Title, err)
 	}
 	normalized, err := routine.ValidateArgs(routineValue.Args(), args)
 	if err != nil {
