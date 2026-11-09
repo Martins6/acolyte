@@ -87,6 +87,9 @@ func DownloadFile(ctx context.Context, api FileAPI, fileID string) ([]byte, stri
 		return nil, "", fmt.Errorf("failed to download file: %s", RedactToken(err, api.Token()))
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("failed to download file: status %d", resp.StatusCode)
+	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
