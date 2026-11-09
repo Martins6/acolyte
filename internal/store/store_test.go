@@ -49,8 +49,8 @@ func TestOpenCreatesSchema(t *testing.T) {
 	}
 	for _, want := range []string{
 		"schema_meta", "orch_sessions", "orch_cron_jobs", "orch_logs",
-		"orch_settings", "comm_tg_settings", "comm_tg_chats", "comm_tg_inbox",
-		"comm_tg_outbox", "comm_tg_media",
+		"orch_settings", "orch_cron_routes", "comm_tg_settings", "comm_tg_chats",
+		"comm_tg_inbox", "comm_tg_outbox", "comm_tg_media",
 	} {
 		if !got[want] {
 			t.Errorf("missing table %q", want)
@@ -64,8 +64,8 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err := s.DB().QueryRow(`SELECT version FROM schema_meta WHERE module = 'comm_tg'`).Scan(&commVersion); err != nil {
 		t.Fatalf("read comm_tg version: %v", err)
 	}
-	if orchVersion != 1 || commVersion != 7 {
-		t.Errorf("versions = orch:%d comm_tg:%d, want 1/7", orchVersion, commVersion)
+	if orchVersion != 2 || commVersion != 7 {
+		t.Errorf("versions = orch:%d comm_tg:%d, want 2/7", orchVersion, commVersion)
 	}
 }
 

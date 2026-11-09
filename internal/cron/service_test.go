@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/martins6/acolyte/internal/comm"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
@@ -21,12 +23,13 @@ type fakeSink struct {
 	notified    []string
 	inboxed     []string
 	inboxInputs []string
+	notifyErr   error
 	inboxErr    error
 }
 
 func (f *fakeSink) NotifyUser(_ context.Context, _ registry.Agent, text string) error {
 	f.notified = append(f.notified, text)
-	return nil
+	return f.notifyErr
 }
 
 func (f *fakeSink) Inbox(_ context.Context, _ registry.Agent, sessionID, text string, _ map[string]any) (string, string, error) {
@@ -151,6 +154,159 @@ func TestInvalidMetaDoesNotRunJob(t *testing.T) {
 
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Error("job ran despite malformed metadata")
+	}
+}
+
+func TestCronDeliveryErrorPersistsRouteAndRetries(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	script := filepath.Join(t.TempDir(), "job.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho output\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "route", Kind: "shell", Spec: "@every 1h", ShellPath: script,
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"notify-user"}`,
+	})
+	sink := &fakeSink{notifyErr: &comm.DeliveryError{EnvelopeID: "env_route", ChatID: 10, Text: "output"}}
+	service := startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	routes, err := st.Orch().DueCronRoutes(now, 10)
+	if err != nil || len(routes) != 1 {
+		st.Close()
+		t.Fatalf("routes = %+v, %v; want one retry intent", routes, err)
+	}
+	st.Close()
+
+	// Retry the route with a now-working sink.
+	sink.notifyErr = nil
+	service = startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	st, err = store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 || !strings.Contains(outbox[0].Text, "output") {
+		t.Errorf("outbox = %+v, %v; want output", outbox, err)
+	}
+	if len(outbox) == 1 && outbox[0].EnvelopeID != "env_route" {
+		t.Errorf("outbox envelope = %q, want env_route", outbox[0].EnvelopeID)
+	}
+	if routes, _ := st.Orch().DueCronRoutes(now.Add(time.Hour), 10); len(routes) != 0 {
+		t.Errorf("routes after retry = %+v, want none", routes)
+	}
+}
+
+func TestRouteFallbackFile(t *testing.T) {
+	workspace := t.TempDir()
+	route := orch.CronRoute{
+		ID: "env_fallback", AgentTarget: "valet", ChatID: 10, Text: "output",
+		OpenCodeSessionID: "ses_x", SourceMessageID: "msg_x", CreatedAt: time.Now().UTC(),
+	}
+	if err := writeRouteFallback(workspace, route); err != nil {
+		t.Fatalf("writeRouteFallback() error: %v", err)
+	}
+	routes, err := readRouteFallbacks(workspace)
+	if err != nil || len(routes) != 1 || routes[0].ID != route.ID || routes[0].Text != "output" {
+		t.Fatalf("readRouteFallbacks() = %+v, %v", routes, err)
+	}
+	if err := removeRouteFallback(workspace, route.ID); err != nil {
+		t.Fatalf("removeRouteFallback() error: %v", err)
+	}
+	if routes, err := readRouteFallbacks(workspace); err != nil || len(routes) != 0 {
+		t.Errorf("readRouteFallbacks(after remove) = %+v, %v", routes, err)
+	}
+}
+
+func TestRouteFallbackRejectsUnsafeID(t *testing.T) {
+	workspace := t.TempDir()
+	if err := writeRouteFallback(workspace, orch.CronRoute{ID: "../evil", ChatID: 10, Text: "x"}); err == nil {
+		t.Fatal("writeRouteFallback(unsafe id) error = nil, want error")
+	}
+	if err := removeRouteFallback(workspace, "../../outside"); err == nil {
+		t.Fatal("removeRouteFallback(unsafe id) error = nil, want error")
+	}
+	dir := filepath.Join(workspace, routeFallbackDir)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("mkdir fallback dir: %v", err)
+	}
+	raw, _ := json.Marshal(orch.CronRoute{ID: "../evil", ChatID: 10, Text: "x"})
+	if err := os.WriteFile(filepath.Join(dir, "evil.json"), raw, 0600); err != nil {
+		t.Fatalf("write crafted fallback: %v", err)
+	}
+	if routes, err := readRouteFallbacks(workspace); err != nil || len(routes) != 0 {
+		t.Errorf("readRouteFallbacks(crafted) = %+v, %v; want none", routes, err)
+	}
+}
+
+func TestMemoryRouteFallback(t *testing.T) {
+	service := &Service{}
+	routeA := orch.CronRoute{ID: "env_a", AgentTarget: "a", ChatID: 10, Text: "a"}
+	routeB := orch.CronRoute{ID: "env_b", AgentTarget: "b", ChatID: 20, Text: "b"}
+	service.addMemoryRoute("/ws/a", routeA, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	service.addMemoryRoute("/ws/a", routeA, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	service.addMemoryRoute("/ws/b", routeB, orch.CronJob{ID: "job_b", Spec: "@every 1h"})
+	routesA := service.memoryRoutesFor("/ws/a")
+	if len(routesA) != 1 || routesA[0].route.ID != routeA.ID || routesA[0].jobID != "job_a" {
+		t.Fatalf("memory routes A = %+v, want one with job_a", routesA)
+	}
+	routesB := service.memoryRoutesFor("/ws/b")
+	if len(routesB) != 1 || routesB[0].route.ID != routeB.ID {
+		t.Fatalf("memory routes B = %+v, want one", routesB)
+	}
+	service.removeMemoryRoute("/ws/a", routeA.ID)
+	if remaining := service.memoryRoutesFor("/ws/a"); len(remaining) != 0 {
+		t.Errorf("memory routes after remove = %+v, want empty", remaining)
+	}
+}
+
+func TestPersistRouteMemoryFallback(t *testing.T) {
+	ws := t.TempDir()
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	st.Close()
+	notDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0600); err != nil {
+		t.Fatalf("write not-a-dir: %v", err)
+	}
+	now := time.Now().UTC()
+	service := &Service{now: func() time.Time { return now }}
+	err = service.persistRoute(st, registry.Agent{Name: "valet", Workspace: notDir}, orch.CronJob{Title: "route"},
+		&comm.DeliveryError{EnvelopeID: "env_mem", ChatID: 10, Text: "output"})
+	if !errors.Is(err, errMemoryOnlyRoute) {
+		t.Fatalf("persistRoute() error = %v, want errMemoryOnlyRoute", err)
+	}
+	if routes := service.memoryRoutesFor(notDir); len(routes) != 1 || routes[0].route.ID != "env_mem" {
+		t.Errorf("memory routes = %+v, want env_mem", routes)
+	}
+}
+
+func TestHasMemoryRouteForJob(t *testing.T) {
+	service := &Service{}
+	service.addMemoryRoute("/ws/a", orch.CronRoute{ID: "env", ChatID: 10, Text: "x"}, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	if !service.hasMemoryRouteForJob("/ws/a", "job_a") {
+		t.Error("hasMemoryRouteForJob() = false, want true")
+	}
+	if service.hasMemoryRouteForJob("/ws/b", "job_a") {
+		t.Error("hasMemoryRouteForJob(other workspace) = true, want false")
+	}
+	if service.hasMemoryRouteForJob("/ws/a", "job_b") {
+		t.Error("hasMemoryRouteForJob(other job) = true, want false")
 	}
 }
 

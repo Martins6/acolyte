@@ -47,8 +47,12 @@ show `prompt:<text>`.
 
 Cron output is routed through the target agent's Communication adapter via the durable outbox:
 `notify-user` queues a user-only message, and `inbox` runs a synthetic turn and queues the reply.
-Turns always run and persist even when no channel can deliver; delivery failures are retried and
-recorded in `comm_tg_outbox`/`orch_logs`.
+Turns always run and persist even when no channel can deliver; delivery failures are recorded in
+`comm_tg_outbox`/`orch_logs`.
+
+If the outbox enqueue itself fails, the final text/chat/session is persisted in
+`orch_cron_routes` before the job run is recorded. The cron tick retries those intents with bounded
+backoff and idempotent envelope IDs, so a transient store error does not lose the output.
 
 ## Data model
 `orch_cron_jobs(id, title, owner, kind, spec, prompt, shell_path, routine, routine_args,
