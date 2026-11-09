@@ -264,6 +264,60 @@ func TestUnclaimedFailureDoesNotClearClaim(t *testing.T) {
 	}
 }
 
+func TestEnqueueOutboundIdempotent(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	first, err := store.EnqueueOutbound(OutboxItem{EnvelopeID: "env_same", ChatID: 10, Text: "hello", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("EnqueueOutbound() error: %v", err)
+	}
+	second, err := store.EnqueueOutbound(OutboxItem{EnvelopeID: "env_same", ChatID: 10, Text: "hello", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("EnqueueOutbound(duplicate) error: %v", err)
+	}
+	if second.ID != first.ID || second.Delivery != "pending" {
+		t.Errorf("second = %+v, want existing row %q", second, first.ID)
+	}
+	outbox, err := store.ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Errorf("outbox = %+v, %v; want one row", outbox, err)
+	}
+}
+
+func TestMigrateV7PrefersPendingDuplicate(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)`, module, 6); err != nil {
+		t.Fatalf("record v6: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO comm_tg_outbox
+		(id, envelope_id, chat_id, text, delivery, created_at)
+		VALUES ('old', 'env_dup', 10, 'already sent', 'sent', ?)`, now); err != nil {
+		t.Fatalf("insert sent row: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO comm_tg_outbox
+		(id, envelope_id, chat_id, text, delivery, created_at)
+		VALUES ('new', 'env_dup', 10, 'still pending', 'pending', ?)`, now); err != nil {
+		t.Fatalf("insert pending row: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate(v6) error: %v", err)
+	}
+	outbox, err := New(db).ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Fatalf("outbox = %+v, %v; want one deduplicated row", outbox, err)
+	}
+	if outbox[0].Delivery != "pending" || outbox[0].Text != "still pending" {
+		t.Errorf("outbox row = %+v, want pending copy preserved", outbox[0])
+	}
+}
+
 func TestSettings(t *testing.T) {
 	store := migrateTestDB(t)
 	if err := store.SetSetting("telegram.allowed_users", `["@alice"]`); err != nil {

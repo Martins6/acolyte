@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/go-telegram/bot/models"
+	"github.com/martins6/acolyte/internal/comm"
 	"github.com/martins6/acolyte/internal/envelope"
+	"github.com/martins6/acolyte/internal/store/commtg"
 )
 
 type replayPayload struct {
@@ -28,10 +30,6 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 	if sink == nil {
 		return
 	}
-	if item, ok, err := a.store.CommTG().GetInboxByEnvelope(env.ID); err == nil && ok && item.OpenCodeMessageID != "" {
-		_ = a.store.CommTG().MarkInboundProcessedUnconditional(env.ID, a.now())
-		return
-	}
 	if _, busy := a.inflight.LoadOrStore(env.ID, struct{}{}); busy {
 		return
 	}
@@ -41,6 +39,23 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 	now := a.now()
 	claimed, err := a.store.CommTG().ClaimInbound(env.ID, token, now, now.Add(claimLease))
 	if err != nil || !claimed {
+		return
+	}
+	item, ok, getErr := a.store.CommTG().GetInboxByEnvelope(env.ID)
+	if getErr != nil {
+		_ = a.store.CommTG().RecordInboundFailure(env.ID, token, getErr.Error())
+		return
+	}
+	if ok && item.OpenCodeMessageID != "" {
+		if item.PendingReply != "" {
+			if deliverErr := a.deliverPendingReply(item); deliverErr != nil {
+				_ = a.store.CommTG().RecordInboundFailure(env.ID, token, deliverErr.Error())
+				return
+			}
+		}
+		if markErr := a.store.CommTG().MarkInboundProcessed(env.ID, token, a.now()); markErr != nil {
+			log.Printf("telegram: mark linked inbound %s processed for %s: %v", env.ID, a.agent.Name, markErr)
+		}
 		return
 	}
 
@@ -79,9 +94,17 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 	}
 
 	// If the router already admitted the input, the turn exists even though
-	// collection failed. Mark it processed instead of replaying it.
+	// collection failed. Recover any pending reply first.
 	if item, ok, getErr := a.store.CommTG().GetInboxByEnvelope(env.ID); getErr == nil && ok && item.OpenCodeMessageID != "" {
-		if markErr := a.store.CommTG().MarkInboundProcessedUnconditional(env.ID, a.now()); markErr != nil {
+		if item.PendingReply != "" {
+			if deliverErr := a.deliverPendingReply(item); deliverErr != nil {
+				if recordErr := a.store.CommTG().RecordInboundFailure(env.ID, token, deliverErr.Error()); recordErr != nil {
+					log.Printf("telegram: record inbound failure %s for %s: %v", env.ID, a.agent.Name, recordErr)
+				}
+				return
+			}
+		}
+		if markErr := a.store.CommTG().MarkInboundProcessed(env.ID, token, a.now()); markErr != nil {
 			log.Printf("telegram: mark linked inbound %s processed for %s: %v", env.ID, a.agent.Name, markErr)
 		}
 		return
@@ -115,6 +138,20 @@ func (a *Adapter) replayPending(ctx context.Context) {
 		if _, busy := a.inflight.Load(item.EnvelopeID); busy {
 			continue
 		}
+		if item.PendingReply != "" {
+			token := envelope.NewID()
+			now := a.now()
+			claimed, err := a.store.CommTG().ClaimInbound(item.EnvelopeID, token, now, now.Add(claimLease))
+			if err != nil || !claimed {
+				continue
+			}
+			if deliverErr := a.deliverPendingReply(item); deliverErr != nil {
+				_ = a.store.CommTG().RecordInboundFailure(item.EnvelopeID, token, deliverErr.Error())
+				continue
+			}
+			_ = a.store.CommTG().MarkInboundProcessed(item.EnvelopeID, token, a.now())
+			continue
+		}
 		if item.OpenCodeMessageID != "" {
 			_ = a.store.CommTG().MarkInboundProcessedUnconditional(item.EnvelopeID, a.now())
 			continue
@@ -140,4 +177,25 @@ func (a *Adapter) replayPending(ctx context.Context) {
 		}
 		a.admit(ctx, env)
 	}
+}
+
+func (a *Adapter) deliverPendingReply(item commtg.InboxItem) error {
+	var reply comm.PendingReply
+	if err := json.Unmarshal([]byte(item.PendingReply), &reply); err != nil {
+		return err
+	}
+	if strings.TrimSpace(reply.Text) == "" {
+		return nil
+	}
+	_, err := a.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
+		ID:                reply.ID,
+		EnvelopeID:        reply.ID,
+		ChatID:            item.ChatID,
+		Text:              reply.Text,
+		ReplyTo:           reply.ReplyTo,
+		OpenCodeSessionID: reply.OpenCodeSessionID,
+		SourceMessageID:   reply.SourceMessageID,
+		CreatedAt:         a.now(),
+	})
+	return err
 }

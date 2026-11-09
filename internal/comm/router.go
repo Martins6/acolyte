@@ -2,9 +2,10 @@ package comm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -131,33 +132,43 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	defer func() { <-r.sem }()
 
 	result, turnErr := r.turn.RunUserTurn(ctx, sessionID, text, opencode.TurnConfig{Workspace: agent.Workspace})
-	if result != nil {
-		if result.SessionID != "" {
-			if _, err := st.Orch().UpsertSession(env.Thread, result.SessionID, r.now()); err != nil && turnErr == nil {
-				turnErr = err
-			}
-		}
-		if result.InputID != "" {
-			if err := st.CommTG().LinkInbound(env.ID, result.SessionID, result.InputID); err != nil &&
-				!errors.Is(err, commtg.ErrInboundNotFound) && turnErr == nil {
-				turnErr = err
-			}
+	if result != nil && result.SessionID != "" {
+		if _, err := st.Orch().UpsertSession(env.Thread, result.SessionID, r.now()); err != nil && turnErr == nil {
+			turnErr = err
 		}
 	}
 
 	if turnErr != nil {
-		r.sendOutbound(ctx, agent, env, result, fmt.Sprintf("Error: %v", turnErr))
+		if sendErr := r.sendReply(ctx, st, agent, env, result, fmt.Sprintf("Error: %v", turnErr)); sendErr != nil {
+			return fmt.Errorf("%v: %w", turnErr, sendErr)
+		}
+		if err := r.linkInbound(st, env, result); err != nil {
+			return err
+		}
 		return turnErr
 	}
 	if result != nil && strings.TrimSpace(result.ResponseText) != "" {
-		r.sendOutbound(ctx, agent, env, result, result.ResponseText)
+		if err := r.sendReply(ctx, st, agent, env, result, result.ResponseText); err != nil {
+			return err
+		}
+	}
+	return r.linkInbound(st, env, result)
+}
+
+func (r *Router) linkInbound(st *store.Store, env envelope.Envelope, result *opencode.TurnResult) error {
+	if result == nil || result.InputID == "" {
+		return nil
+	}
+	if err := st.CommTG().LinkInbound(env.ID, result.SessionID, result.InputID); err != nil &&
+		!errors.Is(err, commtg.ErrInboundNotFound) {
+		return err
 	}
 	return nil
 }
 
-func (r *Router) sendOutbound(ctx context.Context, agent registry.Agent, in envelope.Envelope, result *opencode.TurnResult, text string) {
+func (r *Router) sendReply(ctx context.Context, st *store.Store, agent registry.Agent, in envelope.Envelope, result *opencode.TurnResult, text string) error {
 	if r.outbound == nil || strings.TrimSpace(text) == "" {
-		return
+		return nil
 	}
 	out := envelope.New(envelope.DirectionOut, in.Channel, in.Thread, in.To, in.From,
 		envelope.Content{Type: envelope.ContentText, Text: text})
@@ -175,9 +186,62 @@ func (r *Router) sendOutbound(ctx context.Context, agent registry.Agent, in enve
 			out.Meta["reply_to_message_id"] = value
 		}
 	}
-	if err := r.outbound(ctx, agent, out); err != nil {
-		log.Printf("comm: route outbound for %s: %v", agent.Name, err)
+
+	pending := PendingReply{
+		ID:                out.ID,
+		Text:              text,
+		ReplyTo:           routerMetaInt64(out.Meta["reply_to_message_id"]),
+		OpenCodeSessionID: routerMetaString(out.Meta["opencode_session_id"]),
+		SourceMessageID:   routerMetaString(out.Meta["source_message_id"]),
 	}
+	raw, err := json.Marshal(pending)
+	if err != nil {
+		return err
+	}
+	stagingErr := st.CommTG().SetInboundReply(in.ID, string(raw))
+	if stagingErr != nil && !errors.Is(stagingErr, commtg.ErrInboundNotFound) {
+		// Try the outbound anyway; if it succeeds the reply is delivered.
+		stagingErr = nil
+	}
+	if err := r.outbound(ctx, agent, out); err != nil {
+		return err
+	}
+	if stagingErr == nil {
+		_ = st.CommTG().ClearInboundReply(in.ID)
+	}
+	return nil
+}
+
+func routerMetaInt64(value any) *int64 {
+	switch typed := value.(type) {
+	case int:
+		out := int64(typed)
+		return &out
+	case int64:
+		out := typed
+		return &out
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) {
+			return nil
+		}
+		out := int64(typed)
+		return &out
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return nil
+		}
+		return &parsed
+	default:
+		return nil
+	}
+}
+
+func routerMetaString(value any) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
 }
 
 func (r *Router) lockThread(thread string) func() {

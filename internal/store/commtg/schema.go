@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "comm_tg"
-	version = 6
+	version = 7
 )
 
 // Migrate creates or upgrades the Telegram communication schema.
@@ -64,6 +64,12 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("comm_tg: migrate to version 6: %w", err)
 		}
 		current = 6
+	}
+	if current < 7 {
+		if err := migrateV7(db); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 7: %w", err)
+		}
+		current = 7
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -216,6 +222,55 @@ func migrateV6(db *sql.DB) error {
 		return nil
 	}
 	_, err = db.Exec(`ALTER TABLE comm_tg_inbox ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// migrateV7 stores a turn reply if outbox enqueue fails, and makes outbox
+// envelope IDs unique so replay can enqueue a pending reply idempotently.
+func migrateV7(db *sql.DB) error {
+	columns, err := tableColumns(db, "comm_tg_inbox")
+	if err != nil {
+		return err
+	}
+	if !columns["pending_reply"] {
+		if _, err := db.Exec(`ALTER TABLE comm_tg_inbox ADD COLUMN pending_reply TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	// Deduplicate existing rows before adding the unique index. Prefer a
+	// pending row so a deliverable copy is never discarded.
+	rows, err := db.Query(`SELECT envelope_id FROM comm_tg_outbox
+		GROUP BY envelope_id HAVING COUNT(*) > 1`)
+	if err != nil {
+		return err
+	}
+	var duplicates []string
+	for rows.Next() {
+		var envelopeID string
+		if err := rows.Scan(&envelopeID); err != nil {
+			rows.Close()
+			return err
+		}
+		duplicates = append(duplicates, envelopeID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, envelopeID := range duplicates {
+		var keepRowID int64
+		if err := db.QueryRow(`SELECT rowid FROM comm_tg_outbox WHERE envelope_id = ?
+			ORDER BY CASE delivery WHEN 'pending' THEN 0 ELSE 1 END, rowid LIMIT 1`,
+			envelopeID).Scan(&keepRowID); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`DELETE FROM comm_tg_outbox WHERE envelope_id = ? AND rowid != ?`,
+			envelopeID, keepRowID); err != nil {
+			return err
+		}
+	}
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_tg_outbox_envelope ON comm_tg_outbox(envelope_id)`)
 	return err
 }
 

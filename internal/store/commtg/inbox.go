@@ -23,6 +23,7 @@ type InboxItem struct {
 	OpenCodeSessionID string     `json:"opencode_session_id"`
 	OpenCodeMessageID string     `json:"opencode_message_id"`
 	PendingEnvelope   string     `json:"-"`
+	PendingReply      string     `json:"-"`
 	ProcessedAt       *time.Time `json:"processed_at,omitempty"`
 	Attempts          int        `json:"attempts,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
@@ -30,8 +31,8 @@ type InboxItem struct {
 }
 
 const inboxColumns = `id, tg_update_id, chat_id, envelope_id, media_path,
-	opencode_session_id, opencode_message_id, pending_envelope, processed_at,
-	attempts, last_error, received_at`
+	opencode_session_id, opencode_message_id, pending_envelope, pending_reply,
+	processed_at, attempts, last_error, received_at`
 
 // RecordInbound stores a pending inbound update and reports whether it was new.
 // Duplicate Telegram update IDs are ignored; a duplicate envelope ID is an
@@ -59,11 +60,12 @@ func (s *Store) RecordInbound(item InboxItem) (bool, error) {
 	result, err := s.db.Exec(`INSERT INTO comm_tg_inbox
 		(id, tg_update_id, chat_id, envelope_id, media_path,
 		 opencode_session_id, opencode_message_id, pending_envelope,
-		 processed_at, attempts, last_error, received_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, '', ?)
+		 pending_reply, processed_at, attempts, last_error, received_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, '', ?)
 		ON CONFLICT(tg_update_id) DO NOTHING`,
 		item.ID, item.TGUpdateID, item.ChatID, item.EnvelopeID, item.MediaPath,
-		item.OpenCodeSessionID, item.OpenCodeMessageID, item.PendingEnvelope, item.ReceivedAt,
+		item.OpenCodeSessionID, item.OpenCodeMessageID, item.PendingEnvelope,
+		item.PendingReply, item.ReceivedAt,
 	)
 	if err != nil {
 		return false, fmt.Errorf("comm_tg: record inbound %d: %w", item.TGUpdateID, err)
@@ -107,6 +109,33 @@ func (s *Store) LinkInbound(envelopeID, opencodeSessionID, opencodeMessageID str
 	return nil
 }
 
+// SetInboundReply stores a turn reply that could not be enqueued yet.
+func (s *Store) SetInboundReply(envelopeID, reply string) error {
+	result, err := s.db.Exec(`UPDATE comm_tg_inbox SET pending_reply = ?
+		WHERE envelope_id = ? AND processed_at IS NULL`, reply, envelopeID)
+	if err != nil {
+		return fmt.Errorf("comm_tg: set inbound reply %q: %w", envelopeID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("comm_tg: set inbound reply %q: %w", envelopeID, err)
+	}
+	if affected == 0 {
+		return ErrInboundNotFound
+	}
+	return nil
+}
+
+// ClearInboundReply clears a recovered reply.
+func (s *Store) ClearInboundReply(envelopeID string) error {
+	_, err := s.db.Exec(`UPDATE comm_tg_inbox SET pending_reply = ''
+		WHERE envelope_id = ? AND processed_at IS NULL`, envelopeID)
+	if err != nil {
+		return fmt.Errorf("comm_tg: clear inbound reply %q: %w", envelopeID, err)
+	}
+	return nil
+}
+
 // MarkInboundProcessed clears the replay payload and records admission. The
 // token must match the live claim.
 func (s *Store) MarkInboundProcessed(envelopeID, token string, at time.Time) error {
@@ -114,7 +143,7 @@ func (s *Store) MarkInboundProcessed(envelopeID, token string, at time.Time) err
 		at = time.Now().UTC()
 	}
 	_, err := s.db.Exec(`UPDATE comm_tg_inbox
-		SET processed_at = ?, pending_envelope = '', last_error = '', claimed_until = NULL, claim_token = ''
+		SET processed_at = ?, pending_envelope = '', pending_reply = '', last_error = '', claimed_until = NULL, claim_token = ''
 		WHERE envelope_id = ? AND processed_at IS NULL AND claim_token = ?`, at, envelopeID, token)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark inbound processed %q: %w", envelopeID, err)
@@ -129,7 +158,7 @@ func (s *Store) MarkInboundProcessedUnconditional(envelopeID string, at time.Tim
 		at = time.Now().UTC()
 	}
 	_, err := s.db.Exec(`UPDATE comm_tg_inbox
-		SET processed_at = ?, pending_envelope = '', last_error = '', claimed_until = NULL, claim_token = ''
+		SET processed_at = ?, pending_envelope = '', pending_reply = '', last_error = '', claimed_until = NULL, claim_token = ''
 		WHERE envelope_id = ? AND processed_at IS NULL`, at, envelopeID)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark inbound processed %q: %w", envelopeID, err)
@@ -241,7 +270,7 @@ func (s *Store) GetInboxByEnvelope(envelopeID string) (InboxItem, bool, error) {
 	err := s.db.QueryRow(`SELECT `+inboxColumns+` FROM comm_tg_inbox
 		WHERE envelope_id = ?`, envelopeID).Scan(
 		&item.ID, &item.TGUpdateID, &item.ChatID, &item.EnvelopeID, &item.MediaPath,
-		&item.OpenCodeSessionID, &item.OpenCodeMessageID, &item.PendingEnvelope,
+		&item.OpenCodeSessionID, &item.OpenCodeMessageID, &item.PendingEnvelope, &item.PendingReply,
 		&processedAt, &item.Attempts, &item.LastError, &item.ReceivedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -261,7 +290,7 @@ func scanInbox(rows *sql.Rows) ([]InboxItem, error) {
 		var processedAt sql.NullTime
 		if err := rows.Scan(&item.ID, &item.TGUpdateID, &item.ChatID, &item.EnvelopeID,
 			&item.MediaPath, &item.OpenCodeSessionID, &item.OpenCodeMessageID,
-			&item.PendingEnvelope, &processedAt, &item.Attempts, &item.LastError,
+			&item.PendingEnvelope, &item.PendingReply, &processedAt, &item.Attempts, &item.LastError,
 			&item.ReceivedAt); err != nil {
 			return nil, fmt.Errorf("comm_tg: scan inbox: %w", err)
 		}

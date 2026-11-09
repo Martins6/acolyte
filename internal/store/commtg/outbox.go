@@ -66,7 +66,8 @@ func (s *Store) EnqueueOutbound(item OutboxItem) (OutboxItem, error) {
 		(id, envelope_id, chat_id, text, reply_to, chunks_sent, attempts,
 		 next_attempt_at, last_error, delivery, tg_message_id,
 		 opencode_session_id, source_message_id, created_at, sent_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(envelope_id) DO NOTHING`,
 		item.ID, item.EnvelopeID, item.ChatID, item.Text, nullableInt64(item.ReplyTo),
 		item.ChunksSent, item.Attempts, nullableTime(item.NextAttemptAt), item.LastError,
 		item.Delivery, nullableInt64(item.TGMessageID), item.OpenCodeSessionID,
@@ -75,7 +76,32 @@ func (s *Store) EnqueueOutbound(item OutboxItem) (OutboxItem, error) {
 	if err != nil {
 		return OutboxItem{}, fmt.Errorf("comm_tg: enqueue outbound: %w", err)
 	}
+	existing, ok, err := s.GetOutboxByEnvelope(item.EnvelopeID)
+	if err != nil {
+		return OutboxItem{}, err
+	}
+	if ok {
+		return existing, nil
+	}
 	return item, nil
+}
+
+// GetOutboxByEnvelope returns the durable row for an envelope.
+func (s *Store) GetOutboxByEnvelope(envelopeID string) (OutboxItem, bool, error) {
+	rows, err := s.db.Query(`SELECT `+outboxColumns+` FROM comm_tg_outbox
+		WHERE envelope_id = ? LIMIT 1`, strings.TrimSpace(envelopeID))
+	if err != nil {
+		return OutboxItem{}, false, fmt.Errorf("comm_tg: get outbox %q: %w", envelopeID, err)
+	}
+	defer rows.Close()
+	items, err := scanOutbox(rows)
+	if err != nil {
+		return OutboxItem{}, false, err
+	}
+	if len(items) == 0 {
+		return OutboxItem{}, false, nil
+	}
+	return items[0], true, nil
 }
 
 // DueOutbound returns pending rows whose next attempt is due.
