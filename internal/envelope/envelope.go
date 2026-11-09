@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +119,11 @@ func (e Envelope) Validate() error {
 	if (e.Content.Type == ContentText || e.Content.Type == ContentMedia) &&
 		strings.TrimSpace(e.Content.Text) == "" && len(e.Content.Media) == 0 {
 		return fmt.Errorf("envelope: %s content requires text or media", e.Content.Type)
+	}
+	for _, path := range e.Content.Media {
+		if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+			return fmt.Errorf("envelope: media path %q must be absolute", path)
+		}
 	}
 	if e.CreatedAt.IsZero() {
 		return fmt.Errorf("envelope: created_at is required")

@@ -34,6 +34,8 @@ func TestValidateRejectsInvalid(t *testing.T) {
 		func(e *Envelope) { e.To.Kind = "robot" },
 		func(e *Envelope) { e.Content.Type = "binary" },
 		func(e *Envelope) { e.Content = Content{Type: ContentText} },
+		func(e *Envelope) { e.Content = Content{Type: ContentMedia, Media: []string{"relative.jpg"}} },
+		func(e *Envelope) { e.Content = Content{Type: ContentMedia, Media: []string{""}} },
 		func(e *Envelope) { e.CreatedAt = time.Time{} },
 	}
 	for index, mutate := range cases {
