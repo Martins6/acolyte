@@ -256,15 +256,15 @@ func TestMemoryRouteFallback(t *testing.T) {
 	service := &Service{}
 	routeA := orch.CronRoute{ID: "env_a", AgentTarget: "a", ChatID: 10, Text: "a"}
 	routeB := orch.CronRoute{ID: "env_b", AgentTarget: "b", ChatID: 20, Text: "b"}
-	service.addMemoryRoute("/ws/a", routeA)
-	service.addMemoryRoute("/ws/a", routeA)
-	service.addMemoryRoute("/ws/b", routeB)
+	service.addMemoryRoute("/ws/a", routeA, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	service.addMemoryRoute("/ws/a", routeA, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	service.addMemoryRoute("/ws/b", routeB, orch.CronJob{ID: "job_b", Spec: "@every 1h"})
 	routesA := service.takeMemoryRoutes("/ws/a")
-	if len(routesA) != 1 || routesA[0].ID != routeA.ID {
-		t.Fatalf("memory routes A = %+v, want one", routesA)
+	if len(routesA) != 1 || routesA[0].route.ID != routeA.ID || routesA[0].jobID != "job_a" {
+		t.Fatalf("memory routes A = %+v, want one with job_a", routesA)
 	}
 	routesB := service.takeMemoryRoutes("/ws/b")
-	if len(routesB) != 1 || routesB[0].ID != routeB.ID {
+	if len(routesB) != 1 || routesB[0].route.ID != routeB.ID {
 		t.Fatalf("memory routes B = %+v, want one", routesB)
 	}
 	if remaining := service.takeMemoryRoutes("/ws/a"); len(remaining) != 0 {
@@ -290,7 +290,7 @@ func TestPersistRouteMemoryFallback(t *testing.T) {
 	if !errors.Is(err, errMemoryOnlyRoute) {
 		t.Fatalf("persistRoute() error = %v, want errMemoryOnlyRoute", err)
 	}
-	if routes := service.takeMemoryRoutes(notDir); len(routes) != 1 || routes[0].ID != "env_mem" {
+	if routes := service.takeMemoryRoutes(notDir); len(routes) != 1 || routes[0].route.ID != "env_mem" {
 		t.Errorf("memory routes = %+v, want env_mem", routes)
 	}
 }

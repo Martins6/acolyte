@@ -100,6 +100,9 @@ type Service struct {
 type memoryRoute struct {
 	workspace string
 	route     orch.CronRoute
+	jobID     string
+	spec      string
+	timezone  string
 }
 
 // Start starts the cron service. It performs one store refresh before returning.
@@ -541,7 +544,7 @@ func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.C
 	}
 	// Last resort: keep the payload in memory, but tell the caller to requeue
 	// the job so a restart does not silently lose it.
-	s.addMemoryRoute(agent.Workspace, route)
+	s.addMemoryRoute(agent.Workspace, route, job)
 	s.logJob(st, job, "error", "queued undelivered output in memory (DB and file unavailable): "+routeErr.Error())
 	return errMemoryOnlyRoute
 }
@@ -558,7 +561,7 @@ func (s *Service) requeueAfterPersistFailure(st *store.Store, job orch.CronJob) 
 	log.Printf("cron: CRITICAL: could not requeue %s after route persistence failure; output may be lost", job.Title)
 }
 
-func (s *Service) addMemoryRoute(workspace string, route orch.CronRoute) {
+func (s *Service) addMemoryRoute(workspace string, route orch.CronRoute, job orch.CronJob) {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
 	for _, existing := range s.memoryRoutes {
@@ -566,17 +569,23 @@ func (s *Service) addMemoryRoute(workspace string, route orch.CronRoute) {
 			return
 		}
 	}
-	s.memoryRoutes = append(s.memoryRoutes, memoryRoute{workspace: workspace, route: route})
+	s.memoryRoutes = append(s.memoryRoutes, memoryRoute{
+		workspace: workspace,
+		route:     route,
+		jobID:     job.ID,
+		spec:      job.Spec,
+		timezone:  job.Timezone,
+	})
 }
 
-func (s *Service) takeMemoryRoutes(workspace string) []orch.CronRoute {
+func (s *Service) takeMemoryRoutes(workspace string) []memoryRoute {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	var routes []orch.CronRoute
+	var routes []memoryRoute
 	var kept []memoryRoute
 	for _, item := range s.memoryRoutes {
 		if item.workspace == workspace {
-			routes = append(routes, item.route)
+			routes = append(routes, item)
 		} else {
 			kept = append(kept, item)
 		}
@@ -629,7 +638,8 @@ func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
 		_ = removeRouteFallback(pair.agent.Workspace, route.ID)
 	}
 
-	for _, route := range s.takeMemoryRoutes(pair.agent.Workspace) {
+	for _, pending := range s.takeMemoryRoutes(pair.agent.Workspace) {
+		route := pending.route
 		_, enqueueErr := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
 			ID:                route.ID,
 			EnvelopeID:        route.ID,
@@ -640,9 +650,36 @@ func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
 			CreatedAt:         s.now(),
 		})
 		if enqueueErr != nil {
-			s.addMemoryRoute(pair.agent.Workspace, route)
+			s.keepMemoryRoute(pending)
+			continue
+		}
+		s.restoreRequeuedJob(pair, pending)
+	}
+}
+
+func (s *Service) keepMemoryRoute(pending memoryRoute) {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	s.memoryRoutes = append(s.memoryRoutes, pending)
+}
+
+func (s *Service) restoreRequeuedJob(pair *agentStore, pending memoryRoute) {
+	if pending.jobID == "" || pending.spec == "" {
+		return
+	}
+	location := time.Local
+	if pending.timezone != "" {
+		if loaded, err := time.LoadLocation(pending.timezone); err == nil {
+			location = loaded
 		}
 	}
+	schedule, err := cronlib.ParseStandard(pending.spec)
+	if err != nil {
+		return
+	}
+	next := schedule.Next(s.now().In(location)).UTC()
+	_ = pair.store.Orch().RequeueCronJob(pending.jobID, next)
+	_ = pair.store.Orch().MarkCronJobRun(pending.jobID, s.now())
 }
 
 func writeRouteFallback(workspace string, route orch.CronRoute) error {
