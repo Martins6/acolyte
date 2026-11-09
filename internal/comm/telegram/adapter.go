@@ -71,6 +71,7 @@ type Adapter struct {
 	done   chan struct{}
 
 	deliverMu sync.Mutex
+	inflight  sync.Map
 }
 
 // New validates options and builds an adapter. Start performs the network

@@ -365,6 +365,32 @@ func TestReplaySkipsLinkedRow(t *testing.T) {
 	}
 }
 
+func TestReplaySkipsInFlightAdmission(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 204, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	adapter.inflight.Store(env.ID, struct{}{})
+	calls := 0
+	adapter.sink = func(envelope.Envelope) error { calls++; return nil }
+	adapter.replayPending(context.Background())
+	if calls != 0 {
+		t.Fatalf("replay called sink %d times for an in-flight admission", calls)
+	}
+	adapter.inflight.Delete(env.ID)
+	adapter.replayPending(context.Background())
+	if calls != 1 {
+		t.Errorf("replay calls after inflight cleared = %d, want 1", calls)
+	}
+}
+
 func TestHandleUpdateLeavesPendingOnSinkFailure(t *testing.T) {
 	adapter, _, st, _ := newTestAdapter(t, "42")
 	var captured envelope.Envelope

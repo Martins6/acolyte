@@ -17,6 +17,10 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 	if sink == nil {
 		return
 	}
+	if _, busy := a.inflight.LoadOrStore(env.ID, struct{}{}); busy {
+		return
+	}
+	defer a.inflight.Delete(env.ID)
 	if item, ok, err := a.store.CommTG().GetInboxByEnvelope(env.ID); err == nil && ok && item.OpenCodeMessageID != "" {
 		_ = a.store.CommTG().MarkInboundProcessed(env.ID, a.now())
 		return
@@ -69,6 +73,9 @@ func (a *Adapter) replayPending(ctx context.Context) {
 		return
 	}
 	for _, item := range items {
+		if _, busy := a.inflight.Load(item.EnvelopeID); busy {
+			continue
+		}
 		if item.OpenCodeMessageID != "" {
 			_ = a.store.CommTG().MarkInboundProcessed(item.EnvelopeID, a.now())
 			continue
