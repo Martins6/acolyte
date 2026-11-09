@@ -243,7 +243,7 @@ func TestDaemonStartsAndRoutesInbound(t *testing.T) {
 	}
 	release()
 
-	if err := comm.sink(env); err != nil {
+	if err := comm.sink(context.Background(), env); err != nil {
 		t.Fatalf("inbound sink error: %v", err)
 	}
 

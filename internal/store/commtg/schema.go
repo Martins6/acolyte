@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "comm_tg"
-	version = 5
+	version = 6
 )
 
 // Migrate creates or upgrades the Telegram communication schema.
@@ -58,6 +58,12 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("comm_tg: migrate to version 5: %w", err)
 		}
 		current = 5
+	}
+	if current < 6 {
+		if err := migrateV6(db); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 6: %w", err)
+		}
+		current = 6
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -196,6 +202,20 @@ func migrateV5(db *sql.DB) error {
 		return nil
 	}
 	_, err = db.Exec(`ALTER TABLE comm_tg_inbox ADD COLUMN claimed_until DATETIME`)
+	return err
+}
+
+// migrateV6 adds an owner token so only the process holding a claim can renew,
+// complete, or fail it.
+func migrateV6(db *sql.DB) error {
+	columns, err := tableColumns(db, "comm_tg_inbox")
+	if err != nil {
+		return err
+	}
+	if columns["claim_token"] {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE comm_tg_inbox ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 

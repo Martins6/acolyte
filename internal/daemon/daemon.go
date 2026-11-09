@@ -281,8 +281,8 @@ func (s *Service) startAgent(agent registry.Agent, seenTokens map[string]string)
 		release()
 		return
 	}
-	sink := func(env envelope.Envelope) error {
-		if err := s.router.HandleInbound(s.ctx, agent, env); err != nil {
+	sink := func(ctx context.Context, env envelope.Envelope) error {
+		if err := s.router.HandleInbound(ctx, agent, env); err != nil {
 			log.Printf("daemon: inbound for %s: %v", agent.Name, err)
 			return err
 		}

@@ -98,13 +98,29 @@ func (s *Store) LinkInbound(envelopeID, opencodeSessionID, opencodeMessageID str
 	return nil
 }
 
-// MarkInboundProcessed clears the replay payload and records admission.
-func (s *Store) MarkInboundProcessed(envelopeID string, at time.Time) error {
+// MarkInboundProcessed clears the replay payload and records admission. The
+// token must match the live claim.
+func (s *Store) MarkInboundProcessed(envelopeID, token string, at time.Time) error {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
 	_, err := s.db.Exec(`UPDATE comm_tg_inbox
-		SET processed_at = ?, pending_envelope = '', last_error = '', claimed_until = NULL
+		SET processed_at = ?, pending_envelope = '', last_error = '', claimed_until = NULL, claim_token = ''
+		WHERE envelope_id = ? AND processed_at IS NULL AND claim_token = ?`, at, envelopeID, token)
+	if err != nil {
+		return fmt.Errorf("comm_tg: mark inbound processed %q: %w", envelopeID, err)
+	}
+	return nil
+}
+
+// MarkInboundProcessedUnconditional is used for rows already linked to an
+// OpenCode message (or pre-replay rows) before a claim is taken.
+func (s *Store) MarkInboundProcessedUnconditional(envelopeID string, at time.Time) error {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	_, err := s.db.Exec(`UPDATE comm_tg_inbox
+		SET processed_at = ?, pending_envelope = '', last_error = '', claimed_until = NULL, claim_token = ''
 		WHERE envelope_id = ? AND processed_at IS NULL`, at, envelopeID)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark inbound processed %q: %w", envelopeID, err)
@@ -113,11 +129,12 @@ func (s *Store) MarkInboundProcessed(envelopeID string, at time.Time) error {
 }
 
 // RecordInboundFailure records a failed admission attempt and leaves the row
-// pending for replay.
-func (s *Store) RecordInboundFailure(envelopeID, errText string) error {
+// pending for replay. The token must match the live claim.
+func (s *Store) RecordInboundFailure(envelopeID, token, errText string) error {
 	_, err := s.db.Exec(`UPDATE comm_tg_inbox
-		SET attempts = attempts + 1, last_error = ?, claimed_until = NULL
-		WHERE envelope_id = ? AND processed_at IS NULL`, errText, envelopeID)
+		SET attempts = attempts + 1, last_error = ?, claimed_until = NULL, claim_token = ''
+		WHERE envelope_id = ? AND processed_at IS NULL AND (claim_token = ? OR ? = '')`,
+		errText, envelopeID, token, token)
 	if err != nil {
 		return fmt.Errorf("comm_tg: record inbound failure %q: %w", envelopeID, err)
 	}
@@ -126,23 +143,42 @@ func (s *Store) RecordInboundFailure(envelopeID, errText string) error {
 
 // ClaimInbound atomically leases an unprocessed row for one admission attempt.
 // It returns false when another caller holds a live lease or the row is done.
-func (s *Store) ClaimInbound(envelopeID string, now, leaseUntil time.Time) (bool, error) {
+func (s *Store) ClaimInbound(envelopeID, token string, now, leaseUntil time.Time) (bool, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if leaseUntil.IsZero() {
-		leaseUntil = now.Add(10 * time.Minute)
+		leaseUntil = now.Add(2 * time.Minute)
 	}
-	result, err := s.db.Exec(`UPDATE comm_tg_inbox SET claimed_until = ?
+	result, err := s.db.Exec(`UPDATE comm_tg_inbox SET claimed_until = ?, claim_token = ?
 		WHERE envelope_id = ? AND processed_at IS NULL
 		AND (claimed_until IS NULL OR claimed_until <= ?)`,
-		leaseUntil, envelopeID, now)
+		leaseUntil, token, envelopeID, now)
 	if err != nil {
 		return false, fmt.Errorf("comm_tg: claim inbound %q: %w", envelopeID, err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("comm_tg: claim inbound %q: %w", envelopeID, err)
+	}
+	return affected > 0, nil
+}
+
+// RenewInboundClaim extends a live claim; false means the claim was lost or
+// the row was completed by another worker.
+func (s *Store) RenewInboundClaim(envelopeID, token string, leaseUntil time.Time) (bool, error) {
+	if leaseUntil.IsZero() {
+		leaseUntil = time.Now().UTC().Add(2 * time.Minute)
+	}
+	result, err := s.db.Exec(`UPDATE comm_tg_inbox SET claimed_until = ?
+		WHERE envelope_id = ? AND processed_at IS NULL AND claim_token = ?`,
+		leaseUntil, envelopeID, token)
+	if err != nil {
+		return false, fmt.Errorf("comm_tg: renew inbound claim %q: %w", envelopeID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("comm_tg: renew inbound claim %q: %w", envelopeID, err)
 	}
 	return affected > 0, nil
 }

@@ -85,7 +85,7 @@ func newTestAdapter(t *testing.T, allowed ...string) (*Adapter, *fakeAPI, *store
 func TestHandleUpdateAdmitsAllowedUserAndDeduplicates(t *testing.T) {
 	adapter, api, st, _ := newTestAdapter(t, "@alice", "42")
 	var captured []envelope.Envelope
-	adapter.sink = func(env envelope.Envelope) error { captured = append(captured, env); return nil }
+	adapter.sink = func(_ context.Context, env envelope.Envelope) error { captured = append(captured, env); return nil }
 
 	update := &models.Update{ID: 100, Message: &models.Message{
 		ID:   7,
@@ -122,7 +122,7 @@ func TestHandleUpdateAdmitsAllowedUserAndDeduplicates(t *testing.T) {
 func TestHandleUpdateGroupIsNotNotificationDestination(t *testing.T) {
 	adapter, _, st, _ := newTestAdapter(t, "@alice")
 	captured := 0
-	adapter.sink = func(envelope.Envelope) error { captured++; return nil }
+	adapter.sink = func(context.Context, envelope.Envelope) error { captured++; return nil }
 	update := &models.Update{ID: 103, Message: &models.Message{
 		ID:   10,
 		From: &models.User{ID: 42, Username: "alice"},
@@ -146,7 +146,7 @@ func TestHandleUpdateGroupIsNotNotificationDestination(t *testing.T) {
 func TestHandleUpdateDeniesUnknownUser(t *testing.T) {
 	adapter, api, st, _ := newTestAdapter(t, "@alice")
 	called := false
-	adapter.sink = func(envelope.Envelope) error { called = true; return nil }
+	adapter.sink = func(context.Context, envelope.Envelope) error { called = true; return nil }
 	update := &models.Update{ID: 101, Message: &models.Message{
 		ID:   8,
 		From: &models.User{ID: 43, Username: "bob"},
@@ -175,7 +175,7 @@ func TestHandleUpdateReusesDownloadedMedia(t *testing.T) {
 		t.Fatalf("RecordMedia() error: %v", err)
 	}
 	var captured []envelope.Envelope
-	adapter.sink = func(env envelope.Envelope) error { captured = append(captured, env); return nil }
+	adapter.sink = func(_ context.Context, env envelope.Envelope) error { captured = append(captured, env); return nil }
 	update := &models.Update{ID: 102, Message: &models.Message{
 		ID:      9,
 		From:    &models.User{ID: 42, Username: "alice"},
@@ -301,7 +301,7 @@ func TestReplayPendingAdmitsAndClears(t *testing.T) {
 		t.Fatalf("RecordInbound() error: %v", err)
 	}
 	calls := 0
-	adapter.sink = func(envelope.Envelope) error { calls++; return nil }
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { calls++; return nil }
 	adapter.replayPending(context.Background())
 	if calls != 1 {
 		t.Fatalf("sink calls = %d, want 1", calls)
@@ -324,13 +324,13 @@ func TestReplayPendingRetriesFailure(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordInbound() error: %v", err)
 	}
-	adapter.sink = func(envelope.Envelope) error { return errors.New("temporary") }
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { return errors.New("temporary") }
 	adapter.replayPending(context.Background())
 	item, _, _ := st.CommTG().GetInboxByEnvelope(env.ID)
 	if item.ProcessedAt != nil || item.Attempts != 1 || item.LastError == "" {
 		t.Fatalf("inbox after failure = %+v", item)
 	}
-	adapter.sink = func(envelope.Envelope) error { return nil }
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { return nil }
 	adapter.replayPending(context.Background())
 	item, _, _ = st.CommTG().GetInboxByEnvelope(env.ID)
 	if item.ProcessedAt == nil || item.PendingEnvelope != "" {
@@ -354,7 +354,7 @@ func TestReplaySkipsLinkedRow(t *testing.T) {
 		t.Fatalf("LinkInbound() error: %v", err)
 	}
 	calls := 0
-	adapter.sink = func(envelope.Envelope) error { calls++; return nil }
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { calls++; return nil }
 	adapter.replayPending(context.Background())
 	if calls != 0 {
 		t.Errorf("sink calls = %d, want 0 for an already-linked row", calls)
@@ -379,7 +379,7 @@ func TestReplaySkipsInFlightAdmission(t *testing.T) {
 	}
 	adapter.inflight.Store(env.ID, struct{}{})
 	calls := 0
-	adapter.sink = func(envelope.Envelope) error { calls++; return nil }
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { calls++; return nil }
 	adapter.replayPending(context.Background())
 	if calls != 0 {
 		t.Fatalf("replay called sink %d times for an in-flight admission", calls)
@@ -394,7 +394,7 @@ func TestReplaySkipsInFlightAdmission(t *testing.T) {
 func TestHandleUpdateLeavesPendingOnSinkFailure(t *testing.T) {
 	adapter, _, st, _ := newTestAdapter(t, "42")
 	var captured envelope.Envelope
-	adapter.sink = func(env envelope.Envelope) error { captured = env; return errors.New("turn failed") }
+	adapter.sink = func(_ context.Context, env envelope.Envelope) error { captured = env; return errors.New("turn failed") }
 	update := &models.Update{ID: 203, Message: &models.Message{
 		ID:   11,
 		From: &models.User{ID: 42, Username: "alice"},
