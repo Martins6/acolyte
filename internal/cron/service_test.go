@@ -209,6 +209,27 @@ func TestCronDeliveryErrorPersistsRouteAndRetries(t *testing.T) {
 	}
 }
 
+func TestRouteFallbackFile(t *testing.T) {
+	workspace := t.TempDir()
+	route := orch.CronRoute{
+		ID: "env_fallback", AgentTarget: "valet", ChatID: 10, Text: "output",
+		OpenCodeSessionID: "ses_x", SourceMessageID: "msg_x", CreatedAt: time.Now().UTC(),
+	}
+	if err := writeRouteFallback(workspace, route); err != nil {
+		t.Fatalf("writeRouteFallback() error: %v", err)
+	}
+	routes, err := readRouteFallbacks(workspace)
+	if err != nil || len(routes) != 1 || routes[0].ID != route.ID || routes[0].Text != "output" {
+		t.Fatalf("readRouteFallbacks() = %+v, %v", routes, err)
+	}
+	if err := removeRouteFallback(workspace, route.ID); err != nil {
+		t.Fatalf("removeRouteFallback() error: %v", err)
+	}
+	if routes, err := readRouteFallbacks(workspace); err != nil || len(routes) != 0 {
+		t.Errorf("readRouteFallbacks(after remove) = %+v, %v", routes, err)
+	}
+}
+
 func TestShellJobUsesConfiguredShell(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	dir := t.TempDir()
