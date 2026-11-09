@@ -154,6 +154,29 @@ func TestCronRouteLifecycle(t *testing.T) {
 	}
 }
 
+func TestRequeueCronJob(t *testing.T) {
+	s, _ := openTest(t)
+	job := orch.CronJob{Title: "requeue", Kind: "shell", Spec: "@every 1h", Enabled: true}
+	if err := s.Orch().AddCronJob(job); err != nil {
+		t.Fatalf("AddCronJob() error: %v", err)
+	}
+	stored, err := s.Orch().GetCronJobByTitle("requeue")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	next := time.Now().UTC().Add(30 * time.Second)
+	if err := s.Orch().RequeueCronJob(stored.ID, next); err != nil {
+		t.Fatalf("RequeueCronJob() error: %v", err)
+	}
+	stored, err = s.Orch().GetCronJobByTitle("requeue")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if stored.NextRunAt == nil || !stored.NextRunAt.Equal(next) {
+		t.Errorf("next run = %v, want %v", stored.NextRunAt, next)
+	}
+}
+
 func TestSessions(t *testing.T) {
 	s, _ := openTest(t)
 	now := time.Now().UTC()

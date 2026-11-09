@@ -412,7 +412,11 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		}
 		s.logJob(st, job, "error", fmt.Sprintf("failed after %s: %v", s.now().Sub(started).Round(time.Millisecond), err))
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, false); routeErr != nil {
-			s.persistRoute(st, agent, job, routeErr)
+			if persistErr := s.persistRoute(st, agent, job, routeErr); persistErr != nil {
+				s.logJob(st, job, "error", "persist route: "+persistErr.Error())
+				_ = st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second))
+				return
+			}
 		}
 		_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 		return
@@ -421,7 +425,11 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	s.logJob(st, job, "info", fmt.Sprintf("completed in %s", s.now().Sub(started).Round(time.Millisecond)))
 	if text != "" {
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, true); routeErr != nil {
-			s.persistRoute(st, agent, job, routeErr)
+			if persistErr := s.persistRoute(st, agent, job, routeErr); persistErr != nil {
+				s.logJob(st, job, "error", "persist route: "+persistErr.Error())
+				_ = st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second))
+				return
+			}
 		}
 	}
 	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
@@ -489,11 +497,11 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 }
 
 // persistRoute stores a delivery intent when the outbox enqueue failed.
-func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) {
+func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) error {
 	var delivery *comm.DeliveryError
 	if !errors.As(routeErr, &delivery) {
 		s.logJob(st, job, "error", "route failed: "+routeErr.Error())
-		return
+		return nil
 	}
 	route := orch.CronRoute{
 		ID:                delivery.EnvelopeID,
@@ -504,11 +512,15 @@ func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.C
 		SourceMessageID:   delivery.SourceMessageID,
 		CreatedAt:         s.now(),
 	}
-	if err := st.Orch().AddCronRoute(route); err != nil {
-		s.logJob(st, job, "error", "persist route retry: "+err.Error())
-		return
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if lastErr = st.Orch().AddCronRoute(route); lastErr == nil {
+			s.logJob(st, job, "warn", "queued undelivered output for retry: "+routeErr.Error())
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	s.logJob(st, job, "warn", "queued undelivered output for retry: "+routeErr.Error())
+	return lastErr
 }
 
 func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
