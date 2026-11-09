@@ -414,7 +414,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, false); routeErr != nil {
 			if persistErr := s.persistRoute(st, agent, job, routeErr); persistErr != nil {
 				s.logJob(st, job, "error", "persist route: "+persistErr.Error())
-				_ = st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second))
+				s.requeueAfterPersistFailure(st, job)
 				return
 			}
 		}
@@ -427,7 +427,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, true); routeErr != nil {
 			if persistErr := s.persistRoute(st, agent, job, routeErr); persistErr != nil {
 				s.logJob(st, job, "error", "persist route: "+persistErr.Error())
-				_ = st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second))
+				s.requeueAfterPersistFailure(st, job)
 				return
 			}
 		}
@@ -521,6 +521,18 @@ func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.C
 		time.Sleep(50 * time.Millisecond)
 	}
 	return lastErr
+}
+
+// requeueAfterPersistFailure retries moving the job's next run so a failed
+// route insert is not treated as a completed run.
+func (s *Service) requeueAfterPersistFailure(st *store.Store, job orch.CronJob) {
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second)); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	log.Printf("cron: CRITICAL: could not requeue %s after route persistence failure; output may be lost", job.Title)
 }
 
 func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
