@@ -37,7 +37,14 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		Metadata:    map[string]any{"cron_job": job.Title},
 	}, opencode.TurnConfig{Workspace: agent.Workspace})
 	if err != nil {
-		return "", "", err
+		created := ""
+		if result != nil {
+			created = result.SessionID
+		}
+		if created != "" {
+			_, _ = st.Orch().UpsertSession(thread, created, s.now())
+		}
+		return "", created, err
 	}
 	if _, err := st.Orch().UpsertSession(thread, result.SessionID, s.now()); err != nil {
 		return result.ResponseText, result.SessionID, err

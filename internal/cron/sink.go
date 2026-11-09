@@ -46,7 +46,11 @@ func (s LegacySink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 		Metadata:    meta,
 	}, opencode.TurnConfig{Workspace: agent.Workspace})
 	if err != nil {
-		return "", "", err
+		created := ""
+		if result != nil {
+			created = result.SessionID
+		}
+		return "", created, err
 	}
 	if result.ResponseText != "" {
 		if err := s.NotifyUser(ctx, agent, result.ResponseText); err != nil {

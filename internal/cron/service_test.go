@@ -39,12 +39,13 @@ type fakeTurn struct {
 	calls    int
 	response string
 	events   []opencode.SyntheticEvent
+	err      error
 }
 
 func (f *fakeTurn) RunSyntheticTurn(_ context.Context, sessionID string, ev opencode.SyntheticEvent, _ opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.calls++
 	f.events = append(f.events, ev)
-	return &opencode.TurnResult{SessionID: "ses_fake", ResponseText: f.response}, nil
+	return &opencode.TurnResult{SessionID: "ses_fake", ResponseText: f.response}, f.err
 }
 
 type fakeRoutine struct {
@@ -441,6 +442,39 @@ func TestPromptJobRoutesOutputAndStoresSession(t *testing.T) {
 	if len(sink.notified) != 1 || sink.notified[0] != "reply" {
 		t.Errorf("notified = %v, want reply", sink.notified)
 	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("prompt")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	session, ok, err := st.Orch().GetSessionByThread("cron:" + job.ID)
+	if err != nil || !ok {
+		t.Fatalf("session = %+v, %v, %v", session, ok, err)
+	}
+	if session.OpenCodeSessionID != "ses_fake" {
+		t.Errorf("session id = %q, want ses_fake", session.OpenCodeSessionID)
+	}
+}
+
+func TestPromptErrorPersistsCreatedSession(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "prompt", Kind: "prompt", Spec: "@every 1h", Prompt: "hello",
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_failure":"log"}`,
+	})
+
+	turn := &fakeTurn{err: errors.New("admit failed")}
+	service := startTestService(t, reg, routine.NewRegistry(), &fakeSink{}, turn, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
 
 	st, err := store.Open(ws)
 	if err != nil {
