@@ -494,6 +494,27 @@ func TestPromptErrorPersistsCreatedSession(t *testing.T) {
 	}
 }
 
+func TestInvalidRoutingFallsBackToNotifyUser(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "bad-route", Kind: "prompt", Spec: "@every 1h", Prompt: "hello",
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"notify_user"}`,
+	})
+
+	sink := &fakeSink{}
+	turn := &fakeTurn{response: "reply"}
+	service := startTestService(t, reg, routine.NewRegistry(), sink, turn, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if len(sink.notified) != 1 || sink.notified[0] != "reply" {
+		t.Errorf("notified = %v, want fallback notify-user", sink.notified)
+	}
+}
+
 func TestRoutineJobRoutesOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	past := now.Add(-time.Minute)

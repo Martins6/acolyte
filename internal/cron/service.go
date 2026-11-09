@@ -447,6 +447,11 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 		}
 	case "log":
 		s.logJob(st, job, "info", "output: "+text)
+	default:
+		log.Printf("cron: job %s has invalid routing action %q; falling back to notify-user", job.Title, action)
+		if err := s.sink.NotifyUser(ctx, agent, text); err != nil {
+			log.Printf("cron: route job %s to user: %v", job.Title, err)
+		}
 	}
 }
 
