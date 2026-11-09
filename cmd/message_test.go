@@ -19,6 +19,14 @@ func TestNotifyUserValidation(t *testing.T) {
 	}
 }
 
+func TestInboxRejectsUnmappedSession(t *testing.T) {
+	setupCronCLI(t)
+	err := runInbox(context.Background(), &bytes.Buffer{}, "hello", "valet", "", "ses_missing")
+	if err == nil || !strings.Contains(err.Error(), "not mapped") {
+		t.Fatalf("inbox(unmapped session) error = %v, want not-mapped error", err)
+	}
+}
+
 func TestInboxValidation(t *testing.T) {
 	t.Setenv(paths.HomeEnv, t.TempDir())
 	if err := runInbox(context.Background(), &bytes.Buffer{}, "  ", "valet", "", ""); err == nil {

@@ -53,6 +53,11 @@ func runInbox(ctx context.Context, w io.Writer, text, agentName, workspace, sess
 	defer st.Close()
 
 	explicitSession := strings.TrimSpace(sessionID) != ""
+	if explicitSession {
+		if err := verifySessionMapping(st, sessionID); err != nil {
+			return err
+		}
+	}
 	if !explicitSession {
 		if session, ok, err := st.Orch().LatestSession(); err != nil {
 			return err

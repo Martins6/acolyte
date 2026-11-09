@@ -41,6 +41,26 @@ func (s *Store) GetSessionByThread(thread string) (Session, bool, error) {
 	return session, true, nil
 }
 
+// GetSessionByOpenCodeID returns a thread mapping for an OpenCode session.
+func (s *Store) GetSessionByOpenCodeID(opencodeSessionID string) (Session, bool, error) {
+	opencodeSessionID = strings.TrimSpace(opencodeSessionID)
+	if opencodeSessionID == "" {
+		return Session{}, false, nil
+	}
+	var session Session
+	err := s.db.QueryRow(`SELECT `+sessionColumns+` FROM orch_sessions
+		WHERE opencode_session_id = ? ORDER BY last_active_at DESC LIMIT 1`, opencodeSessionID).Scan(
+		&session.ID, &session.Thread, &session.OpenCodeSessionID, &session.CreatedAt, &session.LastActiveAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, false, nil
+	}
+	if err != nil {
+		return Session{}, false, fmt.Errorf("orch: get session by opencode id %q: %w", opencodeSessionID, err)
+	}
+	return session, true, nil
+}
+
 // LatestSession returns the most recently active session.
 func (s *Store) LatestSession() (Session, bool, error) {
 	var session Session

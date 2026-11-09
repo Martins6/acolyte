@@ -187,6 +187,9 @@ func runCronCreate(w io.Writer, opts cronCreateOptions) error {
 		return err
 	}
 	defer st.Close()
+	if err := verifySessionMapping(st, opts.SessionID); err != nil {
+		return err
+	}
 
 	timezone := strings.TrimSpace(opts.Timezone)
 	if timezone == "" {

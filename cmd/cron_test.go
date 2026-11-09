@@ -87,6 +87,36 @@ func TestRunCronCreateShell(t *testing.T) {
 	}
 }
 
+func TestRunCronCreateSessionOwnership(t *testing.T) {
+	ws := setupCronCLI(t)
+	fixedCronNow(t)
+	script := filepath.Join(t.TempDir(), "job.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.Orch().UpsertSession("test", "ses_ok", time.Now().UTC()); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+	st.Close()
+
+	if err := runCronCreate(&bytes.Buffer{}, cronCreateOptions{
+		Title: "mapped", Datetime: "@every 1h", Prompt: "hello", AgentName: "valet", SessionID: "ses_ok",
+	}); err != nil {
+		t.Fatalf("create mapped session: %v", err)
+	}
+	err = runCronCreate(&bytes.Buffer{}, cronCreateOptions{
+		Title: "foreign", Datetime: "@every 1h", Prompt: "hello", AgentName: "valet", SessionID: "ses_missing",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not mapped") {
+		t.Fatalf("create foreign session error = %v, want not-mapped error", err)
+	}
+}
+
 func TestRunCronCreatePromptAndRoutine(t *testing.T) {
 	ws := setupCronCLI(t)
 	fixedCronNow(t)
