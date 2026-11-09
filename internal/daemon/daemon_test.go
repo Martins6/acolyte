@@ -247,15 +247,18 @@ func TestDaemonStartsAndRoutesInbound(t *testing.T) {
 		t.Fatalf("inbound sink error: %v", err)
 	}
 
-	sends := comm.sent()
-	if len(sends) != 1 || sends[0].Content.Text != "reply" {
-		t.Fatalf("sends = %+v, want reply", sends)
+	if sends := comm.sent(); len(sends) != 0 {
+		t.Fatalf("adapter sends = %+v, want none (router enqueues durably)", sends)
 	}
 	st, release, err = pool.Acquire(workspaces["valet"])
 	if err != nil {
 		t.Fatalf("Acquire() error: %v", err)
 	}
 	defer release()
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 || outbox[0].Text != "reply" {
+		t.Fatalf("outbox = %+v, %v; want reply", outbox, err)
+	}
 	session, ok, err := st.Orch().GetSessionByThread(env.Thread)
 	if err != nil || !ok || session.OpenCodeSessionID != "ses_user" {
 		t.Errorf("session = %+v, %v, %v", session, ok, err)
@@ -457,6 +460,62 @@ func TestSendOutboundUsesActiveWorkspace(t *testing.T) {
 	newOutbox, err := newStore.CommTG().ListOutbox(10)
 	if err != nil || len(newOutbox) != 1 || newOutbox[0].Text != "reply after move" {
 		t.Errorf("new outbox = %+v, %v; want reply", newOutbox, err)
+	}
+}
+
+func prepareAgentWorkspace(t *testing.T, ws, token string) {
+	t.Helper()
+	if err := os.MkdirAll(ws, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", ws, err)
+	}
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store %s: %v", ws, err)
+	}
+	if err := st.CommTG().SetSetting("channels", `["telegram"]`); err != nil {
+		t.Fatalf("channels setting: %v", err)
+	}
+	if err := st.CommTG().SetSetting("telegram.allowed_users", `["@alice"]`); err != nil {
+		t.Fatalf("allowed users setting: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".env"), []byte("TELEGRAM_BOT_TOKEN="+token+"\n"), 0600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+}
+
+func TestSendOutboundUsesRegistryDuringRefreshGap(t *testing.T) {
+	reg, pool, workspaces := setupDaemon(t, "valet")
+	svc := startDaemon(t, reg, pool, &fakeTurn{}, newFakeFactory().make)
+	oldAgent := registry.Agent{Name: "valet", Workspace: workspaces["valet"]}
+	svc.stopAgents()
+
+	newWS := filepath.Join(t.TempDir(), "valet-new")
+	prepareAgentWorkspace(t, newWS, "token-new")
+	if _, err := reg.Delete("valet"); err != nil {
+		t.Fatalf("delete old agent: %v", err)
+	}
+	if err := reg.Register(registry.Agent{Name: "valet", Workspace: newWS}); err != nil {
+		t.Fatalf("register new workspace: %v", err)
+	}
+
+	env := envelope.New(envelope.DirectionOut, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Party{Kind: envelope.PartyUser, ID: "10"},
+		envelope.Content{Type: envelope.ContentText, Text: "gap reply"})
+	if err := svc.sendOutbound(context.Background(), oldAgent, env); err != nil {
+		t.Fatalf("sendOutbound() error: %v", err)
+	}
+	newStore, release, err := pool.Acquire(newWS)
+	if err != nil {
+		t.Fatalf("Acquire(new) error: %v", err)
+	}
+	defer release()
+	outbox, err := newStore.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 || outbox[0].Text != "gap reply" {
+		t.Errorf("new outbox = %+v, %v; want gap reply", outbox, err)
 	}
 }
 

@@ -333,20 +333,22 @@ func (s *Service) stopAgents() {
 }
 
 func (s *Service) sendOutbound(_ context.Context, agent registry.Agent, env envelope.Envelope) error {
+	// Durability does not depend on a live adapter: resolve the current
+	// desired workspace and enqueue there. The adapter's outbox loop delivers.
+	return s.enqueueOutbound(s.desiredAgent(agent), env)
+}
+
+func (s *Service) desiredAgent(agent registry.Agent) registry.Agent {
 	s.mu.Lock()
 	rt := s.agents[agent.Name]
 	s.mu.Unlock()
 	if rt != nil {
-		if rt.agent.Workspace == agent.Workspace {
-			return rt.comm.Send(env)
-		}
-		// The agent name now points at a new workspace; enqueue where the
-		// active adapter will drain it.
-		return s.enqueueOutbound(rt.agent, env)
+		return rt.agent
 	}
-	// The adapter may be between refreshes or deliberately stopped. Persist
-	// the reply so it is delivered when the adapter returns.
-	return s.enqueueOutbound(agent, env)
+	if current, err := s.registry.GetByName(agent.Name); err == nil {
+		return current
+	}
+	return agent
 }
 
 func (s *Service) enqueueOutbound(agent registry.Agent, env envelope.Envelope) error {
