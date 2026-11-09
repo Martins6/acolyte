@@ -118,7 +118,7 @@ func (h *routerHarness) seedInbound(t *testing.T, env envelope.Envelope, updateI
 	}
 	defer release()
 	inserted, err := st.CommTG().RecordInbound(commtg.InboxItem{
-		TGUpdateID: updateID, ChatID: 10, EnvelopeID: env.ID, Text: env.Content.Text,
+		TGUpdateID: updateID, ChatID: 10, EnvelopeID: env.ID,
 	})
 	if err != nil || !inserted {
 		t.Fatalf("RecordInbound() = %v, %v", inserted, err)
