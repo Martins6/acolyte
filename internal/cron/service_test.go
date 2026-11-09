@@ -260,6 +260,30 @@ func TestShellTimeoutKillsProcessGroup(t *testing.T) {
 	}
 }
 
+func TestShellInboxUsesJobSession(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	script := filepath.Join(t.TempDir(), "job.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ok\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "shell-inbox", Kind: "shell", Spec: "@every 1h", ShellPath: script,
+		AgentTarget: "valet", SessionID: "ses_owned", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"inbox"}`,
+	})
+
+	sink := &fakeSink{}
+	service := startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if len(sink.inboxInputs) != 1 || sink.inboxInputs[0] != "ses_owned" {
+		t.Errorf("inbox session inputs = %v, want [ses_owned]", sink.inboxInputs)
+	}
+}
+
 func TestShellFailureRoutesOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	script := filepath.Join(t.TempDir(), "fail.sh")
