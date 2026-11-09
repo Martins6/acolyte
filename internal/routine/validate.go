@@ -71,22 +71,32 @@ func asInt(raw any) (int, bool) {
 	case int:
 		return value, true
 	case int64:
-		return int(value), true
+		return boundedInt(value)
 	case float64:
 		if math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) {
 			return 0, false
 		}
-		if value > math.MaxInt64 || value < math.MinInt64 {
+		// float64(math.MaxInt64) rounds up to 2^63, so use an exclusive
+		// upper bound and an inclusive lower bound before conversion.
+		if value >= float64(math.MaxInt64) || value < float64(math.MinInt64) {
 			return 0, false
 		}
-		return int(value), true
+		return boundedInt(int64(value))
 	case json.Number:
 		parsed, err := value.Int64()
 		if err != nil {
 			return 0, false
 		}
-		return int(parsed), true
+		return boundedInt(parsed)
 	default:
 		return 0, false
 	}
+}
+
+func boundedInt(value int64) (int, bool) {
+	bits := int64(^uint(0) >> 1)
+	if value > bits || value < -bits-1 {
+		return 0, false
+	}
+	return int(value), true
 }

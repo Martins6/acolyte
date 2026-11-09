@@ -1,6 +1,9 @@
 package routine
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestValidateArgs(t *testing.T) {
 	specs := []ArgSpec{
@@ -29,6 +32,7 @@ func TestValidateArgs(t *testing.T) {
 		{"days": "3"},
 		{"days": 3, "unknown": 1},
 		{"days": 3.5},
+		{"days": math.Pow(2, 63)},
 	} {
 		if _, err := ValidateArgs(specs, args); err == nil {
 			t.Errorf("ValidateArgs(%+v) error = nil, want error", args)

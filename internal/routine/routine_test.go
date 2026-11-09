@@ -75,6 +75,21 @@ func TestCatalogJSON(t *testing.T) {
 	}
 }
 
+func TestCatalogConcurrentRegister(t *testing.T) {
+	registry := NewRegistry()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_ = registry.Register(fakeRoutine{name: "r" + string(rune('a'+i%26)), owner: "test"})
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		_ = registry.Catalog()
+	}
+	<-done
+}
+
 func TestDefaultBuiltins(t *testing.T) {
 	registry := Default()
 	for _, name := range []string{"dream", "heartbeat"} {

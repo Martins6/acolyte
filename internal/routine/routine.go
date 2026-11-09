@@ -119,8 +119,9 @@ func (r *Registry) List() []Routine {
 
 // Catalog returns the routine-list JSON projection.
 func (r *Registry) Catalog() []CatalogEntry {
-	out := make([]CatalogEntry, 0, len(r.routines))
-	for _, value := range r.List() {
+	list := r.List()
+	out := make([]CatalogEntry, 0, len(list))
+	for _, value := range list {
 		out = append(out, CatalogEntry{
 			Name:        value.Name(),
 			Owner:       value.Owner(),
