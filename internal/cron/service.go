@@ -15,6 +15,7 @@ import (
 	"github.com/martins6/acolyte/internal/routine"
 	"github.com/martins6/acolyte/internal/store"
 	"github.com/martins6/acolyte/internal/store/orch"
+	"github.com/martins6/acolyte/internal/storepool"
 	cronlib "github.com/robfig/cron/v3"
 )
 
@@ -35,12 +36,21 @@ type TurnRunner interface {
 	RunSyntheticTurn(ctx context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error)
 }
 
+// StoreProvider opens and retains per-agent stores. The store package allows
+// one open handle per workspace per process, so cron and communication must
+// share a provider.
+type StoreProvider interface {
+	Acquire(workspace string) (*store.Store, func(), error)
+	Retain(workspace string) (func(), bool)
+}
+
 // Options configures the cron service.
 type Options struct {
 	Registry        *registry.Registry
 	Routines        *routine.Registry
 	Sink            Sink
 	OpenCode        TurnRunner
+	Stores          StoreProvider
 	Interval        time.Duration
 	RefreshInterval time.Duration
 	MaxConcurrency  int
@@ -51,8 +61,7 @@ type Options struct {
 type agentStore struct {
 	agent   registry.Agent
 	store   *store.Store
-	refs    int
-	retired bool
+	release func()
 }
 
 // Service runs due jobs for all registered agents.
@@ -71,12 +80,13 @@ type Service struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu      sync.Mutex
-	stores  map[string]*agentStore
-	retired []*agentStore
-	running map[string]bool
-	sem     chan struct{}
-	wg      sync.WaitGroup
+	provider StoreProvider
+	ownPool  *storepool.Pool
+	mu       sync.Mutex
+	agents   map[string]*agentStore
+	running  map[string]bool
+	sem      chan struct{}
+	wg       sync.WaitGroup
 }
 
 // Start starts the cron service. It performs one store refresh before returning.
@@ -105,6 +115,11 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 	if opts.Shell == "" {
 		opts.Shell = os.Getenv("SHELL")
 	}
+	var ownPool *storepool.Pool
+	if opts.Stores == nil {
+		ownPool = storepool.New()
+		opts.Stores = ownPool
+	}
 
 	service := &Service{
 		registry:        opts.Registry,
@@ -117,7 +132,9 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		refreshInterval: opts.RefreshInterval,
 		maxConcurrency:  opts.MaxConcurrency,
 		done:            make(chan struct{}),
-		stores:          map[string]*agentStore{},
+		provider:        opts.Stores,
+		ownPool:         ownPool,
+		agents:          map[string]*agentStore{},
 		running:         map[string]bool{},
 		sem:             make(chan struct{}, opts.MaxConcurrency),
 	}
@@ -173,18 +190,28 @@ func (s *Service) run() {
 func (s *Service) Tick(ctx context.Context) int {
 	now := s.now()
 	s.mu.Lock()
-	pairs := make([]*agentStore, 0, len(s.stores))
-	for _, st := range s.stores {
-		st.refs++
-		pairs = append(pairs, st)
+	candidates := make([]*agentStore, 0, len(s.agents))
+	for _, st := range s.agents {
+		candidates = append(candidates, st)
 	}
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		for _, pair := range pairs {
-			s.releaseRefLocked(pair)
+
+	// Pin each store while it is read; a concurrent refresh may otherwise
+	// release and close it between the snapshot and the query.
+	pairs := make([]*agentStore, 0, len(candidates))
+	releases := make([]func(), 0, len(candidates))
+	for _, pair := range candidates {
+		release, ok := s.provider.Retain(pair.agent.Workspace)
+		if !ok {
+			continue
 		}
-		s.mu.Unlock()
+		pairs = append(pairs, pair)
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
 	}()
 
 	dispatched := 0
@@ -217,80 +244,58 @@ func (s *Service) refresh() {
 		}
 	}
 
+	var stale []*agentStore
 	s.mu.Lock()
-	for name, st := range s.stores {
+	for name, st := range s.agents {
 		wantedAgent, ok := wanted[name]
 		if ok && wantedAgent.Workspace == st.agent.Workspace {
+			// Keep the cached agent snapshot immutable; Tick reads it
+			// without holding s.mu. A workspace change replaces the entry.
 			continue
 		}
-		delete(s.stores, name)
-		if st.refs == 0 {
-			_ = st.store.Close()
-		} else {
-			// Keep the store open until its last running job releases it.
-			st.retired = true
-			s.retired = append(s.retired, st)
-		}
+		delete(s.agents, name)
+		stale = append(stale, st)
 	}
 	s.mu.Unlock()
+	for _, st := range stale {
+		st.release()
+	}
 
 	for name, agent := range wanted {
 		s.mu.Lock()
-		if _, exists := s.stores[name]; exists {
-			s.mu.Unlock()
-			continue
-		}
-		reused := false
-		for index, retired := range s.retired {
-			if retired.agent.Name == name && retired.agent.Workspace == agent.Workspace {
-				retired.retired = false
-				s.stores[name] = retired
-				s.retired = append(s.retired[:index], s.retired[index+1:]...)
-				reused = true
-				break
-			}
-		}
+		_, exists := s.agents[name]
 		s.mu.Unlock()
-		if reused {
+		if exists {
 			continue
 		}
 
-		st, err := store.Open(agent.Workspace)
+		st, release, err := s.provider.Acquire(agent.Workspace)
 		if err != nil {
 			log.Printf("cron: open store for %s: %v", name, err)
 			continue
 		}
 		s.mu.Lock()
-		s.stores[name] = &agentStore{agent: agent, store: st}
-		s.mu.Unlock()
-	}
-}
-
-func (s *Service) releaseRefLocked(pair *agentStore) {
-	pair.refs--
-	if !pair.retired || pair.refs != 0 {
-		return
-	}
-	_ = pair.store.Close()
-	for index, retired := range s.retired {
-		if retired == pair {
-			s.retired = append(s.retired[:index], s.retired[index+1:]...)
-			break
+		if _, exists := s.agents[name]; exists {
+			s.mu.Unlock()
+			release()
+			continue
 		}
+		s.agents[name] = &agentStore{agent: agent, store: st, release: release}
+		s.mu.Unlock()
 	}
 }
 
 func (s *Service) closeStores() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	for name, st := range s.stores {
-		_ = st.store.Close()
-		delete(s.stores, name)
+	agents := s.agents
+	s.agents = map[string]*agentStore{}
+	s.mu.Unlock()
+	for _, st := range agents {
+		st.release()
 	}
-	for _, st := range s.retired {
-		_ = st.store.Close()
+	if s.ownPool != nil {
+		_ = s.ownPool.CloseAll()
 	}
-	s.retired = nil
 }
 
 func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJob, now time.Time) bool {
@@ -313,14 +318,22 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 		return false
 	}
 	s.running[key] = true
-	pair.refs++
 	s.mu.Unlock()
+
+	releaseStore, ok := s.provider.Retain(agent.Workspace)
+	if !ok {
+		s.mu.Lock()
+		delete(s.running, key)
+		s.mu.Unlock()
+		<-s.sem
+		return false
+	}
 
 	release := func() {
 		s.mu.Lock()
 		delete(s.running, key)
-		s.releaseRefLocked(pair)
 		s.mu.Unlock()
+		releaseStore()
 		if semHeld {
 			<-s.sem
 			semHeld = false
