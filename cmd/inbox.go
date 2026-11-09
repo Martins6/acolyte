@@ -7,10 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/martins6/acolyte/internal/config"
-	"github.com/martins6/acolyte/internal/database"
-	"github.com/martins6/acolyte/internal/opencode"
-	"github.com/martins6/acolyte/internal/store"
+	"github.com/martins6/acolyte/internal/comm"
+	"github.com/martins6/acolyte/internal/storepool"
 	"github.com/spf13/cobra"
 )
 
@@ -46,62 +44,50 @@ func runInbox(ctx context.Context, w io.Writer, text, agentName, workspace, sess
 		return err
 	}
 
-	st, err := store.Open(agent.Workspace)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-
-	explicitSession := strings.TrimSpace(sessionID) != ""
-	if explicitSession {
-		if err := verifySessionMapping(st, sessionID); err != nil {
+	pool := storepool.New()
+	defer pool.CloseAll()
+	explicit := strings.TrimSpace(sessionID) != ""
+	if explicit {
+		st, release, err := pool.Acquire(agent.Workspace)
+		if err != nil {
+			return err
+		}
+		err = verifySessionMapping(st, sessionID)
+		release()
+		if err != nil {
 			return err
 		}
 	}
-	if !explicitSession {
-		if session, ok, err := st.Orch().LatestSession(); err != nil {
-			return err
-		} else if ok {
-			sessionID = session.OpenCodeSessionID
-		}
-	}
 
-	client, err := opencode.Ensure(ctx)
+	client, err := openCodeEnsure(ctx)
 	if err != nil {
 		return fmt.Errorf("opencode service unavailable: %w", err)
 	}
-	result, err := client.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
-		Text:        text,
-		Description: "Inbox event for " + agent.Name,
-		Metadata:    map[string]any{"channel": "inbox"},
-	}, opencode.TurnConfig{Workspace: agent.Workspace})
+	sink := comm.OutboxSink{Stores: pool, Turn: client}
+	reply, resultSession, err := sink.Inbox(ctx, agent, sessionID, text, map[string]any{"channel": "inbox"})
 	if err != nil {
 		return err
 	}
-	// Do not promote an explicitly targeted session in LatestSession ordering;
-	// only the default inbox thread tracks the newest session.
-	if !explicitSession {
-		if _, err := st.Orch().UpsertSession("inbox:"+agent.Name, result.SessionID, time.Now().UTC()); err != nil {
+
+	if !explicit && resultSession != "" {
+		st, release, err := pool.Acquire(agent.Workspace)
+		if err != nil {
 			return err
 		}
+		if _, err := st.Orch().UpsertSession("inbox:"+agent.Name, resultSession, time.Now().UTC()); err != nil {
+			release()
+			return err
+		}
+		release()
 	}
 
-	if result.ResponseText != "" {
-		if _, err := config.Load(""); err != nil {
-			return fmt.Errorf("load config: %w", err)
-		}
-		if err := database.Init(legacyWorkspace()); err != nil {
-			return fmt.Errorf("initialize legacy notifier database: %w", err)
-		}
-		userID := config.GetAllowedUserChatID()
-		if userID == 0 {
-			return fmt.Errorf("no Telegram user chat id is resolved yet; message the bot first")
-		}
-		if _, err := database.InsertNotification(userID, result.ResponseText); err != nil {
-			return fmt.Errorf("queue inbox reply: %w", err)
-		}
+	if resultSession == "" {
+		fmt.Fprintln(w, "Inbox delivered.")
+	} else {
+		fmt.Fprintf(w, "Inbox delivered to session %s.\n", resultSession)
 	}
-
-	fmt.Fprintf(w, "Inbox delivered to session %s.\n", result.SessionID)
+	if strings.TrimSpace(reply) != "" {
+		fmt.Fprintf(w, "Reply:\n%s\n", reply)
+	}
 	return nil
 }

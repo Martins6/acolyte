@@ -43,10 +43,12 @@ acolyte cron tick              # run one due-job pass (testing/debugging)
 are visible alongside user tasks. Routine jobs show `routine:<name>` in the prompt column; prompt jobs
 show `prompt:<text>`.
 
-## Delivery (transitional)
-Phase 2 routes output through the existing legacy notifier queue and the legacy resolved user chat ID:
-`notify-user` queues a user-only notification, and `inbox` runs a synthetic turn and queues the reply.
-Per-agent Telegram routing and the Envelope/Communication bus land in Phase 3.
+## Delivery
+
+Cron output is routed through the target agent's Communication adapter via the durable outbox:
+`notify-user` queues a user-only message, and `inbox` runs a synthetic turn and queues the reply.
+Turns always run and persist even when no channel can deliver; delivery failures are retried and
+recorded in `comm_tg_outbox`/`orch_logs`.
 
 ## Data model
 `orch_cron_jobs(id, title, owner, kind, spec, prompt, shell_path, routine, routine_args,
