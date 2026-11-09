@@ -430,7 +430,6 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
 | `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |
 | `acolyte attach [--session-id <id>]` | Attach the OpenCode TUI to the managed service and agent workspace/session. |
-| `acolyte memory export` | Run the active `memory-export` mode. |
 
 > Runtime capability mutation is not exposed yet; `acolyte new` preserves existing settings on
 > adoption. See `FUTURE-IDEAS.md`.

@@ -24,7 +24,6 @@ turn loop, and provides the shared services every module relies on. It is **fixe
 | `acolyte inbox` | Deliver a synthetic external event to an agent session. |
 | `acolyte inspect` | Merge OpenCode history with communication routing events. |
 | `acolyte attach` | Attach the OpenCode TUI to the managed service/session. |
-| `acolyte memory export` | Run the active `memory-export` mode. |
 | `acolyte start` | Run the daemon (turn loop + cron + channels). |
 
 ## Always-on
