@@ -2,207 +2,160 @@
 
 ## Overview
 
-This skill guides the OpenCode agent on how to set up scheduled tasks using the built-in scheduler. The scheduler executes shell commands and automatically handles output:
-- **On success**: Output is sent to mail (visible to AI in context)
-- **On failure**: Notification is sent to user
+Acolyte runs a shared cron service for every registered agent. A job is one of:
+
+- **`shell`** — run a script with the agent's `$SHELL` in the agent workspace.
+- **`prompt`** — run a prompt through the agent's OpenCode session.
+- **`routine`** — run a registered routine (`dream`, `heartbeat`, …).
+
+Jobs are owner-tagged, stored in the agent's `.acolyte.sqlite.db`, and visible through
+`acolyte cron list`.
 
 ## When to Use This Skill
 
-Use scheduled tasks for:
+Use scheduled jobs for:
+
 - Daily reports (weather, news digests, system health)
 - Periodic backups or cleanup tasks
 - Scheduled notifications or reminders
-- One-time reminders ("remind me in 5 minutes")
-- Any task that runs automatically in the background
+- Recurring agent prompts or routine maintenance
 
-## Built-in Scheduler Commands
+One-time “remind me in 30 minutes” scheduling is not supported by the current cron parser; use
+`acolyte inbox` for an immediate event, or ask the user to choose a recurring schedule.
 
-Use `acolyte schedule` to manage scheduled tasks.
-
-## Prerequisites
-
-Before any `schedule` subcommand works, set the timezone:
+## Commands
 
 ```bash
-acolyte schedule set --timezone America/Sao_Paulo
+# Shell job: --shell takes a script path, not an inline command.
+acolyte cron --title "disk-check" \
+  --datetime "0 */4 * * *" \
+  --shell scripts/disk-check.sh \
+  --agent-name valet \
+  --on-success notify-user --on-failure notify-user
+
+# Prompt job: runs through the agent.
+acolyte cron --title "morning-brief" \
+  --datetime "0 9 * * *" \
+  --prompt "Summarize today's calendar and inbox." \
+  --agent-name valet
+
+# Routine job.
+acolyte cron --title "heartbeat" \
+  --datetime "@every 60m" \
+  --routine heartbeat --routine-args '{"interval":60}' \
+  --agent-name valet
+
+# Inspect/manage.
+acolyte cron list
+acolyte cron view morning-brief
+acolyte cron rm morning-brief
+acolyte cron routine-list
+acolyte cron tick                 # drain due jobs now (testing/debugging)
 ```
 
-The bot refuses all other `schedule` subcommands (add/list/delete/run) until this is done. This is a one-time setup but is idempotent. `notify` and `mail` are unaffected — they have no time component.
+## Schedule Expressions
 
-All configs in `config.toml` (including timezone, `defaults.agent/model/provider`) are reloaded by the running daemon within ~5 seconds. No restart is needed after `config set` or `schedule set`.
+Acolyte uses standard cron expressions plus descriptors:
 
-### Any Bash Command
+- `0 9 * * *` — daily at 09:00
+- `0 * * * *` — every hour
+- `*/15 * * * *` — every 15 minutes
+- `0 9 * * 1-5` — weekdays at 09:00
+- `@every 1h` — every hour
+- `@every 72h` — every three days
 
-**Any bash command or script can be scheduled.** For example:
-- `curl https://api.example.com` - HTTP requests
-- `git pull` - Git operations
-- `npm run build` - Build commands
-- `echo "hello"` - Simple commands
-- `python script.py` - Python scripts
+Set the timezone per job with `--timezone America/Sao_Paulo`. If omitted, the job uses the
+agent's `schedule.timezone` setting (seeded by `acolyte new`), then the process local timezone.
 
-### Add a Scheduled Task
+## Flags
 
-```bash
-# One-time schedules
-acolyte schedule add -s "in 30m" -c "echo hello"
-acolyte schedule add -s "at 09:00" -c "backup.sh"
-acolyte schedule add -s "once 14:30" -c "task.sh"
-
-# Cron schedules (recurring)
-acolyte schedule add -s "0 9 * * *" -c "morning-task.sh"
-acolyte schedule add -s "*/15 * * * *" -c "check-status.sh"
-```
-
-### Schedule Expression Formats
-
-#### One-time:
-- `in 30m` - Run in 30 minutes from now
-- `at HH:MM` - Run at specific time today (e.g., "at 09:00", "at 14:30")
-- `once HH:MM` - Same as "at" (run once at specific time)
-- `now + 1h` - Run after duration (e.g., "now + 1h30m")
-
-#### Cron (recurring):
-Standard cron format: `minute hour day-of-month month day-of-week`
-
-- `0 9 * * *` - Daily at 9 AM
-- `0 * * * *` - Every hour
-- `0 0 * * *` - Midnight every day
-- `*/15 * * * *` - Every 15 minutes
-- `0 9 * * 1-5` - Weekdays at 9 AM
-
-### Flags
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-s, --schedule` | Schedule expression (cron or one-time) | (required) |
-| `-c, --command` | Shell command to execute | (required) |
-| `-d, --dir` | Working directory | workspace |
-| `--on-success` | Action on success: `mail` or `notify` | `mail` |
-| `--on-failure` | Action on failure: `notify` or `ignore` | `notify` |
-
-### Manage Scheduled Tasks
-
-```bash
-# List all scheduled tasks
-acolyte schedule list
-
-# Delete a scheduled task
-acolyte schedule delete <id>
-
-# Run a task immediately (for testing)
-acolyte schedule run <id>
-```
+| Flag | Description |
+| ---- | ----------- |
+| `--title` | Unique job title (per agent). |
+| `--datetime` | Cron expression or `@every` descriptor. |
+| `--shell <path>` | Script path, resolved relative to the agent workspace. |
+| `--prompt <text>` | Prompt for a prompt job. |
+| `--routine <name>` | Registered routine name. |
+| `--routine-args '<json>'` | Validated routine arguments. |
+| `--agent-name` / `--workspace-folder` | Target agent (mutually exclusive; defaults to `$ACOLYTE_WORKSPACE_PATH`/pwd). |
+| `--session-id` | Optional OpenCode session (must belong to the target agent). |
+| `--timezone` | IANA timezone. |
+| `--on-success` | `inbox`, `notify-user`, or `log` (default: shell `inbox`, others `notify-user`). |
+| `--on-failure` | `inbox`, `notify-user`, or `log` (default: `notify-user`). |
 
 ## Output Handling
 
-The scheduler handles output automatically:
+- **`inbox`** — runs a synthetic turn in the agent session; the reply is delivered through the
+  agent's channel. This is the default for successful shell jobs.
+- **`notify-user`** — queues a user-only message; never runs the agent.
+- **`log`** — writes the output to `orch_logs` only.
 
-- **On Success**: Command output is sent to mail with subject "Scheduled Task: [command]"
-   - When mail is delivered, the AI agent is triggered and responds to the user
-   - The agent will proactively engage with the user about the mail content
-   - Useful for reports, logs, data processing results
-
-- **On Failure**: A notification is sent to the user
-   - Includes the error message
-   - User is immediately alerted to issues
-   - Note: Notifications are silent (agent is NOT triggered)
-
-You can customize this behavior:
-- `--on-success notify` - Send output via notification instead of mail (silent)
-- `--on-failure ignore` - Don't notify on failure
+Cron output is delivered by the agent's Communication adapter through a durable outbox. If no
+channel is available, the turn still runs and persists; delivery is retried or logged.
 
 ## User Preference Questions
 
-When setting up scheduled tasks, ALWAYS ask the user:
+When setting up a job, ask:
 
-1. **Timing**:
-   - "When should this happen?"
-   - For one-time: "In how many minutes/hours?" or "At what time?"
-   - For recurring: "Daily? Weekly? At what time?"
-
-2. **Output Preference**:
-   - "Do you want to see the full output in your working context (mail), or just get a notification when it completes?"
-
-3. **Working Directory**:
-   - "Should this run in a specific directory, or the default workspace?"
-
-4. **Command Verification**:
-   - Show the command before adding it
-   - Ask if the user wants to test it once manually first
+1. **Timing** — “How often should this run?” (cron expression or `@every`).
+2. **Target** — “Which agent/workspace should own this job?”
+3. **Output** — “Should success go to the agent inbox, notify you directly, or just log?”
+4. **Script path** — for shell jobs, confirm the script exists in the workspace and is executable.
+5. **Verification** — show the command/job before creating it and offer `acolyte cron tick` as a
+   manual test.
 
 ## Examples
 
-### Example 1: Daily Weather Report
-User: "Every morning at 7 AM, I want a weather summary"
+### Daily Weather Report
 
-1. Ask: "Do you want to see the full weather output (mail) or just a notification when it's ready?"
-2. Ask: "What directory should this run in?"
-3. Set up:
 ```bash
-acolyte schedule add -s "0 7 * * *" -c "weather-script.sh" --dir /path/to/scripts
+acolyte cron --title "weather" --datetime "0 7 * * *" \
+  --prompt "Fetch the weather for my configured city and summarize it." \
+  --agent-name valet --on-success notify-user
 ```
 
-### Example 2: One-Time Reminder
-User: "Remind me to call mom in 30 minutes"
+### Disk Space Monitoring
 
-1. This is a one-time task
-2. Set up:
+Create `scripts/disk-check.sh` in the workspace:
+
 ```bash
-acolyte schedule add -s "in 30m" -c "echo 'Time to call mom!'"
+#!/bin/sh
+df -h | awk '$5+0 > 90 {print "Disk at " $5}'
 ```
 
-### Example 3: Disk Space Monitoring
-User: "Alert me if disk space is low every 4 hours"
+Then:
 
-1. This should use notify on failure to alert the user
-2. Set up:
 ```bash
-acolyte schedule add -s "0 */4 * * *" -c "df -h | awk '\$5 > 90 {print \"Disk at \" \$5}'"
+acolyte cron --title "disk-check" --datetime "0 */4 * * *" \
+  --shell scripts/disk-check.sh --agent-name valet \
+  --on-success notify-user --on-failure notify-user
 ```
 
-### Example 4: GitHub Notifications
-User: "Summarize my GitHub notifications daily at 8 AM"
+### Backup Script
 
-1. Ask: "Do you want to see the full summary in your working context (mail) or just a notification?"
-2. Set up:
 ```bash
-acolyte schedule add -s "0 8 * * *" -c "github-summary.sh"
-```
-
-### Example 5: Backup Script with Custom Output
-User: "Run my backup script daily at midnight and notify me"
-
-1. User wants notification on success (not mail)
-2. Set up:
-```bash
-acolyte schedule add -s "0 0 * * *" -c "backup.sh" --on-success notify
+acolyte cron --title "backup" --datetime "0 0 * * *" \
+  --shell scripts/backup.sh --agent-name valet \
+  --on-success log --on-failure notify-user
 ```
 
 ## Important Notes
 
-- The Telegram bot must be running for scheduled tasks to execute
-- Timezone must be set with `schedule set` before any scheduling will work
-- The running daemon picks up config changes within ~5 seconds (no restart needed)
-- Scheduled tasks are stored in SQLite and persist across bot restarts
-- Working directory defaults to the workspace folder (~/.acolyte)
-- Use absolute paths in commands for reliability
-- Test commands manually before scheduling
+- The Acolyte daemon must be running for jobs to execute.
+- Shell jobs require a script file; the body is not passed inline.
+- Use absolute paths or workspace-relative script paths.
+- Test scripts manually before scheduling.
+- Job output and errors are visible in `orch_logs` and through
+  `acolyte inspect --session-id <id>`.
+- Runtime capability edits are not exposed yet; `acolyte new` preserves existing jobs/settings.
 
 ## Skill Usage
 
-When a user mentions:
-- "Schedule something"
-- "Set up a cron job"
-- "Run this periodically"
-- "Remind me every..."
-- "Remind me in X minutes/hours"
-- "Run once at..."
-- "Set up a task to run automatically"
-- Any task scheduling request
+When a user mentions “schedule something”, “set up a cron job”, “run this periodically”, or “set up
+a task to run automatically”:
 
-Apply this skill to:
-1. Understand the task and timing
-2. Ask user preferences for output handling
-3. Create the scheduled task using `acolyte schedule add`
-4. Test if possible
-5. Confirm with user
+1. Understand the task and timing.
+2. Ask the output/target preferences.
+3. Create the job with `acolyte cron`.
+4. Test with `acolyte cron tick` when practical.
+5. Confirm the job with `acolyte cron list`/`view`.
