@@ -133,6 +133,10 @@ func TestCreateFresh(t *testing.T) {
 	if value != `["@you"]` {
 		t.Errorf("allowed users = %s", value)
 	}
+	channels, ok, err := st.CommTG().GetSetting("channels")
+	if err != nil || !ok || channels != `["telegram"]` {
+		t.Errorf("channels = %q, %v, %v; want [\"telegram\"]", channels, ok, err)
+	}
 }
 
 func TestCreateDreamJobArgs(t *testing.T) {
@@ -350,6 +354,10 @@ func TestCreateAdoptPreservesSettings(t *testing.T) {
 	users, ok, err := st.CommTG().GetSetting("telegram.allowed_users")
 	if err != nil || !ok || users != `["@you"]` {
 		t.Errorf("allowed users = %q, %v, %v; want [\"@you\"]", users, ok, err)
+	}
+	channels, ok, err := st.CommTG().GetSetting("channels")
+	if err != nil || !ok || channels != `["telegram"]` {
+		t.Errorf("channels = %q, %v, %v; want [\"telegram\"]", channels, ok, err)
 	}
 }
 

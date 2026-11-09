@@ -287,15 +287,24 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		}
 	}
 
-	if hasTelegram(cfg) && len(cfg.Communication.Telegram.AllowedUsers) > 0 {
-		if _, exists, err := st.CommTG().GetSetting("telegram.allowed_users"); err != nil {
+	if hasTelegram(cfg) {
+		if _, exists, err := st.CommTG().GetSetting("channels"); err != nil {
 			return nil, err
 		} else if !exists {
-			if err := st.CommTG().SetSetting(
-				"telegram.allowed_users",
-				mustJSON(cfg.Communication.Telegram.AllowedUsers),
-			); err != nil {
+			if err := st.CommTG().SetSetting("channels", mustJSON(cfg.Communication.Channels)); err != nil {
 				return nil, err
+			}
+		}
+		if len(cfg.Communication.Telegram.AllowedUsers) > 0 {
+			if _, exists, err := st.CommTG().GetSetting("telegram.allowed_users"); err != nil {
+				return nil, err
+			} else if !exists {
+				if err := st.CommTG().SetSetting(
+					"telegram.allowed_users",
+					mustJSON(cfg.Communication.Telegram.AllowedUsers),
+				); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
