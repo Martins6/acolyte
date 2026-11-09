@@ -89,7 +89,7 @@ func (a *Adapter) processAndAdmit(ctx context.Context, env envelope.Envelope, ms
 		if err != nil {
 			log.Printf("telegram: build content for %s: %v", a.agent.Name, err)
 			a.reply(ctx, msg.Chat.ID, "Error processing message; the daemon will retry.", int64(msg.ID))
-			_ = a.store.CommTG().RecordInboundFailure(env.ID, "", err.Error())
+			_ = a.store.CommTG().RecordInboundFailureUnclaimed(env.ID, err.Error())
 			return
 		}
 		env.Content = envelope.Content{Type: contentType, Text: text}

@@ -135,7 +135,7 @@ func (a *Adapter) replayPending(ctx context.Context) {
 			continue
 		}
 		if err := json.Unmarshal([]byte(item.PendingEnvelope), &env); err != nil {
-			_ = a.store.CommTG().RecordInboundFailure(item.EnvelopeID, "", "unmarshal pending envelope: "+err.Error())
+			_ = a.store.CommTG().RecordInboundFailureUnclaimed(item.EnvelopeID, "unmarshal pending envelope: "+err.Error())
 			continue
 		}
 		a.admit(ctx, env)
