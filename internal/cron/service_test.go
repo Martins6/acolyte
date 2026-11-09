@@ -272,6 +272,29 @@ func TestMemoryRouteFallback(t *testing.T) {
 	}
 }
 
+func TestPersistRouteMemoryFallback(t *testing.T) {
+	ws := t.TempDir()
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	st.Close()
+	notDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0600); err != nil {
+		t.Fatalf("write not-a-dir: %v", err)
+	}
+	now := time.Now().UTC()
+	service := &Service{now: func() time.Time { return now }}
+	err = service.persistRoute(st, registry.Agent{Name: "valet", Workspace: notDir}, orch.CronJob{Title: "route"},
+		&comm.DeliveryError{EnvelopeID: "env_mem", ChatID: 10, Text: "output"})
+	if !errors.Is(err, errMemoryOnlyRoute) {
+		t.Fatalf("persistRoute() error = %v, want errMemoryOnlyRoute", err)
+	}
+	if routes := service.takeMemoryRoutes(notDir); len(routes) != 1 || routes[0].ID != "env_mem" {
+		t.Errorf("memory routes = %+v, want env_mem", routes)
+	}
+}
+
 func TestShellJobUsesConfiguredShell(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	dir := t.TempDir()
