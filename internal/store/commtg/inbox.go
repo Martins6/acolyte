@@ -75,6 +75,15 @@ func (s *Store) RecordInbound(item InboxItem) (bool, error) {
 	return affected > 0, nil
 }
 
+// SetInboundMedia records the downloaded media path for an inbound envelope.
+func (s *Store) SetInboundMedia(envelopeID, mediaPath string) error {
+	_, err := s.db.Exec(`UPDATE comm_tg_inbox SET media_path = ? WHERE envelope_id = ?`, mediaPath, envelopeID)
+	if err != nil {
+		return fmt.Errorf("comm_tg: set inbound media %q: %w", envelopeID, err)
+	}
+	return nil
+}
+
 // LinkInbound attaches the admitted OpenCode session and message to an inbound
 // envelope after the turn is admitted.
 func (s *Store) LinkInbound(envelopeID, opencodeSessionID, opencodeMessageID string) error {
