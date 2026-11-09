@@ -100,6 +100,9 @@ type Service struct {
 type memoryRoute struct {
 	workspace string
 	route     orch.CronRoute
+	jobID     string
+	spec      string
+	timezone  string
 }
 
 // Start starts the cron service. It performs one store refresh before returning.
@@ -316,6 +319,10 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 	agent := pair.agent
 	key := agent.Name + "/" + job.ID
 
+	if s.hasMemoryRouteForJob(agent.Workspace, job.ID) {
+		return false
+	}
+
 	// Bound dispatched work before claiming: a large due backlog must not
 	// create an unbounded number of blocked goroutines.
 	select {
@@ -423,7 +430,10 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		}
 		s.logJob(st, job, "error", fmt.Sprintf("failed after %s: %v", s.now().Sub(started).Round(time.Millisecond), err))
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, false); routeErr != nil {
-			s.persistRoute(st, agent, job, routeErr)
+			if persistErr := s.persistRoute(st, agent, job, routeErr); errors.Is(persistErr, errMemoryOnlyRoute) {
+				s.requeueAfterPersistFailure(st, job)
+				return
+			}
 		}
 		_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 		return
@@ -432,7 +442,10 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	s.logJob(st, job, "info", fmt.Sprintf("completed in %s", s.now().Sub(started).Round(time.Millisecond)))
 	if text != "" {
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, true); routeErr != nil {
-			s.persistRoute(st, agent, job, routeErr)
+			if persistErr := s.persistRoute(st, agent, job, routeErr); errors.Is(persistErr, errMemoryOnlyRoute) {
+				s.requeueAfterPersistFailure(st, job)
+				return
+			}
 		}
 	}
 	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
@@ -499,12 +512,15 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 	}
 }
 
+// errMemoryOnlyRoute means the payload was kept only in memory.
+var errMemoryOnlyRoute = errors.New("cron: route persisted only in memory")
+
 // persistRoute stores a delivery intent when the outbox enqueue failed.
-func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) {
+func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) error {
 	var delivery *comm.DeliveryError
 	if !errors.As(routeErr, &delivery) {
 		s.logJob(st, job, "error", "route failed: "+routeErr.Error())
-		return
+		return nil
 	}
 	route := orch.CronRoute{
 		ID:                delivery.EnvelopeID,
@@ -522,20 +538,34 @@ func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.C
 	for attempt := 0; attempt < 3; attempt++ {
 		if lastErr = st.Orch().AddCronRoute(route); lastErr == nil {
 			s.logJob(st, job, "warn", "queued undelivered output for retry: "+routeErr.Error())
-			return
+			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	if err := writeRouteFallback(agent.Workspace, route); err == nil {
 		s.logJob(st, job, "warn", "queued undelivered output in fallback file: "+routeErr.Error())
-		return
+		return nil
 	}
-	// Last resort: keep the payload in memory rather than re-running the job.
-	s.addMemoryRoute(agent.Workspace, route)
+	// Last resort: keep the payload in memory, but tell the caller to requeue
+	// the job so a restart does not silently lose it.
+	s.addMemoryRoute(agent.Workspace, route, job)
 	s.logJob(st, job, "error", "queued undelivered output in memory (DB and file unavailable): "+routeErr.Error())
+	return errMemoryOnlyRoute
 }
 
-func (s *Service) addMemoryRoute(workspace string, route orch.CronRoute) {
+// requeueAfterPersistFailure retries moving the job's next run so a failed
+// route persistence is not treated as a completed run.
+func (s *Service) requeueAfterPersistFailure(st *store.Store, job orch.CronJob) {
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second)); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	log.Printf("cron: CRITICAL: could not requeue %s after route persistence failure; output may be lost", job.Title)
+}
+
+func (s *Service) addMemoryRoute(workspace string, route orch.CronRoute, job orch.CronJob) {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
 	for _, existing := range s.memoryRoutes {
@@ -543,23 +573,36 @@ func (s *Service) addMemoryRoute(workspace string, route orch.CronRoute) {
 			return
 		}
 	}
-	s.memoryRoutes = append(s.memoryRoutes, memoryRoute{workspace: workspace, route: route})
+	s.memoryRoutes = append(s.memoryRoutes, memoryRoute{
+		workspace: workspace,
+		route:     route,
+		jobID:     job.ID,
+		spec:      job.Spec,
+		timezone:  job.Timezone,
+	})
 }
 
-func (s *Service) takeMemoryRoutes(workspace string) []orch.CronRoute {
+func (s *Service) memoryRoutesFor(workspace string) []memoryRoute {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	var routes []orch.CronRoute
-	var kept []memoryRoute
+	var routes []memoryRoute
 	for _, item := range s.memoryRoutes {
 		if item.workspace == workspace {
-			routes = append(routes, item.route)
-		} else {
-			kept = append(kept, item)
+			routes = append(routes, item)
 		}
 	}
-	s.memoryRoutes = kept
 	return routes
+}
+
+func (s *Service) removeMemoryRoute(workspace, id string) {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	for index, item := range s.memoryRoutes {
+		if item.workspace == workspace && item.route.ID == id {
+			s.memoryRoutes = append(s.memoryRoutes[:index], s.memoryRoutes[index+1:]...)
+			return
+		}
+	}
 }
 
 func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
@@ -606,7 +649,8 @@ func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
 		_ = removeRouteFallback(pair.agent.Workspace, route.ID)
 	}
 
-	for _, route := range s.takeMemoryRoutes(pair.agent.Workspace) {
+	for _, pending := range s.memoryRoutesFor(pair.agent.Workspace) {
+		route := pending.route
 		_, enqueueErr := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
 			ID:                route.ID,
 			EnvelopeID:        route.ID,
@@ -617,9 +661,58 @@ func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
 			CreatedAt:         s.now(),
 		})
 		if enqueueErr != nil {
-			s.addMemoryRoute(pair.agent.Workspace, route)
+			continue
+		}
+		if err := s.restoreRequeuedJob(pair, pending); err != nil {
+			log.Printf("cron: restore schedule for %s: %v", route.ID, err)
+			continue
+		}
+		s.removeMemoryRoute(pair.agent.Workspace, route.ID)
+	}
+}
+
+func (s *Service) hasMemoryRouteForJob(workspace, jobID string) bool {
+	if jobID == "" {
+		return false
+	}
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	for _, pending := range s.memoryRoutes {
+		if pending.workspace == workspace && pending.jobID == jobID {
+			return true
 		}
 	}
+	return false
+}
+
+func (s *Service) restoreRequeuedJob(pair *agentStore, pending memoryRoute) error {
+	if pending.jobID == "" || pending.spec == "" {
+		return nil
+	}
+	location := time.Local
+	if pending.timezone != "" {
+		if loaded, err := time.LoadLocation(pending.timezone); err == nil {
+			location = loaded
+		}
+	}
+	schedule, err := cronlib.ParseStandard(pending.spec)
+	if err != nil {
+		return err
+	}
+	next := schedule.Next(s.now().In(location)).UTC()
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if lastErr = pair.store.Orch().RequeueCronJob(pending.jobID, next); lastErr != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if lastErr = pair.store.Orch().MarkCronJobRun(pending.jobID, s.now()); lastErr != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func writeRouteFallback(workspace string, route orch.CronRoute) error {

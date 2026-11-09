@@ -256,19 +256,57 @@ func TestMemoryRouteFallback(t *testing.T) {
 	service := &Service{}
 	routeA := orch.CronRoute{ID: "env_a", AgentTarget: "a", ChatID: 10, Text: "a"}
 	routeB := orch.CronRoute{ID: "env_b", AgentTarget: "b", ChatID: 20, Text: "b"}
-	service.addMemoryRoute("/ws/a", routeA)
-	service.addMemoryRoute("/ws/a", routeA)
-	service.addMemoryRoute("/ws/b", routeB)
-	routesA := service.takeMemoryRoutes("/ws/a")
-	if len(routesA) != 1 || routesA[0].ID != routeA.ID {
-		t.Fatalf("memory routes A = %+v, want one", routesA)
+	service.addMemoryRoute("/ws/a", routeA, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	service.addMemoryRoute("/ws/a", routeA, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	service.addMemoryRoute("/ws/b", routeB, orch.CronJob{ID: "job_b", Spec: "@every 1h"})
+	routesA := service.memoryRoutesFor("/ws/a")
+	if len(routesA) != 1 || routesA[0].route.ID != routeA.ID || routesA[0].jobID != "job_a" {
+		t.Fatalf("memory routes A = %+v, want one with job_a", routesA)
 	}
-	routesB := service.takeMemoryRoutes("/ws/b")
-	if len(routesB) != 1 || routesB[0].ID != routeB.ID {
+	routesB := service.memoryRoutesFor("/ws/b")
+	if len(routesB) != 1 || routesB[0].route.ID != routeB.ID {
 		t.Fatalf("memory routes B = %+v, want one", routesB)
 	}
-	if remaining := service.takeMemoryRoutes("/ws/a"); len(remaining) != 0 {
-		t.Errorf("memory routes after take = %+v, want empty", remaining)
+	service.removeMemoryRoute("/ws/a", routeA.ID)
+	if remaining := service.memoryRoutesFor("/ws/a"); len(remaining) != 0 {
+		t.Errorf("memory routes after remove = %+v, want empty", remaining)
+	}
+}
+
+func TestPersistRouteMemoryFallback(t *testing.T) {
+	ws := t.TempDir()
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	st.Close()
+	notDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0600); err != nil {
+		t.Fatalf("write not-a-dir: %v", err)
+	}
+	now := time.Now().UTC()
+	service := &Service{now: func() time.Time { return now }}
+	err = service.persistRoute(st, registry.Agent{Name: "valet", Workspace: notDir}, orch.CronJob{Title: "route"},
+		&comm.DeliveryError{EnvelopeID: "env_mem", ChatID: 10, Text: "output"})
+	if !errors.Is(err, errMemoryOnlyRoute) {
+		t.Fatalf("persistRoute() error = %v, want errMemoryOnlyRoute", err)
+	}
+	if routes := service.memoryRoutesFor(notDir); len(routes) != 1 || routes[0].route.ID != "env_mem" {
+		t.Errorf("memory routes = %+v, want env_mem", routes)
+	}
+}
+
+func TestHasMemoryRouteForJob(t *testing.T) {
+	service := &Service{}
+	service.addMemoryRoute("/ws/a", orch.CronRoute{ID: "env", ChatID: 10, Text: "x"}, orch.CronJob{ID: "job_a", Spec: "@every 1h"})
+	if !service.hasMemoryRouteForJob("/ws/a", "job_a") {
+		t.Error("hasMemoryRouteForJob() = false, want true")
+	}
+	if service.hasMemoryRouteForJob("/ws/b", "job_a") {
+		t.Error("hasMemoryRouteForJob(other workspace) = true, want false")
+	}
+	if service.hasMemoryRouteForJob("/ws/a", "job_b") {
+		t.Error("hasMemoryRouteForJob(other job) = true, want false")
 	}
 }
 
