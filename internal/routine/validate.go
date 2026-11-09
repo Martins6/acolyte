@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"strings"
 )
 
@@ -110,11 +111,16 @@ func asInt(raw any) (int, bool) {
 		}
 		return boundedInt(int64(value))
 	case json.Number:
-		parsed, err := value.Int64()
-		if err != nil {
+		if parsed, err := value.Int64(); err == nil {
+			return boundedInt(parsed)
+		}
+		// Accept exact integral forms such as 1.0 and 1e3 without going
+		// through float64 (which would round large integers).
+		rat, ok := new(big.Rat).SetString(value.String())
+		if !ok || !rat.IsInt() || !rat.Num().IsInt64() {
 			return 0, false
 		}
-		return boundedInt(parsed)
+		return boundedInt(rat.Num().Int64())
 	default:
 		return 0, false
 	}

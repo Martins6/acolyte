@@ -59,6 +59,30 @@ func TestDecodeArgsPreservesLargeIntegers(t *testing.T) {
 	}
 }
 
+func TestDecodeArgsAcceptsIntegralDecimalsAndExponents(t *testing.T) {
+	for raw, want := range map[string]int{
+		`{"n":1.0}`:   1,
+		`{"n":1e3}`:   1000,
+		`{"n":1.5e2}`: 150,
+		`{"n":-2.0}`:  -2,
+	} {
+		args, err := DecodeArgs(raw)
+		if err != nil {
+			t.Fatalf("DecodeArgs(%s) error: %v", raw, err)
+		}
+		normalized, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, args)
+		if err != nil {
+			t.Fatalf("ValidateArgs(%s) error: %v", raw, err)
+		}
+		if normalized["n"] != want {
+			t.Errorf("ValidateArgs(%s) = %v, want %d", raw, normalized["n"], want)
+		}
+	}
+	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number("1.2")}); err == nil {
+		t.Error("ValidateArgs(1.2) error = nil, want error")
+	}
+}
+
 func TestDecodeArgsRejectsInvalid(t *testing.T) {
 	for _, raw := range []string{`{`, `{} {}`, `[]`} {
 		if _, err := DecodeArgs(raw); err == nil {
