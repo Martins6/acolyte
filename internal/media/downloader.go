@@ -66,13 +66,19 @@ func GetFilePath(workspace string, mediaType MediaType, ext string) string {
 	return filepath.Join(downloadsDir, GenerateTimestampedFilename(downloadsDir, ext))
 }
 
-func DownloadFile(ctx context.Context, b *bot.Bot, fileID string) ([]byte, string, error) {
-	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
+// FileAPI is the Telegram file-download surface used by the adapter.
+type FileAPI interface {
+	GetFile(ctx context.Context, params *bot.GetFileParams) (*models.File, error)
+	Token() string
+}
+
+func DownloadFile(ctx context.Context, api FileAPI, fileID string) ([]byte, string, error) {
+	file, err := api.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get file: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.Token(), file.FilePath)
+	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", api.Token(), file.FilePath)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)

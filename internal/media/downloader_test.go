@@ -333,10 +333,10 @@ func TestExtractFileRef_Photo(t *testing.T) {
 func TestExtractFileRef_Audio(t *testing.T) {
 	msg := &models.Message{
 		Audio: &models.Audio{
-			FileID:    "aud",
-			FileSize:  1000,
-			MimeType:  "audio/mpeg",
-			FileName:  "song.mp3",
+			FileID:   "aud",
+			FileSize: 1000,
+			MimeType: "audio/mpeg",
+			FileName: "song.mp3",
 		},
 	}
 	fileID, fileSize, mimeType, originalName, mediaType, ext, ok := ExtractFileRef(msg)
@@ -398,10 +398,10 @@ func TestExtractFileRef_Voice(t *testing.T) {
 func TestExtractFileRef_Document(t *testing.T) {
 	msg := &models.Message{
 		Document: &models.Document{
-			FileID:    "doc",
-			FileSize:  2000,
-			MimeType:  "application/pdf",
-			FileName:  "report.pdf",
+			FileID:   "doc",
+			FileSize: 2000,
+			MimeType: "application/pdf",
+			FileName: "report.pdf",
 		},
 	}
 	fileID, fileSize, mimeType, originalName, mediaType, ext, ok := ExtractFileRef(msg)
