@@ -18,9 +18,10 @@ import (
 )
 
 type fakeSink struct {
-	notified []string
-	inboxed  []string
-	inboxErr error
+	notified    []string
+	inboxed     []string
+	inboxInputs []string
+	inboxErr    error
 }
 
 func (f *fakeSink) NotifyUser(_ context.Context, _ registry.Agent, text string) error {
@@ -28,8 +29,9 @@ func (f *fakeSink) NotifyUser(_ context.Context, _ registry.Agent, text string) 
 	return nil
 }
 
-func (f *fakeSink) Inbox(_ context.Context, _ registry.Agent, _ string, text string, _ map[string]any) (string, string, error) {
+func (f *fakeSink) Inbox(_ context.Context, _ registry.Agent, sessionID, text string, _ map[string]any) (string, string, error) {
 	f.inboxed = append(f.inboxed, text)
+	f.inboxInputs = append(f.inboxInputs, sessionID)
 	return text, "ses_inbox", f.inboxErr
 }
 
@@ -528,6 +530,46 @@ func TestRoutineInboxPersistsSession(t *testing.T) {
 	}
 	if session.OpenCodeSessionID != "ses_inbox" {
 		t.Errorf("session id = %q, want ses_inbox", session.OpenCodeSessionID)
+	}
+}
+
+type doubleInboxRoutine struct{}
+
+func (doubleInboxRoutine) Name() string        { return "double" }
+func (doubleInboxRoutine) Owner() string       { return "test" }
+func (doubleInboxRoutine) Description() string { return "double inbox routine" }
+func (doubleInboxRoutine) Args() []routine.ArgSpec {
+	return nil
+}
+func (doubleInboxRoutine) Run(ctx context.Context, env routine.Env, _ map[string]any) (string, error) {
+	if _, _, err := env.Inbox(ctx, "one", nil); err != nil {
+		return "", err
+	}
+	_, _, err := env.Inbox(ctx, "two", nil)
+	return "", err
+}
+
+func TestRoutineInboxUpdatesSessionForNextCall(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "double", Kind: "routine", Spec: "@every 1h", Routine: "double",
+		RoutineArgs: `{}`, AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"notify-user"}`,
+	})
+
+	routines := routine.NewRegistry()
+	if err := routines.Register(doubleInboxRoutine{}); err != nil {
+		t.Fatalf("register routine: %v", err)
+	}
+	sink := &fakeSink{}
+	service := startTestService(t, reg, routines, sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if len(sink.inboxInputs) != 2 || sink.inboxInputs[0] != "" || sink.inboxInputs[1] != "ses_inbox" {
+		t.Errorf("inbox session inputs = %v, want ['', 'ses_inbox']", sink.inboxInputs)
 	}
 }
 

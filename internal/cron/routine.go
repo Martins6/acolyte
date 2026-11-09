@@ -56,6 +56,7 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		Inbox: func(ctx context.Context, text string, meta map[string]any) (string, string, error) {
 			reply, inboxSession, sinkErr := s.sink.Inbox(ctx, agent, sessionID, text, meta)
 			if inboxSession != "" {
+				sessionID = inboxSession
 				if _, err := st.Orch().UpsertSession(thread, inboxSession, s.now()); err != nil && sinkErr == nil {
 					sinkErr = err
 				}
