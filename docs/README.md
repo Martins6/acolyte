@@ -73,6 +73,10 @@ acolyte new --name valet --workspace-folder ~/agents/valet --config '{
 }'
 ```
 
+> Capabilities are baked at creation. `acolyte new` adopts and preserves existing settings/jobs;
+> there is currently no CLI to mutate an agent's channels, allowed users, schedule, or engine
+> in place. See `FUTURE-IDEAS.md`.
+
 ---
 
 ## Secrets
@@ -135,6 +139,7 @@ docs/
 │   └── <channel>.md                ← telegram.md
 └── orchestrator/
     ├── README.md
+    ├── daemon.md                   ← per-agent adapters, routing, inspect/attach
     ├── cron.md                     ← shared cron service (shell + headless agent jobs)
     ├── heartbeat.md                ← the special always-on cron
     └── autostart.md                ← running always-on (macOS/Linux)

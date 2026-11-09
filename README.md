@@ -6,7 +6,7 @@ A runtime for a folder of agents, powered by OpenCode. Each agent is a self-cont
 
 ### Prerequisites
 
-**Both OpenCode CLI AND this binary are required to run the bot.**
+**Both the OpenCode CLI and this binary are required to run the daemon.**
 
 - [OpenCode CLI](https://github.com/anomalyco/opencode) installed (`opencode` command available)
 
@@ -107,66 +107,38 @@ EOF
 acolyte start
 ```
 
-> **Transitional:** the current `acolyte start` still runs the legacy single-workspace
-> daemon from `~/.acolyte/config.toml`. The multi-agent daemon that serves every
-> registered agent, and the per-agent Communication adapters, land in the next slices.
-> The legacy commands below remain available until that cutover.
+The daemon serves every registered agent:
+
+- Each agent's Telegram adapter reads its token from `<workspace>/.env`, falling
+  back to `$ACOLYTE_HOME/.env` and then the process environment.
+- **Each agent needs a distinct bot token.** Two agents sharing a token cannot
+  poll Telegram at the same time; the daemon starts one and warns about the rest.
+- Agents without a token, without Telegram in `communication.channels`, or
+  without allowed users are skipped with a warning.
 
 Press `Ctrl+C` to stop gracefully.
 
-## Legacy Configuration (current daemon)
+### 5. Inspect a Session
 
-New agents are configured by `acolyte new --config`; their wiring lives in
-`<workspace>/opencode.jsonc`, their persona in `<workspace>/.acolyte/`, and their secrets
-in the layered `.env` files. The current single-workspace daemon still reads
-`~/.acolyte/config.toml`:
+`acolyte inspect` merges the OpenCode conversation with the communication
+routing/delivery rows for one session:
 
-```toml
-[bot]
-token = "YOUR_BOT_TOKEN"
-allowed_users = [123456789]
-
-[workspace]
-path = "~/.acolyte/"
-
-[defaults]
-agent = "acolyte"
-model = "MiniMax-M3"
-provider = "minimax-coding-plan"
+```bash
+acolyte inspect --session-id ses_... --agent-name valet
+acolyte inspect --session-id ses_... --no-opencode   # routing events only
+acolyte inspect --session-id ses_... --ndjson        # one event per line
 ```
 
-### Configuration Commands
+To open the same session in the OpenCode TUI, attach to the managed service:
 
-| Command                                      | Description            |
-| -------------------------------------------- | ---------------------- |
-| `acolyte config set <key> <value>` | Set a config value     |
-| `acolyte config get <key>`         | Get a config value     |
-| `acolyte config list`              | List all config values |
+```bash
+acolyte attach --agent-name valet
+acolyte attach --agent-name valet --session-id ses_...
+```
 
-### Config Keys
-
-| Key                 | Description                       |
-| ------------------- | --------------------------------- |
-| `bot.token`         | Telegram bot token                |
-| `bot.allowed_users` | List of allowed Telegram user IDs |
-| `workspace.path`    | Workspace directory path          |
-| `defaults.agent`    | Default agent name                |
-| `defaults.model`    | Default LLM model                 |
-| `defaults.provider` | Default LLM provider              |
-
-## Slash Commands
-
-> These apply to the legacy single-workspace Telegram daemon until the multi-agent
-> Communication adapter lands.
-
-| Command                | Description        | Example                        |
-| ---------------------- | ------------------ | ------------------------------ |
-| `/start`               | Start the bot      | `/start`                       |
-| `/help`                | Show help message  | `/help`                        |
-| `/set-agent <name>`    | Set active agent   | `/set-agent coder`             |
-| `/set-model <name>`    | Set LLM model      | `/set-model claude-sonnet-4-5` |
-| `/set-provider <name>` | Set LLM provider   | `/set-provider anthropic`      |
-| `/workspace <path>`    | Set workspace path | `/workspace /path/to/folder`   |
+Running `opencode` directly in a folder starts its own server; use
+`acolyte attach` (or `opencode attach <url> --dir <workspace> --session <id>`)
+to share Acolyte's sessions.
 
 ## Agent Workspace
 
@@ -189,58 +161,34 @@ provider = "minimax-coding-plan"
 └── .logs/                    # daily log files
 ```
 
-The legacy single-workspace daemon still uses the old `~/.acolyte/` layout
-(`MAIN-PROMPTS/`, `opencode.json`, `data.db`, `conversations/`). Do not point
-`acolyte new` at that folder; it rejects a legacy `opencode.json`.
+`acolyte new` uses this layout exclusively. The old single-workspace `~/.acolyte/`
+layout (`MAIN-PROMPTS/`, `opencode.json`, `data.db`, `conversations/`) is no longer
+used; `acolyte new` still rejects a legacy `opencode.json` when adopting a folder.
 
 ## Logging
 
-Logs are stored in `~/.acolyte/.logs/` with format `YYYY-MM-DD.log`.
+The daemon logs to standard output/error; under launchd or systemd those streams
+go to the service log (`journalctl -u acolyte`, or the `StandardOutPath` /
+`StandardErrorPath` in the launchd plist).
 
-### View Logs
-
-```bash
-# View today's logs
-acolyte logs today
-
-# View specific date
-acolyte logs 2026-03-05
-```
-
-Log format:
-
-```
-[INPUT]  [2026-03-05 10:30:45] User 123456789: "Hello"
-[OUTPUT] [2026-03-05 10:30:46] Response text...
-```
-
-Log retention is 30 days (auto-cleanup).
+Per-agent audit events (cron runs, delivery failures, no-channel inbox replies)
+are stored in the `orch_logs` table in `<workspace>/.acolyte.sqlite.db`. Use
+`acolyte inspect --session-id ...` to see the conversation plus routing history
+for one session.
 
 ## Media Handling
 
-> The current media path belongs to the legacy single-workspace daemon. The
-> per-agent Communication adapter will preserve the same file-path contract.
+When an allowed Telegram user sends media:
 
-When you send a **photo** to the bot:
+1. The Telegram adapter downloads the file (reusing an existing download when the
+   Telegram file ID was seen before).
+2. It saves the file under `<workspace>/downloads/<type>/`.
+3. It builds a prompt of the form `File located at: <abs-path>\n\nUser message: <caption-or-empty>`
+   and offers it to the agent.
+4. The agent can read or otherwise act on the file via its normal tools.
 
-1. The bot downloads the largest available size from Telegram
-2. Saves it to `<workspace>/downloads/images/<filename>` using the original Telegram filename (which is guaranteed unique server-side)
-3. Builds a prompt of the form `File located at: <abs-path>\n\nUser message: <caption-or-empty>` and forwards it to OpenCode
-4. The agent can then read or otherwise act on the file via its normal tools
-
-Photos with no caption are accepted; the prompt will then contain only the file location.
-
-### Supported Media Types
-
-| Telegram Type | Supported? | Notes                                                |
-| ------------- | ---------- | ---------------------------------------------------- |
-| Photo         | Yes        | Downloaded and forwarded to the agent                |
-| Audio / Voice | No         | Silently ignored                                     |
-| Document      | No         | Silently ignored                                     |
-| Video         | No         | Silently ignored                                     |
-| Sticker       | No         | Silently ignored                                     |
-
-Sender-side media (the bot sending photos/documents back to you) is not implemented — all agent replies arrive as plain text messages.
+Photos, documents, audio, voice, and video are all downloaded. Media the agent
+sends back to the user is currently text-only; sender-side media is deferred.
 
 ## CLI Commands
 
@@ -253,17 +201,20 @@ Sender-side media (the bot sending photos/documents back to you) is not implemen
 | `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service            |
 | `acolyte notify-user "<text>"`               | Notify the user only (never the agent)         |
 | `acolyte inbox "<text>"`                     | Deliver a synthetic external event to an agent |
-| `acolyte start`                              | Start the current daemon + OpenCode server     |
-| `acolyte config`                             | Legacy configuration management                |
-| `acolyte logs [date]`                        | View logs                                      |
+| `acolyte inspect --session-id <id>`          | Merge OpenCode history with routing events     |
+| `acolyte attach [--agent-name <n>]`          | Attach the OpenCode TUI to the agent session   |
+| `acolyte start`                              | Start the multi-agent daemon                   |
 | `acolyte update`                             | Check & apply updates                          |
 | `acolyte version`                            | Print binary version                           |
+
+> Runtime capability edits are not exposed yet: `acolyte new` preserves existing
+> settings/jobs when adopting an agent. See `FUTURE-IDEAS.md`.
 
 ## Updating
 
 The bot can fetch and install its own updates from GitHub Releases.
 
-- `acolyte start` runs a non-blocking check at startup. If you're behind, it sends a Telegram notification to the allowed user saying which version is available.
+- `acolyte start` runs a non-blocking check at startup. If you're behind, it queues a notification through every running agent's channel.
 - `acolyte update --check` is the dry-run command. It prints current vs latest and exits without downloading.
 - `acolyte update` downloads the matching release asset, verifies its SHA256 against the `checksums.txt` attached to the release, replaces the binary in place, and (by default) re-execs the new process.
 - `acolyte update --version vX.Y.Z` pins a specific release instead of `latest`.
@@ -281,22 +232,27 @@ For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file
 ├── cmd/                    # CLI commands
 │   ├── root.go
 │   ├── start.go
-│   ├── config.go
 │   ├── new.go
-│   └── logs.go
+│   ├── cron.go
+│   ├── notify_user.go
+│   ├── inbox.go
+│   ├── inspect.go
+│   └── attach.go
 ├── internal/
 │   ├── agent/             # --config parsing + create/adopt workflow
-│   ├── bot/               # Legacy Telegram bot
-│   ├── config/            # Legacy config.toml
-│   ├── logger/            # Logging
+│   ├── comm/              # Envelope router, outbox sink, Telegram adapter
+│   ├── cron/              # Shared scheduler + execution
+│   ├── daemon/            # Per-agent adapter lifecycle + routing
+│   ├── envelope/          # The Communication ⇄ Orchestrator message type
 │   ├── media/             # Media handling
 │   ├── opencode/          # OpenCode V2 integration
 │   ├── paths/             # $ACOLYTE_HOME + workspace layout
 │   ├── registry/          # Global agent identity store
+│   ├── routine/           # Registered routines (dream, heartbeat)
 │   ├── secrets/           # Layered .env loading
-│   ├── session/           # Legacy in-memory sessions
 │   ├── store/             # Per-agent SQLite store + module schemas
-│   └── workspace/         # Legacy templates + agent scaffold/validate
+│   ├── storepool/         # Refcounted shared per-agent stores
+│   └── workspace/         # Agent scaffold/validate
 ├── main.go
 └── go.mod
 ```
@@ -305,8 +261,8 @@ For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file
 
 - `github.com/go-telegram/bot` - Telegram Bot API
 - `github.com/spf13/cobra` - CLI framework
-- `github.com/spf13/viper` - Configuration
-- `github.com/google/uuid` - UUID generation
+- `github.com/robfig/cron/v3` - Cron schedule parsing
+- `github.com/mattn/go-sqlite3` - SQLite store
 
 ### GitHub Workflow
 
