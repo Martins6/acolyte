@@ -371,7 +371,12 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	agent := pair.agent
 	st := pair.store
 	started := s.now()
-	meta := parseJobMeta(job.Meta)
+	meta, metaErr := parseJobMeta(job.Meta)
+	if metaErr != nil {
+		_ = st.Orch().MarkCronJobRun(job.ID, s.now())
+		s.logJob(st, job, "error", metaErr.Error())
+		return
+	}
 	text, sessionID, err := s.runJob(ctx, agent, st, job, meta)
 
 	if markErr := st.Orch().MarkCronJobRun(job.ID, s.now()); markErr != nil {

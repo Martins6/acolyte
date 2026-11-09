@@ -118,6 +118,42 @@ func startTestService(t *testing.T, reg *registry.Registry, routines *routine.Re
 	return service
 }
 
+func TestParseJobMetaValidation(t *testing.T) {
+	if _, err := parseJobMeta(`{`); err == nil {
+		t.Fatal("parseJobMeta(invalid) error = nil, want error")
+	}
+	meta, err := parseJobMeta(`{"timeout_seconds":9223372036854775807}`)
+	if err != nil {
+		t.Fatalf("parseJobMeta(large timeout) error: %v", err)
+	}
+	if meta.TimeoutSeconds != int(MaxShellTimeout/time.Second) {
+		t.Errorf("timeout = %d, want cap %d", meta.TimeoutSeconds, int(MaxShellTimeout/time.Second))
+	}
+}
+
+func TestInvalidMetaDoesNotRunJob(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	marker := filepath.Join(t.TempDir(), "marker")
+	script := filepath.Join(t.TempDir(), "job.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ran > "+marker+"\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "bad-meta", Kind: "shell", Spec: "@every 1h", ShellPath: script,
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past, Meta: `{`,
+	})
+
+	service := startTestService(t, reg, routine.NewRegistry(), &fakeSink{}, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Error("job ran despite malformed metadata")
+	}
+}
+
 func TestShellJobUsesConfiguredShell(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	dir := t.TempDir()

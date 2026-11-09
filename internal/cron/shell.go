@@ -73,6 +73,12 @@ func (s *Service) runShell(ctx context.Context, agent registry.Agent, job orch.C
 	}
 
 	timeout := time.Duration(meta.TimeoutSeconds) * time.Second
+	if meta.TimeoutSeconds <= 0 {
+		timeout = DefaultShellTimeout
+	}
+	if timeout > MaxShellTimeout {
+		timeout = MaxShellTimeout
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
