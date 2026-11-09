@@ -43,6 +43,10 @@ type SyntheticEvent struct {
 type TurnResult struct {
 	SessionID    string
 	ResponseText string
+	// InputID is the admitted inbox item that started the turn.
+	InputID string
+	// MessageIDs are the assistant message IDs produced after InputID.
+	MessageIDs []string
 }
 
 // RunUserTurn drives one real user turn: ensure session, sync agent/model,
@@ -134,7 +138,12 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 			return nil, err
 		}
 		if delivered {
-			return &TurnResult{SessionID: sessionID, ResponseText: assistantText(msgs)}, nil
+			return &TurnResult{
+				SessionID:    sessionID,
+				ResponseText: assistantText(msgs),
+				InputID:      markerID,
+				MessageIDs:   assistantMessageIDs(msgs),
+			}, nil
 		}
 		if truncated {
 			// The marker lies beyond the collection window: it is either
@@ -178,6 +187,23 @@ func assistantText(msgs []Message) string {
 		b.WriteString(text.String())
 	}
 	return b.String()
+}
+
+// assistantMessageIDs returns the IDs of assistant messages that carry text.
+func assistantMessageIDs(msgs []Message) []string {
+	var ids []string
+	for _, m := range msgs {
+		if m.Type != "assistant" {
+			continue
+		}
+		for _, part := range m.Content {
+			if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+				ids = append(ids, m.ID)
+				break
+			}
+		}
+	}
+	return ids
 }
 
 // modelRef maps the caller's provider/model strings to a Model.Ref, or nil when
