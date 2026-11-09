@@ -193,7 +193,8 @@ func findInspectTarget(sessionID, agentName, workspace string) (registry.Agent, 
 			return registry.Agent{}, orch.Session{}, nil, err
 		}
 		if !ok {
-			return agent, orch.Session{}, st, nil
+			st.Close()
+			return registry.Agent{}, orch.Session{}, nil, fmt.Errorf("session %q is not mapped to agent %q; omit --agent-name/--workspace-folder to scan all agents", sessionID, agent.Name)
 		}
 		return agent, session, st, nil
 	}

@@ -133,3 +133,11 @@ func TestInspectUnknownSession(t *testing.T) {
 		t.Fatal("runInspect(unknown) error = nil, want error")
 	}
 }
+
+func TestInspectRejectsUnmappedExplicitAgent(t *testing.T) {
+	setupCronCLI(t)
+	err := runInspect(context.Background(), &bytes.Buffer{}, inspectOptions{SessionID: "ses_missing", AgentName: "valet"})
+	if err == nil || !strings.Contains(err.Error(), "not mapped") {
+		t.Fatalf("runInspect(unmapped explicit agent) error = %v, want not-mapped error", err)
+	}
+}
