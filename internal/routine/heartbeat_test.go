@@ -1,0 +1,122 @@
+package routine
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/martins6/acolyte/internal/registry"
+	"github.com/martins6/acolyte/internal/store"
+)
+
+func TestHeartbeatPromptGuidesInbox(t *testing.T) {
+	ws := t.TempDir()
+	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "HEARTBEAT.md"), "Watch for urgent mail.")
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if _, err := st.Orch().UpsertSession("telegram:1", "ses_user", now); err != nil {
+		t.Fatalf("upsert user session: %v", err)
+	}
+	if _, err := st.Orch().UpsertSession("cron:heartbeat", "ses_hb", now.Add(time.Minute)); err != nil {
+		t.Fatalf("upsert heartbeat session: %v", err)
+	}
+
+	var prompt string
+	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_user/message":
+			fmt.Fprint(w, `{"data":[{"id":"m1","type":"user","text":"urgent mail"}],"cursor":{"next":null}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_hb":
+			fmt.Fprint(w, `{"data":{"id":"ses_hb"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_hb/synthetic":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			prompt, _ = body["text"].(string)
+			fmt.Fprint(w, `{"data":{"id":"msg_hb","sessionID":"ses_hb","type":"synthetic"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_hb/wait":
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_hb/message":
+			fmt.Fprint(w, `{"data":[{"id":"msg_out","type":"assistant","content":[{"type":"text","text":"NO_ACTION"}]},{"id":"msg_hb","type":"synthetic","text":"prompt"}],"cursor":{"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+	env := Env{
+		Agent: registry.Agent{Name: "valet", Workspace: ws}, Workspace: ws,
+		Thread: "cron:heartbeat", SessionID: "ses_hb", Meta: map[string]any{},
+		Now: func() time.Time { return now }, Store: st, OpenCode: client,
+		Log: func(string, string, map[string]any) {},
+	}
+	if _, err := (heartbeatRoutine{}).Run(context.Background(), env, map[string]any{"interval": 60}); err != nil {
+		t.Fatalf("heartbeat Run() error: %v", err)
+	}
+	for _, want := range []string{
+		"Watch for urgent mail.",
+		"acolyte inbox --agent-name valet --session-id ses_user",
+		"NO_ACTION",
+		"Never use the heartbeat session as the target",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "Latest user session: ses_hb") {
+		t.Error("heartbeat selected its own session as the user target")
+	}
+	session, ok, err := st.Orch().GetSessionByThread("cron:heartbeat")
+	if err != nil || !ok || session.OpenCodeSessionID != "ses_hb" {
+		t.Errorf("session = %+v, %v, %v", session, ok, err)
+	}
+}
+
+func TestHeartbeatNoUserSession(t *testing.T) {
+	ws := t.TempDir()
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if _, err := st.Orch().UpsertSession("cron:heartbeat", "ses_hb", now); err != nil {
+		t.Fatalf("upsert heartbeat session: %v", err)
+	}
+	var prompt string
+	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_hb":
+			fmt.Fprint(w, `{"data":{"id":"ses_hb"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_hb/synthetic":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			prompt, _ = body["text"].(string)
+			fmt.Fprint(w, `{"data":{"id":"msg_hb","sessionID":"ses_hb","type":"synthetic"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_hb/wait":
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_hb/message":
+			fmt.Fprint(w, `{"data":[{"id":"msg_out","type":"assistant","content":[{"type":"text","text":"NO_ACTION"}]},{"id":"msg_hb","type":"synthetic","text":"prompt"}],"cursor":{"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+	env := Env{
+		Agent: registry.Agent{Name: "valet", Workspace: ws}, Workspace: ws,
+		Thread: "cron:heartbeat", SessionID: "ses_hb", Meta: map[string]any{},
+		Now: func() time.Time { return now }, Store: st, OpenCode: client,
+		Log: func(string, string, map[string]any) {},
+	}
+	if _, err := (heartbeatRoutine{}).Run(context.Background(), env, map[string]any{"interval": 60}); err != nil {
+		t.Fatalf("heartbeat Run() error: %v", err)
+	}
+	if !strings.Contains(prompt, "No user session is available") {
+		t.Errorf("prompt = %s", prompt)
+	}
+}

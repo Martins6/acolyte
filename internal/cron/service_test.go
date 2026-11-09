@@ -943,39 +943,6 @@ func TestRoutineInboxPersistsSessionOnSinkError(t *testing.T) {
 	}
 }
 
-func TestPendingRoutineDoesNotNotify(t *testing.T) {
-	reg, ws, now := setupCron(t)
-	past := now.Add(-time.Minute)
-	addJob(t, ws, orch.CronJob{
-		Title: "dream", Kind: "routine", Spec: "@every 72h", Routine: "dream",
-		RoutineArgs: `{"days":3}`, AgentTarget: "valet", Enabled: true, NextRunAt: &past,
-		Meta: `{"on_success":"notify-user"}`,
-	})
-
-	sink := &fakeSink{}
-	service := startTestService(t, reg, routine.Default(), sink, nil, "/bin/sh", now)
-	service.Tick(context.Background())
-	service.Wait()
-	service.Stop()
-
-	if len(sink.notified) != 0 {
-		t.Errorf("notified = %v, want empty", sink.notified)
-	}
-
-	st, err := store.Open(ws)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
-	defer st.Close()
-	var message string
-	if err := st.DB().QueryRow(`SELECT message FROM orch_logs ORDER BY id DESC LIMIT 1`).Scan(&message); err != nil {
-		t.Fatalf("read log: %v", err)
-	}
-	if !strings.Contains(message, "pending Phase 4") {
-		t.Errorf("log message = %q, want pending Phase 4", message)
-	}
-}
-
 func TestInvalidSpecDisablesJob(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	past := now.Add(-time.Minute)

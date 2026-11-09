@@ -48,6 +48,13 @@ type Env struct {
 	Log          func(level, message string, meta map[string]any)
 }
 
+func (e Env) Clock() time.Time {
+	if e.Now == nil {
+		return time.Now().UTC()
+	}
+	return e.Now()
+}
+
 // Routine is one named headless behavior.
 type Routine interface {
 	Name() string
