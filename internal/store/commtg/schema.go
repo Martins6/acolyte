@@ -237,10 +237,38 @@ func migrateV7(db *sql.DB) error {
 			return err
 		}
 	}
-	// Deduplicate existing rows before adding the unique index.
-	if _, err := db.Exec(`DELETE FROM comm_tg_outbox WHERE rowid NOT IN (
-		SELECT MIN(rowid) FROM comm_tg_outbox GROUP BY envelope_id)`); err != nil {
+	// Deduplicate existing rows before adding the unique index. Prefer a
+	// pending row so a deliverable copy is never discarded.
+	rows, err := db.Query(`SELECT envelope_id FROM comm_tg_outbox
+		GROUP BY envelope_id HAVING COUNT(*) > 1`)
+	if err != nil {
 		return err
+	}
+	var duplicates []string
+	for rows.Next() {
+		var envelopeID string
+		if err := rows.Scan(&envelopeID); err != nil {
+			rows.Close()
+			return err
+		}
+		duplicates = append(duplicates, envelopeID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, envelopeID := range duplicates {
+		var keepRowID int64
+		if err := db.QueryRow(`SELECT rowid FROM comm_tg_outbox WHERE envelope_id = ?
+			ORDER BY CASE delivery WHEN 'pending' THEN 0 ELSE 1 END, rowid LIMIT 1`,
+			envelopeID).Scan(&keepRowID); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`DELETE FROM comm_tg_outbox WHERE envelope_id = ? AND rowid != ?`,
+			envelopeID, keepRowID); err != nil {
+			return err
+		}
 	}
 	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_tg_outbox_envelope ON comm_tg_outbox(envelope_id)`)
 	return err
