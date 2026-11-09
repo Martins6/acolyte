@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
 )
@@ -31,7 +32,8 @@ func TestHeartbeatPromptGuidesInbox(t *testing.T) {
 	}
 
 	var prompt string
-	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_user/message":
 			fmt.Fprint(w, `{"data":[{"id":"m1","type":"user","text":"urgent mail"}],"cursor":{"next":null}}`)
@@ -72,6 +74,18 @@ func TestHeartbeatPromptGuidesInbox(t *testing.T) {
 	if strings.Contains(prompt, "Latest user session: ses_hb") {
 		t.Error("heartbeat selected its own session as the user target")
 	}
+	if len(permissions) != 2 {
+		t.Fatalf("permission updates = %+v, want restrict+restore", permissions)
+	}
+	if got := permissionEffect(permissions[0].rules, "shell", `acolyte inbox --agent-name valet --session-id ses_user "hi"`); got != opencode.PermissionAllow {
+		t.Errorf("heartbeat inbox permission = %s, want allow", got)
+	}
+	if got := permissionEffect(permissions[0].rules, "edit", filepath.Join(ws, ".acolyte", "HEARTBEAT.md")); got != opencode.PermissionDeny {
+		t.Errorf("heartbeat edit permission = %s, want deny", got)
+	}
+	if len(permissions[1].rules) != 0 {
+		t.Errorf("restored rules = %+v, want empty", permissions[1].rules)
+	}
 	session, ok, err := st.Orch().GetSessionByThread("cron:heartbeat")
 	if err != nil || !ok || session.OpenCodeSessionID != "ses_hb" {
 		t.Errorf("session = %+v, %v, %v", session, ok, err)
@@ -90,7 +104,8 @@ func TestHeartbeatNoUserSession(t *testing.T) {
 		t.Fatalf("upsert heartbeat session: %v", err)
 	}
 	var prompt string
-	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_hb":
 			fmt.Fprint(w, `{"data":{"id":"ses_hb"}}`)

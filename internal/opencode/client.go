@@ -23,12 +23,13 @@ type ModelRef struct {
 
 // SessionInfo is the public session projection (OpenCode Session.Info).
 type SessionInfo struct {
-	ID       string          `json:"id"`
-	Agent    string          `json:"agent"`
-	Model    *ModelRef       `json:"model"`
-	Title    string          `json:"title,omitempty"`
-	Time     SessionTime     `json:"time,omitempty"`
-	Location SessionLocation `json:"location,omitempty"`
+	ID          string           `json:"id"`
+	Agent       string           `json:"agent"`
+	Model       *ModelRef        `json:"model"`
+	Title       string           `json:"title,omitempty"`
+	Time        SessionTime      `json:"time,omitempty"`
+	Location    SessionLocation  `json:"location,omitempty"`
+	Permissions []PermissionRule `json:"permissions,omitempty"`
 }
 
 // SessionTime holds session epoch-millisecond timestamps.
@@ -194,6 +195,17 @@ func (c *Client) GetSession(ctx context.Context, sessionID string) (*SessionInfo
 		return nil, err
 	}
 	return &resp.Data, nil
+}
+
+// SetSessionPermissions replaces the session-scoped permission rules. Rules
+// are evaluated after the agent's rules (last match wins), so callers can
+// confine a turn without editing the workspace config.
+func (c *Client) SetSessionPermissions(ctx context.Context, sessionID string, rules []PermissionRule) error {
+	if rules == nil {
+		rules = []PermissionRule{}
+	}
+	path := "/api/session/" + url.PathEscape(sessionID)
+	return c.do(ctx, http.MethodPatch, path, map[string]any{"permissions": rules}, nil)
 }
 
 // SwitchAgent selects the agent used by subsequent turns.
