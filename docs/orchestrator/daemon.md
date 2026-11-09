@@ -20,7 +20,8 @@ adapter per configured agent.
 
 Inbound Telegram updates become Envelopes. The daemon resolves the agent from the adapter, maps
 `telegram:<chat_id>` to an OpenCode session in `orch_sessions`, runs a real user turn, persists the
-session, and sends the reply through the agent's adapter.
+session, and sends the reply through the agent's adapter. If an adapter is restarting or disabled,
+the reply is still queued in that agent's durable outbox for later delivery.
 
 Cron prompt/routine jobs and `acolyte inbox` admit **synthetic** events. Turns always run and
 persist, even when no channel can deliver the reply; delivery is a separate, durable outbox step.
