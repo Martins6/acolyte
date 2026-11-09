@@ -103,19 +103,17 @@ func printAgent(w io.Writer, agent registry.Agent) error {
 	if statsErr != nil {
 		if errors.Is(statsErr, store.ErrNoStore) {
 			fmt.Fprintln(w, "Last active: —")
+			fmt.Fprintln(w, "Jobs:        —")
 		} else {
 			fmt.Fprintf(w, "Last active: unavailable (%v)\n", statsErr)
+			fmt.Fprintln(w, "Jobs:        unavailable")
 		}
-	} else {
-		fmt.Fprintf(w, "Last active: %s\n", formatTime(stats.LastActiveAt))
+		return nil
 	}
+	fmt.Fprintf(w, "Last active: %s\n", formatTime(stats.LastActiveAt))
 
 	st, err := store.OpenReadOnly(agent.Workspace)
 	if err != nil {
-		if errors.Is(err, store.ErrNoStore) {
-			fmt.Fprintln(w, "Jobs:        —")
-			return nil
-		}
 		return err
 	}
 	defer st.Close()

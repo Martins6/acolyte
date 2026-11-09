@@ -81,6 +81,32 @@ func TestRunStatusListUnavailable(t *testing.T) {
 	}
 }
 
+func TestRunStatusDetailUnavailable(t *testing.T) {
+	setupAgentHome(t)
+	ws := filepath.Join(t.TempDir(), "valet")
+	createTestAgent(t, "valet", ws, `{}`)
+
+	dbPath := filepath.Join(ws, ".acolyte.sqlite.db")
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal"} {
+		_ = os.Remove(path)
+	}
+	if err := os.Mkdir(dbPath, 0755); err != nil {
+		t.Fatalf("replace store with directory: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runStatus(&out, "valet"); err != nil {
+		t.Fatalf("runStatus() error: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "Last active: unavailable") {
+		t.Errorf("output missing unavailable activity:\n%s", text)
+	}
+	if !strings.Contains(text, "Jobs:        unavailable") {
+		t.Errorf("output missing unavailable jobs:\n%s", text)
+	}
+}
+
 func TestRunStatusDetail(t *testing.T) {
 	setupAgentHome(t)
 	ws := filepath.Join(t.TempDir(), "valet")
