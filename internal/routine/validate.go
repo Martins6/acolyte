@@ -22,7 +22,11 @@ func ValidateArgs(specs []ArgSpec, args map[string]any) (map[string]any, error) 
 				return nil, fmt.Errorf("routine: missing required argument %q", spec.Name)
 			}
 			if spec.Default != nil {
-				out[spec.Name] = spec.Default
+				value, err := normalizeValue(spec, spec.Default)
+				if err != nil {
+					return nil, fmt.Errorf("routine: invalid default for %q: %w", spec.Name, err)
+				}
+				out[spec.Name] = value
 			}
 			continue
 		}

@@ -40,6 +40,13 @@ func TestValidateArgs(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidDefault(t *testing.T) {
+	specs := []ArgSpec{{Name: "days", Type: "int", Default: "three"}}
+	if _, err := ValidateArgs(specs, nil); err == nil {
+		t.Fatal("ValidateArgs(invalid default) error = nil, want error")
+	}
+}
+
 func TestValidateRequiredMissing(t *testing.T) {
 	specs := []ArgSpec{{Name: "days", Type: "int", Required: true}}
 	if _, err := ValidateArgs(specs, nil); err == nil {
