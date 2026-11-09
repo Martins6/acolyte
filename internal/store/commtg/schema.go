@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "comm_tg"
-	version = 2
+	version = 3
 )
 
 // Migrate creates or upgrades the Telegram communication schema.
@@ -35,8 +35,17 @@ func Migrate(db *sql.DB) error {
 
 	// schemaV2 is idempotent and includes the v1 settings table, so it
 	// upgrades both fresh databases and v1 installations in one step.
-	if _, err := db.Exec(schemaV2); err != nil {
-		return fmt.Errorf("comm_tg: migrate to version %d: %w", version, err)
+	if current < 2 {
+		if _, err := db.Exec(schemaV2); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 2: %w", err)
+		}
+		current = 2
+	}
+	if current < 3 {
+		if _, err := db.Exec(schemaV3); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 3: %w", err)
+		}
+		current = 3
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -118,4 +127,10 @@ CREATE TABLE IF NOT EXISTS comm_tg_media (
   chat_id    INTEGER NOT NULL,
   saved_at   DATETIME NOT NULL
 );
+`
+
+// schemaV3 distinguishes private chats (valid notification destinations) from
+// groups/channels, where a reply would be visible to every member.
+const schemaV3 = `
+ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 1;
 `

@@ -299,7 +299,7 @@ func TestDaemonNotifyUserAndInbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() error: %v", err)
 	}
-	if err := st.CommTG().UpsertChat(10, "alice", true, time.Now().UTC()); err != nil {
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, time.Now().UTC()); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
 	release()

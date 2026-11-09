@@ -89,7 +89,7 @@ func TestHandleUpdateAdmitsAllowedUserAndDeduplicates(t *testing.T) {
 	update := &models.Update{ID: 100, Message: &models.Message{
 		ID:   7,
 		From: &models.User{ID: 42, Username: "alice"},
-		Chat: models.Chat{ID: 10},
+		Chat: models.Chat{ID: 10, Type: models.ChatTypePrivate},
 		Text: "hello",
 	}}
 	adapter.handleUpdate(context.Background(), nil, update)
@@ -106,7 +106,7 @@ func TestHandleUpdateAdmitsAllowedUserAndDeduplicates(t *testing.T) {
 		t.Errorf("meta = %+v", env.Meta)
 	}
 	chat, ok, err := st.CommTG().GetChat(10)
-	if err != nil || !ok || chat.Username != "alice" || !chat.Allowed {
+	if err != nil || !ok || chat.Username != "alice" || !chat.Allowed || !chat.Private {
 		t.Errorf("chat = %+v, %v, %v", chat, ok, err)
 	}
 	inbox, ok, err := st.CommTG().GetInboxByEnvelope(env.ID)
@@ -115,6 +115,30 @@ func TestHandleUpdateAdmitsAllowedUserAndDeduplicates(t *testing.T) {
 	}
 	if len(api.messages()) != 0 {
 		t.Errorf("unexpected bot messages: %+v", api.messages())
+	}
+}
+
+func TestHandleUpdateGroupIsNotNotificationDestination(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "@alice")
+	captured := 0
+	adapter.sink = func(envelope.Envelope) { captured++ }
+	update := &models.Update{ID: 103, Message: &models.Message{
+		ID:   10,
+		From: &models.User{ID: 42, Username: "alice"},
+		Chat: models.Chat{ID: -100123, Type: models.ChatTypeGroup},
+		Text: "hello group",
+	}}
+	adapter.handleUpdate(context.Background(), nil, update)
+
+	if captured != 1 {
+		t.Fatalf("captured = %d, want 1 (group turns still run)", captured)
+	}
+	chat, ok, err := st.CommTG().GetChat(-100123)
+	if err != nil || !ok || chat.Private {
+		t.Errorf("group chat = %+v, %v, %v; want non-private", chat, ok, err)
+	}
+	if _, ok, err := st.CommTG().LatestAllowedChat(); err != nil || ok {
+		t.Errorf("LatestAllowedChat() = ok:%v err:%v, want none for a group-only chat", ok, err)
 	}
 }
 
