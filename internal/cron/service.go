@@ -168,8 +168,9 @@ func (s *Service) run() {
 	}
 }
 
-// Tick dispatches every currently due job. It does not wait for execution.
-func (s *Service) Tick(ctx context.Context) {
+// Tick dispatches currently due jobs and returns how many were dispatched. It
+// does not wait for execution.
+func (s *Service) Tick(ctx context.Context) int {
 	now := s.now()
 	s.mu.Lock()
 	pairs := make([]*agentStore, 0, len(s.stores))
@@ -186,6 +187,7 @@ func (s *Service) Tick(ctx context.Context) {
 		s.mu.Unlock()
 	}()
 
+	dispatched := 0
 	for _, pair := range pairs {
 		jobs, err := pair.store.Orch().DueCronJobs(now)
 		if err != nil {
@@ -193,9 +195,12 @@ func (s *Service) Tick(ctx context.Context) {
 			continue
 		}
 		for _, job := range jobs {
-			s.dispatch(ctx, pair, job, now)
+			if s.dispatch(ctx, pair, job, now) {
+				dispatched++
+			}
 		}
 	}
+	return dispatched
 }
 
 func (s *Service) refresh() {
@@ -288,7 +293,7 @@ func (s *Service) closeStores() {
 	s.retired = nil
 }
 
-func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJob, now time.Time) {
+func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJob, now time.Time) bool {
 	agent := pair.agent
 	key := agent.Name + "/" + job.ID
 
@@ -297,7 +302,7 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 	select {
 	case s.sem <- struct{}{}:
 	default:
-		return
+		return false
 	}
 	semHeld := true
 
@@ -305,7 +310,7 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 	if s.running[key] {
 		s.mu.Unlock()
 		<-s.sem
-		return
+		return false
 	}
 	s.running[key] = true
 	pair.refs++
@@ -329,7 +334,7 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 			log.Printf("cron: job %s has invalid timezone %q: %v", job.Title, job.Timezone, err)
 			_ = pair.store.Orch().SetCronJobEnabled(job.Title, false)
 			release()
-			return
+			return false
 		}
 		location = loaded
 	}
@@ -339,7 +344,7 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 		log.Printf("cron: job %s has invalid spec %q: %v", job.Title, job.Spec, err)
 		_ = pair.store.Orch().SetCronJobEnabled(job.Title, false)
 		release()
-		return
+		return false
 	}
 	next := schedule.Next(now.In(location)).UTC()
 
@@ -347,11 +352,11 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 	if err != nil {
 		log.Printf("cron: claim job %s: %v", job.Title, err)
 		release()
-		return
+		return false
 	}
 	if !claimed {
 		release()
-		return
+		return false
 	}
 
 	s.wg.Add(1)
@@ -365,6 +370,7 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 		}()
 		s.execute(ctx, pair, job)
 	}()
+	return true
 }
 
 func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJob) {
