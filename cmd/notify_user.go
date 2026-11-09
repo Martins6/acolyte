@@ -6,8 +6,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/martins6/acolyte/internal/config"
-	"github.com/martins6/acolyte/internal/database"
+	"github.com/martins6/acolyte/internal/comm"
+	"github.com/martins6/acolyte/internal/storepool"
 	"github.com/spf13/cobra"
 )
 
@@ -31,29 +31,21 @@ func init() {
 	notifyUserCmd.Flags().StringVar(&notifyUserWorkspace, "workspace-folder", "", "target agent workspace (optional)")
 }
 
-func runNotifyUser(_ context.Context, w io.Writer, text, agentName, workspace string) error {
+func runNotifyUser(ctx context.Context, w io.Writer, text, agentName, workspace string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return fmt.Errorf("message is required")
 	}
-	if strings.TrimSpace(agentName) != "" || strings.TrimSpace(workspace) != "" {
-		if _, err := resolveTargetAgent(agentName, workspace); err != nil {
-			return err
-		}
+	agent, err := resolveTargetAgent(agentName, workspace)
+	if err != nil {
+		return err
 	}
-	if _, err := config.Load(""); err != nil {
-		return fmt.Errorf("load config: %w", err)
+	pool := storepool.New()
+	defer pool.CloseAll()
+	sink := comm.OutboxSink{Stores: pool}
+	if err := sink.NotifyUser(ctx, agent, text); err != nil {
+		return err
 	}
-	if err := database.Init(legacyWorkspace()); err != nil {
-		return fmt.Errorf("initialize legacy notifier database: %w", err)
-	}
-	userID := config.GetAllowedUserChatID()
-	if userID == 0 {
-		return fmt.Errorf("no Telegram user chat id is resolved yet; message the bot first")
-	}
-	if _, err := database.InsertNotification(userID, text); err != nil {
-		return fmt.Errorf("queue notification: %w", err)
-	}
-	fmt.Fprintln(w, "Notification queued for the user.")
+	fmt.Fprintf(w, "Notification queued for agent %q.\n", agent.Name)
 	return nil
 }
