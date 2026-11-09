@@ -17,6 +17,7 @@ import (
 	"github.com/martins6/acolyte/internal/fdverify"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/store/commtg"
+	"github.com/martins6/acolyte/internal/store/mem"
 	"github.com/martins6/acolyte/internal/store/orch"
 	sqlite3 "github.com/mattn/go-sqlite3"
 	"golang.org/x/sys/unix"
@@ -74,6 +75,10 @@ func Open(workspace string) (*Store, error) {
 		return nil, err
 	}
 	if err := commtg.Migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := mem.Migrate(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -321,6 +326,9 @@ func (s *Store) Orch() *orch.Store { return orch.New(s.db) }
 
 // CommTG returns the Telegram communication module store.
 func (s *Store) CommTG() *commtg.Store { return commtg.New(s.db) }
+
+// Mem returns the memory module store.
+func (s *Store) Mem() *mem.Store { return mem.New(s.db) }
 
 // Close closes the database.
 func (s *Store) Close() error {

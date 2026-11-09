@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
@@ -42,10 +43,18 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		}
 	}
 
+	jobMeta := map[string]any{}
+	if strings.TrimSpace(job.Meta) != "" {
+		_ = json.Unmarshal([]byte(job.Meta), &jobMeta)
+	}
+
 	env := routine.Env{
 		Agent:     agent,
 		Workspace: agent.Workspace,
+		Thread:    thread,
 		SessionID: sessionID,
+		Meta:      jobMeta,
+		Now:       s.now,
 		Store:     st,
 		NotifyUser: func(ctx context.Context, text string) error {
 			return s.sink.NotifyUser(ctx, agent, text)
@@ -59,6 +68,9 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 				}
 			}
 			return reply, inboxSession, sinkErr
+		},
+		InboxSession: func(ctx context.Context, targetSessionID, text string, meta map[string]any) (string, string, error) {
+			return s.sink.Inbox(ctx, agent, targetSessionID, text, meta)
 		},
 		Log: func(level, message string, meta map[string]any) {
 			raw, _ := json.Marshal(meta)
