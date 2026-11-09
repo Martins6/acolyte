@@ -10,10 +10,12 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf16"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/martins6/acolyte/internal/envelope"
+	"github.com/martins6/acolyte/internal/media"
 	"github.com/martins6/acolyte/internal/store/commtg"
 )
 
@@ -27,7 +29,7 @@ func (a *Adapter) deliverDue(ctx context.Context) error {
 	}
 	for _, item := range items {
 		if err := a.deliverItem(ctx, item); err != nil {
-			log.Printf("telegram: deliver %s for %s: %v", item.ID, a.agent.Name, err)
+			log.Printf("telegram: deliver %s for %s: %v", item.ID, a.agent.Name, media.RedactToken(err, a.token))
 		}
 	}
 	return nil
@@ -69,18 +71,19 @@ func (a *Adapter) deliverItem(ctx context.Context, item commtg.OutboxItem) error
 }
 
 func (a *Adapter) recordDeliveryFailure(item commtg.OutboxItem, sendErr error) error {
+	safeErr := media.RedactToken(sendErr, a.token)
 	attempts := item.Attempts + 1
 	if attempts >= a.maxAttempts {
-		if err := a.store.CommTG().MarkOutboundFailed(item.ID, sendErr.Error()); err != nil {
+		if err := a.store.CommTG().MarkOutboundFailed(item.ID, safeErr.Error()); err != nil {
 			return err
 		}
-		return sendErr
+		return safeErr
 	}
 	next := a.now().Add(backoff(attempts))
-	if err := a.store.CommTG().MarkOutboundRetry(item.ID, attempts, next, sendErr.Error()); err != nil {
+	if err := a.store.CommTG().MarkOutboundRetry(item.ID, attempts, next, safeErr.Error()); err != nil {
 		return err
 	}
-	return sendErr
+	return safeErr
 }
 
 func backoff(attempts int) time.Duration {
@@ -103,27 +106,46 @@ func splitText(text string, limit int) []string {
 		limit = DefaultMaxMessageChars
 	}
 	runes := []rune(text)
-	if len(runes) <= limit {
-		return []string{text}
-	}
-
 	var chunks []string
-	for len(runes) > limit {
-		cut := limit
-		for index := limit; index > 0; index-- {
-			if unicode.IsSpace(runes[index]) {
-				cut = index
+	for len(runes) > 0 {
+		units := 0
+		cut := 0
+		for cut < len(runes) {
+			size := utf16.RuneLen(runes[cut])
+			if size < 1 {
+				size = 1
+			}
+			if units+size > limit {
 				break
 			}
+			units += size
+			cut++
 		}
-		chunks = append(chunks, strings.TrimSpace(string(runes[:cut])))
+		if cut == 0 {
+			// A single rune exceeds the limit; take it to guarantee progress.
+			cut = 1
+		}
+		// Prefer a whitespace boundary only when the remainder does not fit.
+		if cut < len(runes) {
+			breakAt := cut
+			for index := cut - 1; index > 0; index-- {
+				if unicode.IsSpace(runes[index]) {
+					breakAt = index
+					break
+				}
+			}
+			if breakAt > 0 && breakAt < cut {
+				cut = breakAt
+			}
+		}
+		chunk := strings.TrimSpace(string(runes[:cut]))
+		if chunk != "" {
+			chunks = append(chunks, chunk)
+		}
 		runes = runes[cut:]
 		for len(runes) > 0 && unicode.IsSpace(runes[0]) {
 			runes = runes[1:]
 		}
-	}
-	if len(runes) > 0 {
-		chunks = append(chunks, string(runes))
 	}
 	return chunks
 }

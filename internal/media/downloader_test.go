@@ -12,7 +12,7 @@ import (
 )
 
 func TestRedactToken(t *testing.T) {
-	err := redactToken(errors.New(`Get "https://api.telegram.org/file/bot123:secret/files/x": boom`), "123:secret")
+	err := RedactToken(errors.New(`Get "https://api.telegram.org/file/bot123:secret/files/x": boom`), "123:secret")
 	if strings.Contains(err.Error(), "123:secret") {
 		t.Errorf("redacted error still contains token: %v", err)
 	}

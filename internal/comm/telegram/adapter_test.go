@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -269,6 +270,19 @@ func TestSplitText(t *testing.T) {
 	}
 	if chunks := splitText("short", 10); len(chunks) != 1 || chunks[0] != "short" {
 		t.Errorf("short chunks = %v", chunks)
+	}
+}
+
+func TestSplitTextUTF16(t *testing.T) {
+	text := strings.Repeat("😀", 3000)
+	chunks := splitText(text, 4000)
+	if len(chunks) != 2 {
+		t.Fatalf("chunks = %d, want 2", len(chunks))
+	}
+	for _, chunk := range chunks {
+		if units := len(utf16.Encode([]rune(chunk))); units > 4000 {
+			t.Errorf("chunk units = %d, want <= 4000", units)
+		}
 	}
 }
 

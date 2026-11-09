@@ -13,6 +13,7 @@ import (
 	"github.com/go-telegram/bot/models"
 	"github.com/martins6/acolyte/internal/comm"
 	"github.com/martins6/acolyte/internal/envelope"
+	"github.com/martins6/acolyte/internal/media"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
 )
@@ -24,7 +25,8 @@ const (
 	DefaultPollInterval = 5 * time.Second
 	// DefaultMaxAttempts is the retry limit before a row is marked failed.
 	DefaultMaxAttempts = 5
-	// DefaultMaxMessageChars keeps chunks below Telegram's 4096-unit limit.
+	// DefaultMaxMessageChars keeps chunks below Telegram's 4096 UTF-16-unit
+	// limit (the constant name is retained for compatibility).
 	DefaultMaxMessageChars = 4000
 )
 
@@ -198,15 +200,18 @@ func (a *Adapter) Send(env envelope.Envelope) error {
 	if text == "" {
 		return fmt.Errorf("telegram: outbound text is required")
 	}
+
+	// Hold the delivery lock across enqueue and the inline attempt so the
+	// retry loop cannot deliver the new row between those steps.
+	a.deliverMu.Lock()
+	defer a.deliverMu.Unlock()
+
 	item, err := a.store.CommTG().EnqueueOutbound(commItem(env, chatID, text, a.now()))
 	if err != nil {
 		return err
 	}
-	a.deliverMu.Lock()
-	err = a.deliverItem(context.Background(), item)
-	a.deliverMu.Unlock()
-	if err != nil {
-		log.Printf("telegram: immediate delivery for %s: %v", a.agent.Name, err)
+	if err := a.deliverItem(context.Background(), item); err != nil {
+		log.Printf("telegram: immediate delivery for %s: %v", a.agent.Name, media.RedactToken(err, a.token))
 	}
 	return nil
 }

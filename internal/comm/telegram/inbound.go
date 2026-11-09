@@ -129,7 +129,7 @@ func (a *Adapter) reply(ctx context.Context, chatID int64, text string, replyTo 
 		params.ReplyParameters = &models.ReplyParameters{MessageID: int(replyTo), AllowSendingWithoutReply: true}
 	}
 	if _, err := a.api.SendMessage(ctx, params); err != nil {
-		log.Printf("telegram: send reply for %s: %v", a.agent.Name, err)
+		log.Printf("telegram: send reply for %s: %v", a.agent.Name, media.RedactToken(err, a.token))
 	}
 }
 
