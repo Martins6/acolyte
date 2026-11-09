@@ -249,6 +249,10 @@ Sender-side media (the bot sending photos/documents back to you) is not implemen
 | `acolyte new --name <n> --workspace-folder <p> --config '<json>'` | Scaffold, validate, and register an agent |
 | `acolyte status [name\|workspace]`           | List agents or show one agent's jobs/activity  |
 | `acolyte delete <name\|workspace>`           | Remove an agent from the registry (folder kept) |
+| `acolyte cron ...`                           | Manage scheduled prompt/shell/routine jobs     |
+| `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service            |
+| `acolyte notify-user "<text>"`               | Notify the user only (never the agent)         |
+| `acolyte inbox "<text>"`                     | Deliver a synthetic external event to an agent |
 | `acolyte start`                              | Start the current daemon + OpenCode server     |
 | `acolyte config`                             | Legacy configuration management                |
 | `acolyte logs [date]`                        | View logs                                      |

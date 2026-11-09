@@ -159,6 +159,13 @@ func TestSessions(t *testing.T) {
 	if _, ok, err := s.Orch().GetSessionByThread("missing"); err != nil || ok {
 		t.Errorf("GetSessionByThread(missing) = ok:%v err:%v, want false/nil", ok, err)
 	}
+	found, ok, err := s.Orch().GetSessionByOpenCodeID("ses_2")
+	if err != nil || !ok || found.Thread != "cron:one" {
+		t.Errorf("GetSessionByOpenCodeID(ses_2) = %+v, %v, %v", found, ok, err)
+	}
+	if _, ok, err := s.Orch().GetSessionByOpenCodeID("ses_missing"); err != nil || ok {
+		t.Errorf("GetSessionByOpenCodeID(missing) = ok:%v err:%v, want false/nil", ok, err)
+	}
 }
 
 func TestAppendLog(t *testing.T) {

@@ -92,7 +92,10 @@ gitignored and are never scaffolded by `acolyte new`; secrets belong there, neve
 
 **Routines** are named, headless behaviors the scheduler can run (`kind: routine`). Modules register
 them with an argument schema; `acolyte cron routine-list` dumps the catalog as JSON. Schedule one with
-`acolyte cron --title <t> --datetime <cron> --routine <name> …`.
+`acolyte cron --title <t> --datetime <cron> --routine <name> [--routine-args '<json>'] …`.
+
+> Phase 2 registers the `dream`/`heartbeat` catalog and schemas; their actual behavior lands in Phase 4.
+> Firing one logs `pending Phase 4` and advances its schedule.
 
 | Routine | Owner | Args | What it does | Doc |
 | ------- | ----- | ---- | ------------ | --- |

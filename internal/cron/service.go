@@ -411,8 +411,14 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, error) {
 	switch job.Kind {
 	case "shell":
-		out, err := s.runShell(ctx, agent, job, meta)
-		return out, "", err
+		out, runErr := s.runShell(ctx, agent, job, meta)
+		sessionID := job.SessionID
+		if sessionID == "" {
+			if session, ok, err := st.Orch().LatestSession(); err == nil && ok {
+				sessionID = session.OpenCodeSessionID
+			}
+		}
+		return out, sessionID, runErr
 	case "prompt":
 		return s.runPrompt(ctx, agent, st, job)
 	case "routine":
