@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 )
 
@@ -111,12 +112,16 @@ func asInt(raw any) (int, bool) {
 		}
 		return boundedInt(int64(value))
 	case json.Number:
+		raw := value.String()
 		if parsed, err := value.Int64(); err == nil {
 			return boundedInt(parsed)
 		}
+		if !safeNumberMagnitude(raw) {
+			return 0, false
+		}
 		// Accept exact integral forms such as 1.0 and 1e3 without going
 		// through float64 (which would round large integers).
-		rat, ok := new(big.Rat).SetString(value.String())
+		rat, ok := new(big.Rat).SetString(raw)
 		if !ok || !rat.IsInt() || !rat.Num().IsInt64() {
 			return 0, false
 		}
@@ -124,6 +129,21 @@ func asInt(raw any) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// safeNumberMagnitude rejects inputs that would make big.Rat allocate huge
+// powers of ten before the int-range check can run.
+func safeNumberMagnitude(raw string) bool {
+	if len(raw) > 1024 {
+		return false
+	}
+	if index := strings.IndexAny(raw, "eE"); index >= 0 {
+		exponent, err := strconv.Atoi(raw[index+1:])
+		if err != nil || exponent > 1000 || exponent < -1000 {
+			return false
+		}
+	}
+	return true
 }
 
 func boundedInt(value int64) (int, bool) {

@@ -3,6 +3,7 @@ package routine
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +81,12 @@ func TestDecodeArgsAcceptsIntegralDecimalsAndExponents(t *testing.T) {
 	}
 	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number("1.2")}); err == nil {
 		t.Error("ValidateArgs(1.2) error = nil, want error")
+	}
+	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number("1e1000000000")}); err == nil {
+		t.Error("ValidateArgs(extreme exponent) error = nil, want error")
+	}
+	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number(strings.Repeat("9", 2000))}); err == nil {
+		t.Error("ValidateArgs(huge significand) error = nil, want error")
 	}
 }
 
