@@ -75,6 +75,15 @@ func (s *Store) RecordInbound(item InboxItem) (bool, error) {
 	return affected > 0, nil
 }
 
+// SetInboundMedia records the downloaded media path for an inbound envelope.
+func (s *Store) SetInboundMedia(envelopeID, mediaPath string) error {
+	_, err := s.db.Exec(`UPDATE comm_tg_inbox SET media_path = ? WHERE envelope_id = ?`, mediaPath, envelopeID)
+	if err != nil {
+		return fmt.Errorf("comm_tg: set inbound media %q: %w", envelopeID, err)
+	}
+	return nil
+}
+
 // LinkInbound attaches the admitted OpenCode session and message to an inbound
 // envelope after the turn is admitted.
 func (s *Store) LinkInbound(envelopeID, opencodeSessionID, opencodeMessageID string) error {
@@ -133,10 +142,23 @@ func (s *Store) MarkInboundProcessedUnconditional(envelopeID string, at time.Tim
 func (s *Store) RecordInboundFailure(envelopeID, token, errText string) error {
 	_, err := s.db.Exec(`UPDATE comm_tg_inbox
 		SET attempts = attempts + 1, last_error = ?, claimed_until = NULL, claim_token = ''
-		WHERE envelope_id = ? AND processed_at IS NULL AND (claim_token = ? OR ? = '')`,
-		errText, envelopeID, token, token)
+		WHERE envelope_id = ? AND processed_at IS NULL AND claim_token = ?`,
+		errText, envelopeID, token)
 	if err != nil {
 		return fmt.Errorf("comm_tg: record inbound failure %q: %w", envelopeID, err)
+	}
+	return nil
+}
+
+// RecordInboundFailureUnclaimed records a pre-claim failure without touching a
+// claim owned by another worker.
+func (s *Store) RecordInboundFailureUnclaimed(envelopeID, errText string) error {
+	_, err := s.db.Exec(`UPDATE comm_tg_inbox
+		SET attempts = attempts + 1, last_error = ?, claimed_until = NULL, claim_token = ''
+		WHERE envelope_id = ? AND processed_at IS NULL AND claim_token = ''`,
+		errText, envelopeID)
+	if err != nil {
+		return fmt.Errorf("comm_tg: record unclaimed inbound failure %q: %w", envelopeID, err)
 	}
 	return nil
 }

@@ -31,35 +31,15 @@ func (a *Adapter) handleUpdate(ctx context.Context, _ *bot.Bot, update *models.U
 		log.Printf("telegram: upsert chat for %s: %v", a.agent.Name, err)
 	}
 
-	text, mediaPath, contentType, err := a.buildContent(ctx, msg)
-	if err != nil {
-		log.Printf("telegram: build content for %s: %v", a.agent.Name, err)
-		a.reply(ctx, msg.Chat.ID, "Error processing message; the daemon log has details.", int64(msg.ID))
+	env := a.baseEnvelope(msg, update.ID)
+	if strings.TrimSpace(env.Content.Text) == "" && !hasMedia(msg) {
 		return
 	}
-	if strings.TrimSpace(text) == "" && mediaPath == "" {
-		return
+	payload := replayPayload{Envelope: env}
+	if hasMedia(msg) {
+		payload.Update = update
 	}
-
-	env := envelope.New(envelope.DirectionIn, Channel, envelope.TelegramThread(msg.Chat.ID),
-		envelope.Party{
-			Kind: envelope.PartyUser,
-			ID:   strconv.FormatInt(msg.From.ID, 10),
-			Name: msg.From.Username,
-		},
-		envelope.Party{Kind: envelope.PartyAgent, ID: a.agent.Name, Name: a.agent.Name},
-		envelope.Content{Type: contentType, Text: text})
-	if mediaPath != "" {
-		env.Content.Media = []string{mediaPath}
-	}
-	env.Meta = map[string]any{
-		"telegram_update_id":  update.ID,
-		"telegram_message_id": int64(msg.ID),
-		"telegram_chat_id":    msg.Chat.ID,
-		"telegram_user_id":    msg.From.ID,
-	}
-
-	payload, err := json.Marshal(env)
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("telegram: marshal inbound for %s: %v", a.agent.Name, err)
 		return
@@ -68,8 +48,7 @@ func (a *Adapter) handleUpdate(ctx context.Context, _ *bot.Bot, update *models.U
 		TGUpdateID:      update.ID,
 		ChatID:          msg.Chat.ID,
 		EnvelopeID:      env.ID,
-		MediaPath:       mediaPath,
-		PendingEnvelope: string(payload),
+		PendingEnvelope: string(raw),
 		ReceivedAt:      now,
 	})
 	if err != nil {
@@ -79,7 +58,52 @@ func (a *Adapter) handleUpdate(ctx context.Context, _ *bot.Bot, update *models.U
 	if !inserted {
 		return
 	}
+	a.processAndAdmit(ctx, env, msg)
+}
+
+func (a *Adapter) baseEnvelope(msg *models.Message, updateID int64) envelope.Envelope {
+	content := envelope.Content{Type: envelope.ContentText, Text: strings.TrimSpace(msg.Text)}
+	if hasMedia(msg) {
+		content = envelope.Content{Type: envelope.ContentMedia, Text: strings.TrimSpace(msg.Caption)}
+	}
+	env := envelope.New(envelope.DirectionIn, Channel, envelope.TelegramThread(msg.Chat.ID),
+		envelope.Party{
+			Kind: envelope.PartyUser,
+			ID:   strconv.FormatInt(msg.From.ID, 10),
+			Name: msg.From.Username,
+		},
+		envelope.Party{Kind: envelope.PartyAgent, ID: a.agent.Name, Name: a.agent.Name},
+		content)
+	env.Meta = map[string]any{
+		"telegram_update_id":  updateID,
+		"telegram_message_id": int64(msg.ID),
+		"telegram_chat_id":    msg.Chat.ID,
+		"telegram_user_id":    msg.From.ID,
+	}
+	return env
+}
+
+func (a *Adapter) processAndAdmit(ctx context.Context, env envelope.Envelope, msg *models.Message) {
+	if hasMedia(msg) {
+		text, mediaPath, contentType, err := a.buildContent(ctx, msg)
+		if err != nil {
+			log.Printf("telegram: build content for %s: %v", a.agent.Name, err)
+			a.reply(ctx, msg.Chat.ID, "Error processing message; the daemon will retry.", int64(msg.ID))
+			_ = a.store.CommTG().RecordInboundFailureUnclaimed(env.ID, err.Error())
+			return
+		}
+		env.Content = envelope.Content{Type: contentType, Text: text}
+		if mediaPath != "" {
+			env.Content.Media = []string{mediaPath}
+			_ = a.store.CommTG().SetInboundMedia(env.ID, mediaPath)
+		}
+	}
 	a.admit(ctx, env)
+}
+
+func hasMedia(msg *models.Message) bool {
+	_, _, _, _, _, _, ok := media.ExtractFileRef(msg)
+	return ok
 }
 
 func (a *Adapter) buildContent(ctx context.Context, msg *models.Message) (string, string, envelope.ContentType, error) {

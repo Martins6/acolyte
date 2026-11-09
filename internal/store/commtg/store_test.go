@@ -238,6 +238,32 @@ func TestClaimInboundOnce(t *testing.T) {
 	}
 }
 
+func TestUnclaimedFailureDoesNotClearClaim(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID: 301, ChatID: 10, EnvelopeID: "env_claim_guard", PendingEnvelope: "{}", ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	lease := now.Add(time.Minute)
+	if claimed, err := store.ClaimInbound("env_claim_guard", "owner", now, lease); err != nil || !claimed {
+		t.Fatalf("ClaimInbound() = %v, %v", claimed, err)
+	}
+	if err := store.RecordInboundFailureUnclaimed("env_claim_guard", "pre-claim error"); err != nil {
+		t.Fatalf("RecordInboundFailureUnclaimed() error: %v", err)
+	}
+	if renewed, err := store.RenewInboundClaim("env_claim_guard", "owner", lease.Add(time.Minute)); err != nil || !renewed {
+		t.Fatalf("RenewInboundClaim() = %v, %v; want claim preserved", renewed, err)
+	}
+	if err := store.RecordInboundFailure("env_claim_guard", "wrong", "wrong token"); err != nil {
+		t.Fatalf("RecordInboundFailure(wrong token) error: %v", err)
+	}
+	if renewed, err := store.RenewInboundClaim("env_claim_guard", "owner", lease.Add(2*time.Minute)); err != nil || !renewed {
+		t.Fatalf("RenewInboundClaim() after wrong token = %v, %v; want claim preserved", renewed, err)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	store := migrateTestDB(t)
 	if err := store.SetSetting("telegram.allowed_users", `["@alice"]`); err != nil {

@@ -24,6 +24,7 @@ type fakeAPI struct {
 	mu           sync.Mutex
 	sent         []*bot.SendMessageParams
 	sendErr      error
+	getFileErr   error
 	getFileCalls int
 	nextID       int
 }
@@ -43,6 +44,9 @@ func (f *fakeAPI) GetFile(_ context.Context, _ *bot.GetFileParams) (*models.File
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.getFileCalls++
+	if f.getFileErr != nil {
+		return nil, f.getFileErr
+	}
 	return &models.File{FilePath: "files/x.jpg"}, nil
 }
 
@@ -408,6 +412,47 @@ func TestHandleUpdateLeavesPendingOnSinkFailure(t *testing.T) {
 	item, ok, err := st.CommTG().GetInboxByEnvelope(captured.ID)
 	if err != nil || !ok || item.ProcessedAt != nil || item.Attempts != 1 || item.PendingEnvelope == "" {
 		t.Errorf("inbox = %+v, %v, %v; want pending retry state", item, ok, err)
+	}
+}
+
+func TestHandleUpdateRetainsMediaFailureForReplay(t *testing.T) {
+	adapter, api, st, now := newTestAdapter(t, "42")
+	calls := 0
+	adapter.sink = func(context.Context, envelope.Envelope) error { calls++; return nil }
+	api.getFileErr = errors.New("temporary network error")
+	update := &models.Update{ID: 205, Message: &models.Message{
+		ID:      12,
+		From:    &models.User{ID: 42, Username: "alice"},
+		Chat:    models.Chat{ID: 10, Type: models.ChatTypePrivate},
+		Caption: "look",
+		Photo:   []models.PhotoSize{{FileID: "file_retry", FileSize: 123}},
+	}}
+	adapter.handleUpdate(context.Background(), nil, update)
+	if calls != 0 {
+		t.Fatalf("sink calls = %d, want 0 while media download fails", calls)
+	}
+	pending, err := st.CommTG().PendingInbound(*now, 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("PendingInbound() = %+v, %v; want one retry row", pending, err)
+	}
+	if pending[0].Attempts != 1 || pending[0].PendingEnvelope == "" {
+		t.Errorf("pending row = %+v, want retry state with payload", pending[0])
+	}
+
+	// Reuse a recorded media path so replay does not need the network.
+	if err := st.CommTG().RecordMedia(commtg.MediaItem{
+		TGFileID: "file_retry", FilePath: "/tmp/photo.jpg", Type: "images", ChatID: 10, SavedAt: *now,
+	}); err != nil {
+		t.Fatalf("RecordMedia() error: %v", err)
+	}
+	api.getFileErr = nil
+	adapter.replayPending(context.Background())
+	if calls != 1 {
+		t.Fatalf("sink calls after replay = %d, want 1", calls)
+	}
+	item, ok, err := st.CommTG().GetInboxByEnvelope(pending[0].EnvelopeID)
+	if err != nil || !ok || item.ProcessedAt == nil {
+		t.Errorf("replayed inbox = %+v, %v, %v; want processed", item, ok, err)
 	}
 }
 

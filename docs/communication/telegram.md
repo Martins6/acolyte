@@ -19,8 +19,9 @@ workspace.
   admissions stay pending and are replayed on start and every 30s.
 - Resolves `chat_id` in `comm_tg_chats` and records the last-seen time.
 - **Media:** downloads the file into `<workspace>/downloads/<type>/`, reusing the existing path when
-  the Telegram `file_id` was seen before. The Envelope carries the absolute path and a prompt of the
-  form `File located at: <path>\n\nUser message: <caption>`.
+  the Telegram `file_id` was seen before. If a download fails, the pending row keeps the raw update
+  and media is retried by replay. The Envelope carries the absolute path and a prompt of the form
+  `File located at: <path>\n\nUser message: <caption>`.
 - Hands each Envelope to the Orchestrator's inbound sink.
 
 ## Outbound

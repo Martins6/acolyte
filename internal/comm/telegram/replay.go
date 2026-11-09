@@ -7,8 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-telegram/bot/models"
 	"github.com/martins6/acolyte/internal/envelope"
 )
+
+type replayPayload struct {
+	Envelope envelope.Envelope `json:"envelope"`
+	Update   *models.Update    `json:"update,omitempty"`
+}
 
 const (
 	claimLease     = 2 * time.Minute
@@ -119,8 +125,17 @@ func (a *Adapter) replayPending(ctx context.Context) {
 			continue
 		}
 		var env envelope.Envelope
+		var payload replayPayload
+		if err := json.Unmarshal([]byte(item.PendingEnvelope), &payload); err == nil && payload.Envelope.ID != "" {
+			if payload.Update != nil && payload.Update.Message != nil {
+				a.processAndAdmit(ctx, payload.Envelope, payload.Update.Message)
+			} else {
+				a.admit(ctx, payload.Envelope)
+			}
+			continue
+		}
 		if err := json.Unmarshal([]byte(item.PendingEnvelope), &env); err != nil {
-			_ = a.store.CommTG().RecordInboundFailure(item.EnvelopeID, "", "unmarshal pending envelope: "+err.Error())
+			_ = a.store.CommTG().RecordInboundFailureUnclaimed(item.EnvelopeID, "unmarshal pending envelope: "+err.Error())
 			continue
 		}
 		a.admit(ctx, env)
