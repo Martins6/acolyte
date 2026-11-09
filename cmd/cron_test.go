@@ -109,6 +109,24 @@ func TestRunCronCreateSessionOwnership(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create mapped session: %v", err)
 	}
+	if err := runCronCreate(&bytes.Buffer{}, cronCreateOptions{
+		Title: "latest", Datetime: "@every 1h", Prompt: "hello", AgentName: "valet",
+	}); err != nil {
+		t.Fatalf("create latest session: %v", err)
+	}
+	st, err = store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	latestJob, err := st.Orch().GetCronJobByTitle("latest")
+	st.Close()
+	if err != nil {
+		t.Fatalf("get latest job: %v", err)
+	}
+	if latestJob.SessionID != "ses_ok" {
+		t.Errorf("latest job session = %q, want ses_ok", latestJob.SessionID)
+	}
+
 	err = runCronCreate(&bytes.Buffer{}, cronCreateOptions{
 		Title: "foreign", Datetime: "@every 1h", Prompt: "hello", AgentName: "valet", SessionID: "ses_missing",
 	})

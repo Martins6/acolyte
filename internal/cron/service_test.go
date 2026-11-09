@@ -429,7 +429,13 @@ func TestDispatchIsBoundedByConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
-	service.Tick(context.Background())
+	if dispatched := service.Tick(context.Background()); dispatched != 1 {
+		t.Errorf("first tick dispatched = %d, want 1", dispatched)
+	}
+	service.Wait()
+	if dispatched := service.Tick(context.Background()); dispatched != 1 {
+		t.Errorf("second tick dispatched = %d, want 1", dispatched)
+	}
 	service.Wait()
 	service.Stop()
 
@@ -448,8 +454,8 @@ func TestDispatchIsBoundedByConcurrency(t *testing.T) {
 			ran++
 		}
 	}
-	if ran != 1 {
-		t.Errorf("ran jobs = %d, want 1 with MaxConcurrency=1", ran)
+	if ran != 2 {
+		t.Errorf("ran jobs = %d, want 2 with drained batches", ran)
 	}
 }
 

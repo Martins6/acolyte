@@ -187,8 +187,16 @@ func runCronCreate(w io.Writer, opts cronCreateOptions) error {
 		return err
 	}
 	defer st.Close()
-	if err := verifySessionMapping(st, opts.SessionID); err != nil {
+
+	sessionID := strings.TrimSpace(opts.SessionID)
+	if sessionID != "" {
+		if err := verifySessionMapping(st, sessionID); err != nil {
+			return err
+		}
+	} else if session, ok, err := st.Orch().LatestSession(); err != nil {
 		return err
+	} else if ok {
+		sessionID = session.OpenCodeSessionID
 	}
 
 	timezone := strings.TrimSpace(opts.Timezone)
@@ -217,7 +225,7 @@ func runCronCreate(w io.Writer, opts cronCreateOptions) error {
 		Owner:       "user",
 		Spec:        datetime,
 		AgentTarget: agent.Name,
-		SessionID:   strings.TrimSpace(opts.SessionID),
+		SessionID:   sessionID,
 		Timezone:    timezone,
 		Enabled:     true,
 		NextRunAt:   &next,
@@ -517,8 +525,13 @@ func runCronTick(ctx context.Context, w io.Writer) error {
 		return err
 	}
 	defer service.Stop()
-	service.Tick(ctx)
-	service.Wait()
+	for {
+		dispatched := service.Tick(ctx)
+		service.Wait()
+		if dispatched == 0 {
+			break
+		}
+	}
 	fmt.Fprintln(w, "Cron tick complete.")
 	return nil
 }
