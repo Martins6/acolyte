@@ -195,6 +195,30 @@ func TestShellOutputIsBounded(t *testing.T) {
 	}
 }
 
+func TestShellTimeoutKillsProcessGroup(t *testing.T) {
+	_, ws, _ := setupCron(t)
+	script := filepath.Join(t.TempDir(), "hang.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n(sleep 5; echo late) &\nsleep 5\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	service := &Service{shell: "/bin/sh"}
+	start := time.Now()
+	out, err := service.runShell(context.Background(), registry.Agent{Name: "valet", Workspace: ws}, orch.CronJob{
+		Title: "hang", ShellPath: script,
+	}, jobMeta{TimeoutSeconds: 1})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("runShell() error = nil, want timeout error")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("runShell() took %s, process group was not killed", elapsed)
+	}
+	if strings.Contains(out, "late") {
+		t.Errorf("output = %q, descendant survived the timeout", out)
+	}
+}
+
 func TestShellFailureRoutesOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	script := filepath.Join(t.TempDir(), "fail.sh")
@@ -240,9 +264,18 @@ func TestRefreshRetiresStoreWithoutClosingRunningJob(t *testing.T) {
 	}
 	service.refresh()
 	service.Wait()
+
+	// The retired store must be closed as soon as its last job releases it.
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("retired store was not released: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close reopened store: %v", err)
+	}
 	service.Stop()
 
-	st, err := store.Open(ws)
+	st, err = store.Open(ws)
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}

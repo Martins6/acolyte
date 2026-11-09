@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/martins6/acolyte/internal/registry"
@@ -77,6 +78,17 @@ func (s *Service) runShell(ctx context.Context, agent registry.Agent, job orch.C
 
 	cmd := exec.CommandContext(ctx, shell, script)
 	cmd.Dir = agent.Workspace
+	// Run the shell in its own process group so a timeout/cancel kills any
+	// descendants that would otherwise keep the output pipes open.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 2 * time.Second
+
 	loaded, err := secrets.Load(agent.Workspace)
 	if err != nil {
 		return "", err

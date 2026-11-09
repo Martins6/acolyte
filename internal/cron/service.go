@@ -49,8 +49,10 @@ type Options struct {
 }
 
 type agentStore struct {
-	agent registry.Agent
-	store *store.Store
+	agent   registry.Agent
+	store   *store.Store
+	refs    int
+	retired bool
 }
 
 // Service runs due jobs for all registered agents.
@@ -183,7 +185,7 @@ func (s *Service) Tick(ctx context.Context) {
 			continue
 		}
 		for _, job := range jobs {
-			s.dispatch(ctx, pair.agent, pair.store, job, now)
+			s.dispatch(ctx, pair, job, now)
 		}
 	}
 }
@@ -205,9 +207,14 @@ func (s *Service) refresh() {
 	s.mu.Lock()
 	for name, st := range s.stores {
 		if _, ok := wanted[name]; !ok {
-			// Keep the store open: a dispatched job may still hold it.
-			s.retired = append(s.retired, st)
 			delete(s.stores, name)
+			if st.refs == 0 {
+				_ = st.store.Close()
+			} else {
+				// Keep the store open until its last running job releases it.
+				st.retired = true
+				s.retired = append(s.retired, st)
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -221,6 +228,7 @@ func (s *Service) refresh() {
 		reused := false
 		for index, retired := range s.retired {
 			if retired.agent.Name == name && retired.agent.Workspace == agent.Workspace {
+				retired.retired = false
 				s.stores[name] = retired
 				s.retired = append(s.retired[:index], s.retired[index+1:]...)
 				reused = true
@@ -256,7 +264,8 @@ func (s *Service) closeStores() {
 	s.retired = nil
 }
 
-func (s *Service) dispatch(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, now time.Time) {
+func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJob, now time.Time) {
+	agent := pair.agent
 	key := agent.Name + "/" + job.ID
 	s.mu.Lock()
 	if s.running[key] {
@@ -264,12 +273,23 @@ func (s *Service) dispatch(ctx context.Context, agent registry.Agent, st *store.
 		return
 	}
 	s.running[key] = true
+	pair.refs++
 	s.mu.Unlock()
 
 	release := func() {
 		s.mu.Lock()
+		defer s.mu.Unlock()
 		delete(s.running, key)
-		s.mu.Unlock()
+		pair.refs--
+		if pair.retired && pair.refs == 0 {
+			_ = pair.store.Close()
+			for index, retired := range s.retired {
+				if retired == pair {
+					s.retired = append(s.retired[:index], s.retired[index+1:]...)
+					break
+				}
+			}
+		}
 	}
 
 	location := time.Local
@@ -277,7 +297,7 @@ func (s *Service) dispatch(ctx context.Context, agent registry.Agent, st *store.
 		loaded, err := time.LoadLocation(job.Timezone)
 		if err != nil {
 			log.Printf("cron: job %s has invalid timezone %q: %v", job.Title, job.Timezone, err)
-			_ = st.Orch().SetCronJobEnabled(job.Title, false)
+			_ = pair.store.Orch().SetCronJobEnabled(job.Title, false)
 			release()
 			return
 		}
@@ -287,13 +307,13 @@ func (s *Service) dispatch(ctx context.Context, agent registry.Agent, st *store.
 	schedule, err := cronlib.ParseStandard(job.Spec)
 	if err != nil {
 		log.Printf("cron: job %s has invalid spec %q: %v", job.Title, job.Spec, err)
-		_ = st.Orch().SetCronJobEnabled(job.Title, false)
+		_ = pair.store.Orch().SetCronJobEnabled(job.Title, false)
 		release()
 		return
 	}
 	next := schedule.Next(now.In(location)).UTC()
 
-	claimed, err := st.Orch().ClaimCronJob(job.ID, job.NextRunAt, next)
+	claimed, err := pair.store.Orch().ClaimCronJob(job.ID, job.NextRunAt, next)
 	if err != nil {
 		log.Printf("cron: claim job %s: %v", job.Title, err)
 		release()
@@ -315,11 +335,13 @@ func (s *Service) dispatch(ctx context.Context, agent registry.Agent, st *store.
 				log.Printf("cron: job %s panicked: %v", job.Title, recovered)
 			}
 		}()
-		s.execute(ctx, agent, st, job)
+		s.execute(ctx, pair, job)
 	}()
 }
 
-func (s *Service) execute(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) {
+func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJob) {
+	agent := pair.agent
+	st := pair.store
 	started := s.now()
 	meta := parseJobMeta(job.Meta)
 	text, sessionID, err := s.runJob(ctx, agent, st, job, meta)
