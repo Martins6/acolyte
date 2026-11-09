@@ -121,7 +121,7 @@ func runInspect(ctx context.Context, w io.Writer, opts inspectOptions) error {
 		if !ok {
 			out.Warnings = append(out.Warnings, fmt.Sprintf("thread %q is not a Telegram thread", out.Thread))
 		} else {
-			commEvents, warnings := communicationEvents(st, chatID)
+			commEvents, warnings := communicationEvents(st, chatID, opts.SessionID)
 			out.Events = append(out.Events, commEvents...)
 			out.Warnings = append(out.Warnings, warnings...)
 		}
@@ -221,7 +221,7 @@ func findInspectTarget(sessionID, agentName, workspace string) (registry.Agent, 
 	return registry.Agent{}, orch.Session{}, nil, fmt.Errorf("session %q is not mapped to any registered agent; use --agent-name or --workspace-folder", sessionID)
 }
 
-func communicationEvents(st *store.Store, chatID int64) ([]inspectEvent, []string) {
+func communicationEvents(st *store.Store, chatID int64, sessionID string) ([]inspectEvent, []string) {
 	var events []inspectEvent
 	var warnings []string
 	inbox, err := st.CommTG().ListInbox(chatID)
@@ -229,6 +229,9 @@ func communicationEvents(st *store.Store, chatID int64) ([]inspectEvent, []strin
 		warnings = append(warnings, fmt.Sprintf("read communication inbox: %v", err))
 	} else {
 		for _, item := range inbox {
+			if item.OpenCodeSessionID != sessionID {
+				continue
+			}
 			event := inspectEvent{
 				Timestamp:       item.ReceivedAt,
 				Source:          "communication",
@@ -249,6 +252,9 @@ func communicationEvents(st *store.Store, chatID int64) ([]inspectEvent, []strin
 		warnings = append(warnings, fmt.Sprintf("read communication outbox: %v", err))
 	} else {
 		for _, item := range outbox {
+			if item.OpenCodeSessionID != sessionID {
+				continue
+			}
 			timestamp := item.CreatedAt
 			if item.SentAt != nil {
 				timestamp = *item.SentAt

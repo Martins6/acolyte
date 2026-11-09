@@ -28,13 +28,18 @@ func TestInspectMergesCommunicationAndOpenCode(t *testing.T) {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
 	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
-		TGUpdateID: 1, ChatID: 10, EnvelopeID: "env_in", OpenCodeMessageID: "msg_user", ReceivedAt: now,
+		TGUpdateID: 1, ChatID: 10, EnvelopeID: "env_in", OpenCodeSessionID: "ses_x", OpenCodeMessageID: "msg_user", ReceivedAt: now,
 	}); err != nil {
 		t.Fatalf("RecordInbound() error: %v", err)
 	}
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 2, ChatID: 10, EnvelopeID: "env_other", OpenCodeSessionID: "ses_other", OpenCodeMessageID: "msg_other", ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordInbound(other) error: %v", err)
+	}
 	sentAt := now.Add(3 * time.Millisecond)
 	item, err := st.CommTG().EnqueueOutbound(commtg.OutboxItem{
-		EnvelopeID: "env_out", ChatID: 10, Text: "reply",
+		EnvelopeID: "env_out", ChatID: 10, Text: "reply", OpenCodeSessionID: "ses_x",
 		SourceMessageID: "msg_assistant", CreatedAt: now,
 	})
 	if err != nil {
@@ -42,6 +47,12 @@ func TestInspectMergesCommunicationAndOpenCode(t *testing.T) {
 	}
 	if err := st.CommTG().MarkOutboundSent(item.ID, 1, 123, sentAt); err != nil {
 		t.Fatalf("MarkOutboundSent() error: %v", err)
+	}
+	if _, err := st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+		EnvelopeID: "env_other_out", ChatID: 10, Text: "other", OpenCodeSessionID: "ses_other",
+		SourceMessageID: "msg_other", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("EnqueueOutbound(other) error: %v", err)
 	}
 	st.Close()
 
