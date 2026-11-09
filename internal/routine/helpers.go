@@ -12,22 +12,32 @@ import (
 )
 
 func persistSession(env Env, sessionID string) error {
-	if env.Store == nil || env.Thread == "" || sessionID == "" {
+	return persistSessionFor(env, env.Thread, sessionID)
+}
+
+func persistSessionFor(env Env, thread, sessionID string) error {
+	if env.Store == nil || thread == "" || sessionID == "" {
 		return nil
 	}
-	_, err := env.Store.Orch().UpsertSession(env.Thread, sessionID, env.Clock())
+	_, err := env.Store.Orch().UpsertSession(thread, sessionID, env.Clock())
 	return err
 }
 
 // memoryFile captures the content a dream run may legitimately rewrite.
 type memoryFile struct {
-	hash string
-	data []byte
-	mode os.FileMode
+	hash       string
+	data       []byte
+	mode       os.FileMode
+	symlink    bool
+	linkTarget string
 }
 
 // snapshotMemory records the persona and skill files before/after a dream run.
+// It never follows symlinks; callers decide whether links are allowed.
 func snapshotMemory(workspace string) (map[string]memoryFile, error) {
+	if err := checkMemoryRoots(workspace); err != nil {
+		return nil, err
+	}
 	snapshot := map[string]memoryFile{}
 	for _, root := range []string{".acolyte", ".agents/skills"} {
 		base := filepath.Join(workspace, root)
@@ -41,7 +51,21 @@ func snapshotMemory(workspace string) (map[string]memoryFile, error) {
 			if info.IsDir() {
 				return nil
 			}
+			relative, err := filepath.Rel(workspace, path)
+			if err != nil {
+				return err
+			}
+			relative = filepath.ToSlash(relative)
 			if info.Mode()&os.ModeSymlink != 0 {
+				target, err := os.Readlink(path)
+				if err != nil {
+					return err
+				}
+				snapshot[relative] = memoryFile{
+					hash:       "symlink:" + target,
+					symlink:    true,
+					linkTarget: target,
+				}
 				return nil
 			}
 			raw, err := os.ReadFile(path)
@@ -49,11 +73,7 @@ func snapshotMemory(workspace string) (map[string]memoryFile, error) {
 				return err
 			}
 			sum := sha256.Sum256(raw)
-			relative, err := filepath.Rel(workspace, path)
-			if err != nil {
-				return err
-			}
-			snapshot[filepath.ToSlash(relative)] = memoryFile{
+			snapshot[relative] = memoryFile{
 				hash: hex.EncodeToString(sum[:]),
 				data: raw,
 				mode: info.Mode().Perm(),
@@ -65,6 +85,40 @@ func snapshotMemory(workspace string) (map[string]memoryFile, error) {
 		}
 	}
 	return snapshot, nil
+}
+
+// checkMemoryRoots refuses symlinked roots so a walk cannot escape the workspace.
+func checkMemoryRoots(workspace string) error {
+	for _, relative := range []string{".acolyte", ".agents", ".agents/skills"} {
+		path := filepath.Join(workspace, relative)
+		info, err := os.Lstat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("routine: inspect memory root %s: %w", relative, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("routine: memory root %s is a symlink", relative)
+		}
+	}
+	return nil
+}
+
+// assertNoMemorySymlinks fails closed before a model turn can write through a
+// pre-existing link to a path outside the workspace.
+func assertNoMemorySymlinks(snapshot map[string]memoryFile) error {
+	var links []string
+	for path, file := range snapshot {
+		if file.symlink {
+			links = append(links, path)
+		}
+	}
+	if len(links) == 0 {
+		return nil
+	}
+	sort.Strings(links)
+	return fmt.Errorf("routine: refusing dream writes through symlinks: %s", strings.Join(links, ", "))
 }
 
 func changedPaths(before, after map[string]memoryFile) []string {
@@ -83,30 +137,67 @@ func changedPaths(before, after map[string]memoryFile) []string {
 	return paths
 }
 
-// enforceMemoryPolicy keeps dream writes inside the persona/skill allowlist and
-// restores anything outside it. Session text is untrusted, so prompt guidance is
-// backed by a deterministic file-level check.
+// revertMemoryChanges restores every change made by the analysis turn. That
+// turn reads untrusted conversations and must never commit memory itself.
+func revertMemoryChanges(workspace string, before, after map[string]memoryFile) ([]string, error) {
+	var reverted []string
+	for _, path := range changedPaths(before, after) {
+		previous, existed := before[path]
+		if err := restoreMemoryFile(workspace, path, previous, existed, after[path]); err != nil {
+			return nil, err
+		}
+		reverted = append(reverted, path+" (analysis turn must not write)")
+	}
+	return reverted, nil
+}
+
+// enforceMemoryPolicy keeps writer-phase dream writes inside the persona/skill
+// allowlist and restores anything outside it. Session text is untrusted, so
+// prompt guidance is backed by a deterministic file-level check.
 func enforceMemoryPolicy(workspace string, before, after map[string]memoryFile) (changed, reverted []string, err error) {
 	for _, path := range changedPaths(before, after) {
-		reason := memoryPolicyViolation(path, after[path])
-		if reason == "" {
+		if reason := memoryPolicyViolation(path, after[path]); reason == "" {
 			changed = append(changed, path)
 			continue
-		}
-		target := filepath.Join(workspace, filepath.FromSlash(path))
-		if previous, ok := before[path]; ok {
-			if err := os.WriteFile(target, previous.data, previous.mode); err != nil {
-				return nil, nil, fmt.Errorf("routine: restore %s: %w", path, err)
+		} else {
+			previous, existed := before[path]
+			if err := restoreMemoryFile(workspace, path, previous, existed, after[path]); err != nil {
+				return nil, nil, err
 			}
-		} else if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-			return nil, nil, fmt.Errorf("routine: remove %s: %w", path, err)
+			reverted = append(reverted, path+" ("+reason+")")
 		}
-		reverted = append(reverted, path+" ("+reason+")")
 	}
 	return changed, reverted, nil
 }
 
+func restoreMemoryFile(workspace, path string, previous memoryFile, existed bool, current memoryFile) error {
+	target := filepath.Join(workspace, filepath.FromSlash(path))
+	if current.symlink {
+		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("routine: remove symlink %s: %w", path, err)
+		}
+	}
+	if existed {
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return fmt.Errorf("routine: recreate %s: %w", path, err)
+		}
+		if err := os.WriteFile(target, previous.data, previous.mode); err != nil {
+			return fmt.Errorf("routine: restore %s: %w", path, err)
+		}
+		return nil
+	}
+	if !current.symlink {
+		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("routine: remove %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 func memoryPolicyViolation(path string, file memoryFile) string {
+	if file.symlink {
+		return "symlink in memory path"
+	}
 	if !allowedMemoryPath(path) {
 		return "path outside memory allowlist"
 	}
@@ -150,13 +241,6 @@ func skillsCreated(before map[string]memoryFile, changed []string) int {
 	return created
 }
 
-// escapeUntrusted keeps text from closing or forging the untrusted-data fences
-// embedded in routine prompts.
-func escapeUntrusted(text string) string {
-	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-	return replacer.Replace(text)
-}
-
 func truncateNote(text string, limit int) string {
 	text = strings.TrimSpace(text)
 	runes := []rune(text)
@@ -166,25 +250,16 @@ func truncateNote(text string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-func changeNote(result string, changed []string, dryRun bool) string {
-	note := truncateNote(result, 4000)
-	if note == "" {
-		note = "(no model reply)"
-	}
-	if dryRun {
-		note = "DRY RUN\n" + note
-	}
-	if len(changed) > 0 {
-		note += "\nchanged files:\n- " + strings.Join(changed, "\n- ")
-	} else {
-		note += "\nchanged files: none"
-	}
-	return note
-}
-
 func requireOpenCode(env Env) error {
 	if env.OpenCode == nil {
 		return fmt.Errorf("routine: OpenCode client is not configured")
 	}
 	return nil
+}
+
+// escapeUntrusted keeps text from closing or forging the untrusted-data fences
+// embedded in routine prompts.
+func escapeUntrusted(text string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return replacer.Replace(text)
 }
