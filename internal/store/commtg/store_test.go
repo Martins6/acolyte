@@ -189,6 +189,15 @@ func TestOutboxLifecycle(t *testing.T) {
 	if list[0].Text != "" {
 		t.Errorf("sent outbox text = %q, want cleared after delivery", list[0].Text)
 	}
+	if err := store.MarkOutboundRetry(item.ID, 2, next, "late"); !errors.Is(err, ErrOutboxNotFound) {
+		t.Errorf("MarkOutboundRetry(sent) error = %v, want ErrOutboxNotFound", err)
+	}
+	if err := store.MarkOutboundProgress(item.ID, 3, 557); !errors.Is(err, ErrOutboxNotFound) {
+		t.Errorf("MarkOutboundProgress(sent) error = %v, want ErrOutboxNotFound", err)
+	}
+	if err := store.MarkOutboundFailed(item.ID, "late"); !errors.Is(err, ErrOutboxNotFound) {
+		t.Errorf("MarkOutboundFailed(sent) error = %v, want ErrOutboxNotFound", err)
+	}
 	if err := store.MarkOutboundFailed("missing", "boom"); !errors.Is(err, ErrOutboxNotFound) {
 		t.Fatalf("MarkOutboundFailed(missing) error = %v, want ErrOutboxNotFound", err)
 	}
@@ -198,6 +207,9 @@ func TestOutboxLifecycle(t *testing.T) {
 	}
 	if err := store.MarkOutboundFailed(failed.ID, "permanent"); err != nil {
 		t.Fatalf("MarkOutboundFailed() error: %v", err)
+	}
+	if err := store.MarkOutboundRetry(failed.ID, 1, next, "late"); !errors.Is(err, ErrOutboxNotFound) {
+		t.Errorf("MarkOutboundRetry(failed) error = %v, want ErrOutboxNotFound", err)
 	}
 	list, _ = store.ListOutbox(10)
 	for _, item := range list {

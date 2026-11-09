@@ -111,7 +111,7 @@ func (s *Store) MarkOutboundProgress(id string, chunksSent int, tgMessageID int6
 		return fmt.Errorf("comm_tg: chunks sent must be >= 0")
 	}
 	result, err := s.db.Exec(`UPDATE comm_tg_outbox
-		SET chunks_sent = ?, tg_message_id = ? WHERE id = ?`,
+		SET chunks_sent = ?, tg_message_id = ? WHERE id = ? AND delivery = 'pending'`,
 		chunksSent, tgMessageID, id)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark outbound progress: %w", err)
@@ -127,7 +127,7 @@ func (s *Store) MarkOutboundSent(id string, chunksSent int, tgMessageID int64, a
 	result, err := s.db.Exec(`UPDATE comm_tg_outbox
 		SET delivery = 'sent', chunks_sent = ?, tg_message_id = ?,
 			sent_at = ?, next_attempt_at = NULL, last_error = '', text = ''
-		WHERE id = ?`, chunksSent, tgMessageID, at, id)
+		WHERE id = ? AND delivery = 'pending'`, chunksSent, tgMessageID, at, id)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark outbound sent: %w", err)
 	}
@@ -144,7 +144,7 @@ func (s *Store) MarkOutboundRetry(id string, attempts int, next time.Time, errTe
 	}
 	result, err := s.db.Exec(`UPDATE comm_tg_outbox
 		SET attempts = ?, next_attempt_at = ?, last_error = ?, delivery = 'pending'
-		WHERE id = ?`, attempts, next, errText, id)
+		WHERE id = ? AND delivery = 'pending'`, attempts, next, errText, id)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark outbound retry: %w", err)
 	}
@@ -155,7 +155,7 @@ func (s *Store) MarkOutboundRetry(id string, attempts int, next time.Time, errTe
 func (s *Store) MarkOutboundFailed(id, errText string) error {
 	result, err := s.db.Exec(`UPDATE comm_tg_outbox
 		SET delivery = 'failed', last_error = ?, next_attempt_at = NULL, text = ''
-		WHERE id = ?`, errText, id)
+		WHERE id = ? AND delivery = 'pending'`, errText, id)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark outbound failed: %w", err)
 	}
