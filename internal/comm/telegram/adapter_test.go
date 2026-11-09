@@ -282,6 +282,23 @@ func TestSendRetriesTransientFailure(t *testing.T) {
 	}
 }
 
+func TestSendDuplicateEnvelopeDeliversOnce(t *testing.T) {
+	adapter, api, _, _ := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionOut, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	if err := adapter.Send(env); err != nil {
+		t.Fatalf("Send() error: %v", err)
+	}
+	if err := adapter.Send(env); err != nil {
+		t.Fatalf("Send(duplicate) error: %v", err)
+	}
+	if messages := api.messages(); len(messages) != 1 {
+		t.Errorf("messages = %d, want 1 for a duplicate envelope", len(messages))
+	}
+}
+
 func TestSendRequiresChat(t *testing.T) {
 	adapter, _, _, _ := newTestAdapter(t, "42")
 	env := envelope.New(envelope.DirectionOut, "telegram", "",

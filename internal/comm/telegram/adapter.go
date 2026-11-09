@@ -215,6 +215,9 @@ func (a *Adapter) Send(env envelope.Envelope) error {
 	if err != nil {
 		return err
 	}
+	if item.Delivery != "pending" {
+		return nil
+	}
 	if err := a.deliverItem(context.Background(), item); err != nil {
 		log.Printf("telegram: immediate delivery for %s: %v", a.agent.Name, media.RedactToken(err, a.token))
 	}
