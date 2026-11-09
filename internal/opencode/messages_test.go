@@ -16,9 +16,15 @@ func TestSessionMessagesPagination(t *testing.T) {
 		}
 		switch r.URL.Query().Get("cursor") {
 		case "":
-			fmt.Fprint(w, `{"data":[{"id":"m3","type":"assistant"},{"id":"m2","type":"user"}],"cursor":{"previous":"page2"}}`)
+			if r.URL.Query().Get("order") != "desc" {
+				t.Errorf("first page order = %q, want desc", r.URL.Query().Get("order"))
+			}
+			fmt.Fprint(w, `{"data":[{"id":"m3","type":"assistant"},{"id":"m2","type":"user"}],"cursor":{"previous":"page1","next":"page2"}}`)
 		case "page2":
-			fmt.Fprint(w, `{"data":[{"id":"m1","type":"user"}],"cursor":{"previous":""}}`)
+			if r.URL.Query().Get("order") != "" {
+				t.Errorf("cursor page must not combine order, got %q", r.URL.RawQuery)
+			}
+			fmt.Fprint(w, `{"data":[{"id":"m1","type":"user"}],"cursor":{"previous":null,"next":null}}`)
 		default:
 			t.Errorf("unexpected cursor %q", r.URL.Query().Get("cursor"))
 		}
@@ -40,7 +46,7 @@ func TestSessionMessagesTruncated(t *testing.T) {
 	t.Parallel()
 
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"data":[{"id":"m2"}],"cursor":{"previous":"more"}}`)
+		fmt.Fprint(w, `{"data":[{"id":"m2"}],"cursor":{"previous":null,"next":"more"}}`)
 	})
 	messages, truncated, err := client.SessionMessages(context.Background(), "ses_x", 1)
 	if err != nil {

@@ -47,7 +47,14 @@ type Router struct {
 	outbound Outbound
 	now      func() time.Time
 	sem      chan struct{}
-	locks    sync.Map
+
+	lockMu sync.Mutex
+	locks  map[string]*threadLock
+}
+
+type threadLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // NewRouter validates and builds a router.
@@ -70,6 +77,7 @@ func NewRouter(opts RouterOptions) (*Router, error) {
 		outbound: opts.Outbound,
 		now:      opts.Now,
 		sem:      make(chan struct{}, opts.MaxConcurrency),
+		locks:    map[string]*threadLock{},
 	}, nil
 }
 
@@ -85,9 +93,8 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		return fmt.Errorf("comm: agent workspace is required")
 	}
 
-	lock := r.threadLock(env.Thread)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := r.lockThread(env.Thread)
+	defer unlock()
 
 	text := strings.TrimSpace(env.Content.Text)
 	if text == "" && len(env.Content.Media) > 0 {
@@ -173,7 +180,24 @@ func (r *Router) sendOutbound(ctx context.Context, agent registry.Agent, in enve
 	}
 }
 
-func (r *Router) threadLock(thread string) *sync.Mutex {
-	value, _ := r.locks.LoadOrStore(thread, &sync.Mutex{})
-	return value.(*sync.Mutex)
+func (r *Router) lockThread(thread string) func() {
+	r.lockMu.Lock()
+	entry := r.locks[thread]
+	if entry == nil {
+		entry = &threadLock{}
+		r.locks[thread] = entry
+	}
+	entry.refs++
+	r.lockMu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		r.lockMu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(r.locks, thread)
+		}
+		r.lockMu.Unlock()
+	}
 }

@@ -20,25 +20,27 @@ func (c *Client) SessionMessages(ctx context.Context, sessionID string, maxPages
 	truncated := false
 	cursor := ""
 	for page := 0; page < maxPages; page++ {
-		path := fmt.Sprintf("/api/session/%s/message?order=desc&limit=%d",
+		path := fmt.Sprintf("/api/session/%s/message?limit=%d",
 			url.PathEscape(sessionID), messagePageSize)
-		if cursor != "" {
+		if cursor == "" {
+			path += "&order=desc"
+		} else {
 			path += "&cursor=" + url.QueryEscape(cursor)
 		}
 		var resp struct {
 			Data   []Message `json:"data"`
 			Cursor struct {
-				Previous string `json:"previous"`
+				Next string `json:"next"`
 			} `json:"cursor"`
 		}
 		if err := c.do(ctx, "GET", path, nil, &resp); err != nil {
 			return nil, false, err
 		}
 		newestFirst = append(newestFirst, resp.Data...)
-		if resp.Cursor.Previous == "" {
+		if resp.Cursor.Next == "" {
 			break
 		}
-		cursor = resp.Cursor.Previous
+		cursor = resp.Cursor.Next
 		if page == maxPages-1 {
 			truncated = true
 		}

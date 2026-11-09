@@ -269,3 +269,22 @@ func TestRouterWithoutOutboundStillPersists(t *testing.T) {
 		t.Errorf("session missing: ok:%v err:%v", ok, err)
 	}
 }
+
+func TestRouterReleasesThreadLocks(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	thread := envelope.TelegramThread(40)
+	for index := 0; index < 20; index++ {
+		env := envelope.New(envelope.DirectionIn, "telegram", thread,
+			envelope.Party{Kind: envelope.PartyUser, ID: "40"},
+			envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+			envelope.Content{Type: envelope.ContentText, Text: "hello"})
+		if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+			t.Fatalf("HandleInbound() error: %v", err)
+		}
+	}
+	h.router.lockMu.Lock()
+	defer h.router.lockMu.Unlock()
+	if len(h.router.locks) != 0 {
+		t.Errorf("thread locks = %d, want 0 after all callers finish", len(h.router.locks))
+	}
+}

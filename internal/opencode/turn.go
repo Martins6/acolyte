@@ -63,11 +63,11 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 
 	item, err := c.Prompt(ctx, sessionID, text)
 	if err != nil {
-		return &TurnResult{SessionID: sessionID}, err
+		return &TurnResult{SessionID: sessionID, InputID: inboxID(item)}, err
 	}
 	result, err := c.collectTurn(ctx, sessionID, item.ID)
 	if err != nil {
-		return &TurnResult{SessionID: sessionID}, err
+		return &TurnResult{SessionID: sessionID, InputID: inboxID(item)}, err
 	}
 	return result, nil
 }
@@ -85,13 +85,20 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 
 	item, err := c.Synthetic(ctx, sessionID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
-		return &TurnResult{SessionID: sessionID}, err
+		return &TurnResult{SessionID: sessionID, InputID: inboxID(item)}, err
 	}
 	result, err := c.collectTurn(ctx, sessionID, item.ID)
 	if err != nil {
-		return &TurnResult{SessionID: sessionID}, err
+		return &TurnResult{SessionID: sessionID, InputID: inboxID(item)}, err
 	}
 	return result, nil
+}
+
+func inboxID(item *InboxItem) string {
+	if item == nil {
+		return ""
+	}
+	return item.ID
 }
 
 // ensureSession creates the session when missing and brings its agent/model in

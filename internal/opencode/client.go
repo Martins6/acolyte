@@ -258,8 +258,10 @@ func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) 
 	truncated := false
 	cursor := ""
 	for page := 0; page < messageMaxPages; page++ {
-		path := fmt.Sprintf("/api/session/%s/message?order=desc&limit=%d", url.PathEscape(sessionID), messagePageSize)
-		if cursor != "" {
+		path := fmt.Sprintf("/api/session/%s/message?limit=%d", url.PathEscape(sessionID), messagePageSize)
+		if cursor == "" {
+			path += "&order=desc"
+		} else {
 			path += "&cursor=" + url.QueryEscape(cursor)
 		}
 		var resp struct {
