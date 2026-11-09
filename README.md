@@ -1,6 +1,6 @@
 # Acolyte
 
-A lightweight, dynamic Telegram-based agent gateway to OpenCode. The "acolyte" to your OpenCode server — a faithful helper that learns new skills over time.
+A runtime for a folder of agents, powered by OpenCode. Each agent is a self-contained workspace with its own identity, persona, learned skills, state, and logs.
 
 ## Installation
 
@@ -62,56 +62,64 @@ This script builds the binary from local source code instead of downloading from
 2. Send `/newbot` to create a new bot
 3. Follow the instructions and get your bot token
 
-### 2. Initialize Workspace
+### 2. Create an Agent
 
 ```bash
-acolyte new
+acolyte new --name valet --workspace-folder ~/agents/valet --config '{
+  "description": "Personal assistant",
+  "engine": { "model": "minimax-coding-plan/MiniMax-M3" },
+  "memory-learn": { "mode": "simple-dreaming", "args": { "days": 3 } },
+  "communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["@you"] } },
+  "schedule": { "timezone": "America/Sao_Paulo", "heartbeat_minutes": 60 }
+}'
 ```
 
-This creates a workspace at `~/.acolyte/` with template files.
+This scaffolds the agent workspace, bakes the chosen capabilities, and registers the
+agent in `$ACOLYTE_HOME/registry.sqlite.db` (`~/.acolyte` by default). Use
+`acolyte status` to inspect registered agents and `acolyte delete` to remove one from
+the registry (the folder is left untouched).
 
-### 3. Configure the Bot
+### 3. Configure Secrets
 
-Use the `opencode auth login`, choose your provider. Then also set it for `acolyte`. Please, check [models.dev](https://models.dev/) for the standard reference of names for providers and models used in OpenCode. You can also inspect the logs for any mismatch of the naming.
+Acolyte loads secrets from two optional `.env` files:
 
-To set the specific settings for your bot, you can use the following commands:
+- `$ACOLYTE_HOME/.env` — global secrets.
+- `<workspace>/.env` — per-agent secrets, overriding the global file.
+
+Precedence is **process environment > workspace `.env` > global `.env`**. Both files
+are gitignored and are never created by `acolyte new`.
 
 ```bash
-# Set your bot token
-acolyte config set bot.token "YOUR_BOT_TOKEN"
+# Global (shared) secrets
+cat >> "${ACOLYTE_HOME:-$HOME/.acolyte}/.env" <<'EOF'
+TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
+EOF
 
-# Add your Telegram user ID to allowed users
-acolyte config set bot.allowed_users [123456789, "YourUserName"]
-
-# Optional: Set default agent
-acolyte config set defaults.agent "acolyte"
-
-# Optional: Set default model
-acolyte config set defaults.model "MiniMax-M3"
-
-# Optional: Set default provider
-acolyte config set defaults.provider "minimax-coding-plan"
-
-# View current configuration
-acolyte config list
+# Optional per-agent override
+cat >> ~/agents/valet/.env <<'EOF'
+TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
+EOF
 ```
 
-### 4. Start the Bot
+### 4. Start the Daemon
 
 ```bash
 acolyte start
 ```
 
-This will:
-
-1. Initialize the Telegram bot
-2. Begin handling messages
+> **Transitional:** the current `acolyte start` still runs the legacy single-workspace
+> daemon from `~/.acolyte/config.toml`. The multi-agent daemon that serves every
+> registered agent, and the per-agent Communication adapters, land in the next slices.
+> The legacy commands below remain available until that cutover.
 
 Press `Ctrl+C` to stop gracefully.
 
-## Configuration
+## Legacy Configuration (current daemon)
 
-The configuration file is stored at `~/.acolyte/config.toml`:
+New agents are configured by `acolyte new --config`; their wiring lives in
+`<workspace>/opencode.jsonc`, their persona in `<workspace>/.acolyte/`, and their secrets
+in the layered `.env` files. The current single-workspace daemon still reads
+`~/.acolyte/config.toml`:
 
 ```toml
 [bot]
@@ -148,6 +156,9 @@ provider = "minimax-coding-plan"
 
 ## Slash Commands
 
+> These apply to the legacy single-workspace Telegram daemon until the multi-agent
+> Communication adapter lands.
+
 | Command                | Description        | Example                        |
 | ---------------------- | ------------------ | ------------------------------ |
 | `/start`               | Start the bot      | `/start`                       |
@@ -157,25 +168,30 @@ provider = "minimax-coding-plan"
 | `/set-provider <name>` | Set LLM provider   | `/set-provider anthropic`      |
 | `/workspace <path>`    | Set workspace path | `/workspace /path/to/folder`   |
 
-## Workspace Structure
+## Agent Workspace
+
+`acolyte new` creates the SPEC v0 layout:
 
 ```
-~/.acolyte/
-├── AGENTS.md           # Agent definitions
-├── SOUL.md            # System operator behavior
-├── USER.md            # User information
-├── IDENTITY.md        # Model identity
-├── BOOTSTRAP.md       # First-time setup
-├── TOOLS.md           # Tool definitions
-├── downloads/
-│   ├── images/        # Downloaded images
-│   ├── audio/        # Downloaded audio
-│   ├── documents/    # Downloaded documents
-│   └── videos/       # Downloaded videos
-├── conversations/    # Per-user conversation history
-└── .logs/
-    └── YYYY-MM-DD.log # Daily log files
+<workspace>/
+├── AGENTS.md                 # OpenCode hub: persistent guidance + persona index
+├── opencode.jsonc            # OpenCode V2 config = capability wiring
+├── .acolyte.sqlite.db        # per-agent store (orch_*, comm_tg_*, mem_*)
+├── .acolyte/                 # persona
+│   ├── CONFIG.md             #   what Acolyte is + how to inspect capabilities
+│   ├── SOUL.md               #   core behaviour
+│   ├── TOOLS.md              #   tool behaviour + workflows
+│   ├── USER.md               #   user profile memory
+│   └── HEARTBEAT.md          #   what to look for on a heartbeat
+├── .agents/skills/           # learned OpenCode skills
+├── .opencode/agents/         # optional OpenCode agent overrides
+├── downloads/                # media, transcripts, artifacts
+└── .logs/                    # daily log files
 ```
+
+The legacy single-workspace daemon still uses the old `~/.acolyte/` layout
+(`MAIN-PROMPTS/`, `opencode.json`, `data.db`, `conversations/`). Do not point
+`acolyte new` at that folder; it rejects a legacy `opencode.json`.
 
 ## Logging
 
@@ -202,6 +218,9 @@ Log retention is 30 days (auto-cleanup).
 
 ## Media Handling
 
+> The current media path belongs to the legacy single-workspace daemon. The
+> per-agent Communication adapter will preserve the same file-path contract.
+
 When you send a **photo** to the bot:
 
 1. The bot downloads the largest available size from Telegram
@@ -225,14 +244,16 @@ Sender-side media (the bot sending photos/documents back to you) is not implemen
 
 ## CLI Commands
 
-| Command                         | Description                 |
-| ------------------------------- | --------------------------- |
-| `acolyte start`       | Start bot + OpenCode server |
-| `acolyte config`      | Configuration management    |
-| `acolyte new [path]`  | Initialize new workspace    |
-| `acolyte logs [date]` | View logs                   |
-| `acolyte update`      | Check & apply updates       |
-| `acolyte version`     | Print binary version        |
+| Command                                      | Description                                    |
+| -------------------------------------------- | ---------------------------------------------- |
+| `acolyte new --name <n> --workspace-folder <p> --config '<json>'` | Scaffold, validate, and register an agent |
+| `acolyte status [name\|workspace]`           | List agents or show one agent's jobs/activity  |
+| `acolyte delete <name\|workspace>`           | Remove an agent from the registry (folder kept) |
+| `acolyte start`                              | Start the current daemon + OpenCode server     |
+| `acolyte config`                             | Legacy configuration management                |
+| `acolyte logs [date]`                        | View logs                                      |
+| `acolyte update`                             | Check & apply updates                          |
+| `acolyte version`                            | Print binary version                           |
 
 ## Updating
 
@@ -260,13 +281,18 @@ For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file
 │   ├── new.go
 │   └── logs.go
 ├── internal/
-│   ├── bot/               # Telegram bot
-│   ├── config/            # Configuration
+│   ├── agent/             # --config parsing + create/adopt workflow
+│   ├── bot/               # Legacy Telegram bot
+│   ├── config/            # Legacy config.toml
 │   ├── logger/            # Logging
 │   ├── media/             # Media handling
-│   ├── opencode/          # OpenCode integration
-│   ├── session/           # Session management
-│   └── workspace/         # Workspace templates
+│   ├── opencode/          # OpenCode V2 integration
+│   ├── paths/             # $ACOLYTE_HOME + workspace layout
+│   ├── registry/          # Global agent identity store
+│   ├── secrets/           # Layered .env loading
+│   ├── session/           # Legacy in-memory sessions
+│   ├── store/             # Per-agent SQLite store + module schemas
+│   └── workspace/         # Legacy templates + agent scaffold/validate
 ├── main.go
 └── go.mod
 ```

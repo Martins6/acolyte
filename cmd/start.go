@@ -15,6 +15,7 @@ import (
 	"github.com/martins6/acolyte/internal/logger"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/scheduler"
+	"github.com/martins6/acolyte/internal/secrets"
 	"github.com/martins6/acolyte/internal/updater"
 	"github.com/martins6/acolyte/internal/workspace"
 	"github.com/spf13/cobra"
@@ -35,6 +36,7 @@ Press Ctrl+C to stop the bot gracefully.`,
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
+		applyEnvToken(cfg)
 
 		workspacePath := cfg.Workspace.Path
 		if workspacePath == "" {
@@ -111,6 +113,23 @@ Press Ctrl+C to stop the bot gracefully.`,
 
 func init() {
 	rootCmd.AddCommand(startCmd)
+}
+
+// applyEnvToken lets the global $ACOLYTE_HOME/.env supply the Telegram token
+// when the legacy config.toml does not set one. The per-agent workspace .env
+// is consumed by the multi-agent Communication adapter in a later slice.
+func applyEnvToken(cfg *config.Config) {
+	if cfg == nil || cfg.Bot.Token != "" {
+		return
+	}
+	loaded, err := secrets.Load("")
+	if err != nil {
+		log.Printf("Warning: failed to load secrets: %v", err)
+		return
+	}
+	if token, ok := loaded.Lookup("TELEGRAM_BOT_TOKEN"); ok {
+		cfg.Bot.Token = token
+	}
 }
 
 func checkForUpdatesAsync(parent context.Context) {
