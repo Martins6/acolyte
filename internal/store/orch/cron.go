@@ -8,10 +8,15 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/mattn/go-sqlite3"
 )
 
 // ErrJobNotFound means no cron job matches the title.
 var ErrJobNotFound = errors.New("orch: cron job not found")
+
+// ErrJobExists means a cron job title is already taken.
+var ErrJobExists = errors.New("orch: cron job already exists")
 
 // CronJob is one row of orch_cron_jobs.
 type CronJob struct {
@@ -92,6 +97,133 @@ func (s *Store) AddCronJobIfMissing(job CronJob) (bool, error) {
 		return false, fmt.Errorf("orch: add cron job %q: %w", job.Title, err)
 	}
 	return affected > 0, nil
+}
+
+// AddCronJob inserts a user-created job and rejects duplicate titles.
+func (s *Store) AddCronJob(job CronJob) error {
+	job.Title = strings.TrimSpace(job.Title)
+	job.Kind = strings.TrimSpace(job.Kind)
+	job.Spec = strings.TrimSpace(job.Spec)
+	if job.Title == "" {
+		return fmt.Errorf("orch: cron job title is required")
+	}
+	if job.Kind == "" {
+		return fmt.Errorf("orch: cron job kind is required")
+	}
+	if job.Spec == "" {
+		return fmt.Errorf("orch: cron job spec is required")
+	}
+	if job.ID == "" {
+		job.ID = newID()
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
+	}
+
+	_, err := s.db.Exec(
+		`INSERT INTO orch_cron_jobs (`+cronColumns+`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Title, job.Owner, job.Kind, job.Spec, job.Prompt, job.ShellPath,
+		job.Routine, defaultString(job.RoutineArgs, "{}"), job.AgentTarget, job.SessionID,
+		job.Timezone, boolInt(job.Enabled), job.LastRunAt, job.NextRunAt, job.CreatedAt,
+		defaultString(job.Meta, "{}"),
+	)
+	if err == nil {
+		return nil
+	}
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) &&
+		(sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique ||
+			sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey) {
+		return ErrJobExists
+	}
+	return fmt.Errorf("orch: add cron job %q: %w", job.Title, err)
+}
+
+// DeleteCronJob removes a job by title.
+func (s *Store) DeleteCronJob(title string) error {
+	result, err := s.db.Exec(`DELETE FROM orch_cron_jobs WHERE title = ?`, strings.TrimSpace(title))
+	if err != nil {
+		return fmt.Errorf("orch: delete cron job %q: %w", title, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("orch: delete cron job %q: %w", title, err)
+	}
+	if affected == 0 {
+		return ErrJobNotFound
+	}
+	return nil
+}
+
+// SetCronJobEnabled toggles a job without deleting it.
+func (s *Store) SetCronJobEnabled(title string, enabled bool) error {
+	result, err := s.db.Exec(`UPDATE orch_cron_jobs SET enabled = ? WHERE title = ?`,
+		boolInt(enabled), strings.TrimSpace(title))
+	if err != nil {
+		return fmt.Errorf("orch: set cron job %q enabled: %w", title, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("orch: set cron job %q enabled: %w", title, err)
+	}
+	if affected == 0 {
+		return ErrJobNotFound
+	}
+	return nil
+}
+
+// DueCronJobs returns enabled jobs whose next run is due, or unset.
+func (s *Store) DueCronJobs(now time.Time) ([]CronJob, error) {
+	rows, err := s.db.Query(`SELECT `+cronColumns+` FROM orch_cron_jobs
+		WHERE enabled = 1 AND (next_run_at IS NULL OR next_run_at <= ?)
+		ORDER BY COALESCE(next_run_at, created_at) ASC`, now)
+	if err != nil {
+		return nil, fmt.Errorf("orch: list due cron jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []CronJob
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("orch: scan due cron job: %w", err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("orch: list due cron jobs: %w", err)
+	}
+	return jobs, nil
+}
+
+// ClaimCronJob advances next_run_at only if the expected value is still current.
+func (s *Store) ClaimCronJob(id string, expectedNext *time.Time, next time.Time) (bool, error) {
+	var expected any
+	if expectedNext != nil {
+		expected = *expectedNext
+	}
+	result, err := s.db.Exec(`UPDATE orch_cron_jobs SET next_run_at = ?
+		WHERE id = ? AND enabled = 1 AND next_run_at IS ?`, next, id, expected)
+	if err != nil {
+		return false, fmt.Errorf("orch: claim cron job %q: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: claim cron job %q: %w", id, err)
+	}
+	return affected > 0, nil
+}
+
+// MarkCronJobRun records a completed run. Missing jobs are ignored.
+func (s *Store) MarkCronJobRun(id string, at time.Time) error {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	if _, err := s.db.Exec(`UPDATE orch_cron_jobs SET last_run_at = ? WHERE id = ?`, at, id); err != nil {
+		return fmt.Errorf("orch: mark cron job %q run: %w", id, err)
+	}
+	return nil
 }
 
 // GetCronJobByTitle returns one job by title.

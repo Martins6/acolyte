@@ -379,7 +379,7 @@ Every scheduled thing is one row in `orch_cron_jobs`, on two orthogonal axes:
 | kind | runs the model? | authored by | what runs | output |
 |------|-----------------|-------------|-----------|--------|
 | `prompt` | yes | user | a prompt (`--prompt`) through the agent | delivered to the user |
-| `shell`  | no  | user | a shell script (`--shell <path>`) run with **`$SHELL`** (never `sh`) | routed (mail/notify) |
+| `shell`  | no  | user | a shell script (`--shell <path>`) run with **`$SHELL`** (never `sh`) | routed (`inbox` / `notify-user` / `log`; default success `inbox`, failure `notify-user`) |
 | `routine`| yes | module | a registered named routine (`--routine <name>`) + args | internal / by routine |
 
 - **`$SHELL`** — shell jobs run the script with the user's `$SHELL` (e.g. zsh), never hardcoded `sh`.
@@ -391,7 +391,7 @@ Every scheduled thing is one row in `orch_cron_jobs`, on two orthogonal axes:
 ### 10.2 Routines (`routine` kind)
 A **routine** is a named, headless behavior registered by a module (e.g. `dream`, `heartbeat`), with a
 declared **arguments schema**. Scheduled as `routine`-kind cron jobs (auto-registered when a
-capability is enabled, or manually via `acolyte cron --routine <name>`).
+capability is enabled, or manually via `acolyte cron --routine <name> [--routine-args '<json>']`).
 - **`acolyte cron routine-list`** → JSON of every registered routine + its arguments (name, type,
   required, default). This is the catalog; it is also documented in `docs/README.md` §routines.
 - Examples: `dream` (owner `memory-learn`, args `{days}`), `heartbeat` (args `{interval}`).
@@ -420,11 +420,12 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte new --name <name> --workspace-folder <path> --config '<json>'` | **Scaffold + validate + register** a fresh agent with the capabilities chosen in `--config` (full key reference in [`docs/README.md`](docs/README.md)). On an existing folder it validates + adopts. |
 | `acolyte status [name \| workspace]` | All agents, or one: name, workspace, last message, job count + next job. |
 | `acolyte delete <name \| workspace>` | Remove from the registry **only**. Folder untouched. |
-| `acolyte cron --title <t> --datetime <cron> (--prompt <text> \| --shell <path> \| --routine <name>) [--agent-name\|--workspace-folder] [--session-id]` | Create a job. `--title` unique; `--datetime` cron syntax; actions mutually exclusive; agent-name/workspace-folder mutually exclusive. |
-| `acolyte cron list` | Markdown table of **all** jobs: `title \| datetime \| prompt \| shell \| agent-name \| session-id` (routine jobs show `routine:<name>` under prompt). |
-| `acolyte cron view <title>` | Full JSON of one job. |
+| `acolyte cron --title <t> --datetime <cron> (--prompt <text> \| --shell <path> \| --routine <name>) [--routine-args '<json>'] [--agent-name\|--workspace-folder] [--session-id] [--timezone <IANA>] [--on-success inbox\|notify-user\|log] [--on-failure inbox\|notify-user\|log]` | Create a job. `--title` unique per agent; `--datetime` cron syntax; actions mutually exclusive; agent-name/workspace-folder mutually exclusive. |
+| `acolyte cron list` | Markdown table of **all** jobs: `title \| datetime \| agent \| owner \| kind \| prompt \| shell \| session` (routine jobs show `routine:<name>`; prompt jobs show `prompt:<text>`). |
+| `acolyte cron view <title>` | Full JSON of one job; target-aware when titles collide across agents. |
 | `acolyte cron routine-list` | JSON catalog of registered routines + their arguments. |
-| `acolyte cron rm <title>` | Remove a job. |
+| `acolyte cron rm <title>` | Remove a job; target-aware when titles collide across agents. |
+| `acolyte cron tick` | Run one due-job pass (testing/debugging). |
 | `acolyte inbox "<text>"` | Deliver an external event to the agent on a session (§10.4). |
 | `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
 | `acolyte memory export` | Run the active `memory-export` mode. |
