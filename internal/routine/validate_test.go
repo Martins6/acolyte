@@ -97,6 +97,15 @@ func TestDecodeArgsAcceptsIntegralDecimalsAndExponents(t *testing.T) {
 	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number("1e19")}); err == nil {
 		t.Error("ValidateArgs(1e19) error = nil, want error")
 	}
+	for _, raw := range []string{
+		"1.1e-9223372036854775808",
+		"1.1e9223372036854775807",
+		"-1.1e-9223372036854775808",
+	} {
+		if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number(raw)}); err == nil {
+			t.Errorf("ValidateArgs(%s) error = nil, want error", raw)
+		}
+	}
 	if _, err := ValidateArgs([]ArgSpec{{Name: "n", Type: "int"}}, map[string]any{"n": json.Number(strings.Repeat("9", 2000))}); err == nil {
 		t.Error("ValidateArgs(huge significand) error = nil, want error")
 	}

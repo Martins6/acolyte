@@ -117,6 +117,11 @@ func asInt(raw any) (int, bool) {
 	}
 }
 
+// maxJSONExponent bounds the parsed exponent well above any value that can
+// cancel a decimal fraction in the 4096-byte input, keeping exponent
+// arithmetic and the final allocation small.
+const maxJSONExponent = int64(1 << 20)
+
 // parseJSONInteger evaluates a JSON number exactly without constructing large
 // powers of ten. Decimal/exponent forms are accepted only when the exact value
 // is an integer that fits the platform int.
@@ -138,7 +143,10 @@ func parseJSONInteger(raw string) (int, bool) {
 	exponent := int64(0)
 	if index := strings.IndexAny(raw, "eE"); index >= 0 {
 		parsed, err := strconv.ParseInt(raw[index+1:], 10, 64)
-		if err != nil {
+		// Bound the exponent before any arithmetic: a large negative value
+		// (e.g. MinInt64) would otherwise overflow when the fraction length is
+		// subtracted, and a huge positive value would drive allocation.
+		if err != nil || parsed > maxJSONExponent || parsed < -maxJSONExponent {
 			return 0, false
 		}
 		exponent = parsed
@@ -164,8 +172,9 @@ func parseJSONInteger(raw string) (int, bool) {
 		return 0, false
 	}
 	// 19 decimal digits is enough for uint64; the platform int bound is
-	// checked after parsing.
-	if int64(len(digits))+exponent > 19 {
+	// checked after parsing. Compare against 19-len(digits) rather than
+	// len(digits)+exponent so the check itself cannot overflow.
+	if exponent > 19-int64(len(digits)) {
 		return 0, false
 	}
 	numeric := digits + strings.Repeat("0", int(exponent))
