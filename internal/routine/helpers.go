@@ -156,12 +156,20 @@ func revertMemoryChanges(workspace string, before, after map[string]memoryFile) 
 // prompt guidance is backed by a deterministic file-level check.
 func enforceMemoryPolicy(workspace string, before, after map[string]memoryFile) (changed, reverted []string, err error) {
 	for _, path := range changedPaths(before, after) {
-		if reason := memoryPolicyViolation(path, after[path]); reason == "" {
+		current, exists := after[path]
+		if !exists {
+			if err := restoreMemoryFile(workspace, path, before[path], true, memoryFile{}); err != nil {
+				return nil, nil, err
+			}
+			reverted = append(reverted, path+" (deleted memory file)")
+			continue
+		}
+		if reason := memoryPolicyViolation(path, current); reason == "" {
 			changed = append(changed, path)
 			continue
 		} else {
 			previous, existed := before[path]
-			if err := restoreMemoryFile(workspace, path, previous, existed, after[path]); err != nil {
+			if err := restoreMemoryFile(workspace, path, previous, existed, current); err != nil {
 				return nil, nil, err
 			}
 			reverted = append(reverted, path+" ("+reason+")")
