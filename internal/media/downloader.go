@@ -2,6 +2,7 @@ package media
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -66,20 +67,29 @@ func GetFilePath(workspace string, mediaType MediaType, ext string) string {
 	return filepath.Join(downloadsDir, GenerateTimestampedFilename(downloadsDir, ext))
 }
 
-func DownloadFile(ctx context.Context, b *bot.Bot, fileID string) ([]byte, string, error) {
-	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
+// FileAPI is the Telegram file-download surface used by the adapter.
+type FileAPI interface {
+	GetFile(ctx context.Context, params *bot.GetFileParams) (*models.File, error)
+	Token() string
+}
+
+func DownloadFile(ctx context.Context, api FileAPI, fileID string) ([]byte, string, error) {
+	file, err := api.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to get file: %w", err)
+		return nil, "", fmt.Errorf("failed to get file: %s", RedactToken(err, api.Token()))
 	}
 
-	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.Token(), file.FilePath)
+	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", api.Token(), file.FilePath)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to download file: %w", err)
+		return nil, "", fmt.Errorf("failed to download file: %s", RedactToken(err, api.Token()))
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("failed to download file: status %d", resp.StatusCode)
+	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -91,6 +101,19 @@ func DownloadFile(ctx context.Context, b *bot.Bot, fileID string) ([]byte, strin
 
 func SaveFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0644)
+}
+
+// redactToken removes the bot token from error text; HTTP client errors can
+// include the request URL, which embeds the token.
+func RedactToken(err error, token string) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if token != "" {
+		message = strings.ReplaceAll(message, token, "[redacted]")
+	}
+	return errors.New(message)
 }
 
 func BuildPrompt(mediaPath string, meta MediaMetadata, userMessage string) string {
