@@ -276,8 +276,8 @@ func TestRouterOutboundFailureKeepsPendingReply(t *testing.T) {
 	if item.PendingReply == "" {
 		t.Error("pending reply was not recorded for replay")
 	}
-	if item.OpenCodeMessageID == "" {
-		t.Error("turn input was not linked")
+	if item.OpenCodeMessageID != "" {
+		t.Error("turn input was linked before the reply was durably queued")
 	}
 }
 

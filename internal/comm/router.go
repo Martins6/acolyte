@@ -132,17 +132,9 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	defer func() { <-r.sem }()
 
 	result, turnErr := r.turn.RunUserTurn(ctx, sessionID, text, opencode.TurnConfig{Workspace: agent.Workspace})
-	if result != nil {
-		if result.SessionID != "" {
-			if _, err := st.Orch().UpsertSession(env.Thread, result.SessionID, r.now()); err != nil && turnErr == nil {
-				turnErr = err
-			}
-		}
-		if result.InputID != "" {
-			if err := st.CommTG().LinkInbound(env.ID, result.SessionID, result.InputID); err != nil &&
-				!errors.Is(err, commtg.ErrInboundNotFound) && turnErr == nil {
-				turnErr = err
-			}
+	if result != nil && result.SessionID != "" {
+		if _, err := st.Orch().UpsertSession(env.Thread, result.SessionID, r.now()); err != nil && turnErr == nil {
+			turnErr = err
 		}
 	}
 
@@ -150,12 +142,26 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		if sendErr := r.sendReply(ctx, st, agent, env, result, fmt.Sprintf("Error: %v", turnErr)); sendErr != nil {
 			return fmt.Errorf("%v: %w", turnErr, sendErr)
 		}
+		if err := r.linkInbound(st, env, result); err != nil {
+			return err
+		}
 		return turnErr
 	}
 	if result != nil && strings.TrimSpace(result.ResponseText) != "" {
 		if err := r.sendReply(ctx, st, agent, env, result, result.ResponseText); err != nil {
 			return err
 		}
+	}
+	return r.linkInbound(st, env, result)
+}
+
+func (r *Router) linkInbound(st *store.Store, env envelope.Envelope, result *opencode.TurnResult) error {
+	if result == nil || result.InputID == "" {
+		return nil
+	}
+	if err := st.CommTG().LinkInbound(env.ID, result.SessionID, result.InputID); err != nil &&
+		!errors.Is(err, commtg.ErrInboundNotFound) {
+		return err
 	}
 	return nil
 }
@@ -192,15 +198,17 @@ func (r *Router) sendReply(ctx context.Context, st *store.Store, agent registry.
 	if err != nil {
 		return err
 	}
-	if err := st.CommTG().SetInboundReply(in.ID, string(raw)); err != nil {
-		if !errors.Is(err, commtg.ErrInboundNotFound) {
-			return err
-		}
+	stagingErr := st.CommTG().SetInboundReply(in.ID, string(raw))
+	if stagingErr != nil && !errors.Is(stagingErr, commtg.ErrInboundNotFound) {
+		// Try the outbound anyway; if it succeeds the reply is delivered.
+		stagingErr = nil
 	}
 	if err := r.outbound(ctx, agent, out); err != nil {
 		return err
 	}
-	_ = st.CommTG().ClearInboundReply(in.ID)
+	if stagingErr == nil {
+		_ = st.CommTG().ClearInboundReply(in.ID)
+	}
 	return nil
 }
 
