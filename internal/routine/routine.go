@@ -74,14 +74,20 @@ func (r *Registry) Register(candidate Routine) error {
 	if strings.TrimSpace(candidate.Owner()) == "" {
 		return fmt.Errorf("routine: %s owner is required", name)
 	}
+	seenArgs := make(map[string]bool)
 	for _, arg := range candidate.Args() {
-		if strings.TrimSpace(arg.Name) == "" {
+		argName := strings.TrimSpace(arg.Name)
+		if argName == "" {
 			return fmt.Errorf("routine: %s has an unnamed argument", name)
 		}
+		if seenArgs[argName] {
+			return fmt.Errorf("routine: %s has duplicate argument %q", name, argName)
+		}
+		seenArgs[argName] = true
 		switch arg.Type {
 		case "int", "string", "bool":
 		default:
-			return fmt.Errorf("routine: %s arg %q has unsupported type %q", name, arg.Name, arg.Type)
+			return fmt.Errorf("routine: %s arg %q has unsupported type %q", name, argName, arg.Type)
 		}
 	}
 	r.mu.Lock()

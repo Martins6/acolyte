@@ -53,6 +53,18 @@ func TestRegistryRegisterAndList(t *testing.T) {
 	}
 }
 
+func TestRegisterRejectsDuplicateArgs(t *testing.T) {
+	registry := NewRegistry()
+	err := registry.Register(fakeRoutine{
+		name:  "dup",
+		owner: "test",
+		args:  []ArgSpec{{Name: "days", Type: "int"}, {Name: "days", Type: "string"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate argument") {
+		t.Fatalf("Register(duplicate args) error = %v, want duplicate argument error", err)
+	}
+}
+
 func TestCatalogJSON(t *testing.T) {
 	registry := NewRegistry()
 	if err := registry.Register(fakeRoutine{
