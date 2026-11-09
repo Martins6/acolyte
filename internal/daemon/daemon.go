@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -340,9 +341,16 @@ func (s *Service) sendOutbound(_ context.Context, agent registry.Agent, env enve
 
 func (s *Service) desiredAgent(agent registry.Agent) registry.Agent {
 	// The registry is the source of truth: it may already point at a new
-	// workspace before the next refresh retires the old runtime.
-	if current, err := s.registry.GetByName(agent.Name); err == nil {
-		return current
+	// workspace before the next refresh retires the old runtime. Delete and
+	// re-register can briefly leave a gap, so retry briefly before falling
+	// back to a runtime that refresh is about to retire.
+	for attempt := 0; attempt < 10; attempt++ {
+		if current, err := s.registry.GetByName(agent.Name); err == nil {
+			return current
+		} else if !errors.Is(err, registry.ErrNotFound) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	s.mu.Lock()
 	rt := s.agents[agent.Name]
