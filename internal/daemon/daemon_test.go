@@ -243,7 +243,9 @@ func TestDaemonStartsAndRoutesInbound(t *testing.T) {
 	}
 	release()
 
-	comm.sink(env)
+	if err := comm.sink(env); err != nil {
+		t.Fatalf("inbound sink error: %v", err)
+	}
 
 	sends := comm.sent()
 	if len(sends) != 1 || sends[0].Content.Text != "reply" {

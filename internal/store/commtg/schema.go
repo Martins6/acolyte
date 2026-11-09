@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "comm_tg"
-	version = 3
+	version = 4
 )
 
 // Migrate creates or upgrades the Telegram communication schema.
@@ -46,6 +46,12 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("comm_tg: migrate to version 3: %w", err)
 		}
 		current = 3
+	}
+	if current < 4 {
+		if err := migrateV4(db); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 4: %w", err)
+		}
+		current = 4
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -133,31 +139,64 @@ CREATE TABLE IF NOT EXISTS comm_tg_media (
 // closed): pre-v3 data cannot distinguish private chats from groups, so a user
 // must message the bot again before notifications become eligible.
 func migrateV3(db *sql.DB) error {
-	rows, err := db.Query(`PRAGMA table_info(comm_tg_chats)`)
+	columns, err := tableColumns(db, "comm_tg_chats")
 	if err != nil {
 		return err
 	}
-	found := false
+	if columns["private"] {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+// migrateV4 adds durable inbound replay state. Pre-v4 rows have no pending
+// payload and are marked processed; new rows stay pending until admission.
+func migrateV4(db *sql.DB) error {
+	columns, err := tableColumns(db, "comm_tg_inbox")
+	if err != nil {
+		return err
+	}
+	additions := []struct {
+		name string
+		ddl  string
+	}{
+		{"pending_envelope", `ALTER TABLE comm_tg_inbox ADD COLUMN pending_envelope TEXT NOT NULL DEFAULT ''`},
+		{"processed_at", `ALTER TABLE comm_tg_inbox ADD COLUMN processed_at DATETIME`},
+		{"attempts", `ALTER TABLE comm_tg_inbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`},
+		{"last_error", `ALTER TABLE comm_tg_inbox ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.Exec(addition.ddl); err != nil {
+			return err
+		}
+	}
+	_, err = db.Exec(`UPDATE comm_tg_inbox SET processed_at = received_at
+		WHERE processed_at IS NULL AND pending_envelope = ''`)
+	return err
+}
+
+func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
 	for rows.Next() {
 		var cid, notNull, pk int
 		var name, columnType string
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			rows.Close()
-			return err
+			return nil, err
 		}
-		if name == "private" {
-			found = true
-		}
+		columns[name] = true
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
+		return nil, err
 	}
-	rows.Close()
-	if found {
-		return nil
-	}
-	_, err = db.Exec(`ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 0`)
-	return err
+	return columns, nil
 }

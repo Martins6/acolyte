@@ -13,7 +13,10 @@ workspace.
 - Receives Telegram updates (messages, photos, documents, audio, voice, video).
 - Checks the sender against `telegram.allowed_users` (numeric ID or `@username`, case-insensitive).
   Unauthorized senders receive a short refusal and are not admitted.
-- Records `tg_update_id` for dedup; a repeated update is ignored.
+- Records `tg_update_id` for dedup and stores the inbound envelope as a pending replay payload.
+- Hands each Envelope to the Orchestrator's inbound sink. Only a successful admission (or an
+  already-linked OpenCode message) clears the payload and marks the row processed. Failed/aborted
+  admissions stay pending and are replayed on start and every 30s.
 - Resolves `chat_id` in `comm_tg_chats` and records the last-seen time.
 - **Media:** downloads the file into `<workspace>/downloads/<type>/`, reusing the existing path when
   the Telegram `file_id` was seen before. The Envelope carries the absolute path and a prompt of the
@@ -37,7 +40,7 @@ workspace.
 | Table | Holds |
 | ----- | ----- |
 | `comm_tg_chats` | chat_id, username, allowed, first/last seen |
-| `comm_tg_inbox` | unique tg_update_id, chat_id, envelope_id, media_path, opencode_session_id/message_id |
+| `comm_tg_inbox` | unique tg_update_id, chat_id, envelope_id, media_path, pending replay payload, processed_at, attempts, OpenCode session/message IDs |
 | `comm_tg_outbox` | envelope_id, chat_id, text (pending only), reply_to, chunk progress, attempts, delivery, tg_message_id, source message |
 | `comm_tg_media` | tg_file_id, file_path, type, chat_id, saved_at |
 | `comm_tg_settings` | non-secret channel settings (`channels`, `telegram.allowed_users`) |
