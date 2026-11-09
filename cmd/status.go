@@ -99,30 +99,31 @@ func printAgent(w io.Writer, agent registry.Agent) error {
 	fmt.Fprintf(w, "Registered:  %s\n", formatTimeValue(agent.RegisteredAt))
 	fmt.Fprintf(w, "Last seen:   %s\n", formatTimeValue(agent.LastSeenAt))
 
-	stats, statsErr := readStats(agent.Workspace)
-	if statsErr != nil {
-		if errors.Is(statsErr, store.ErrNoStore) {
-			fmt.Fprintln(w, "Last active: —")
-		} else {
-			fmt.Fprintf(w, "Last active: unavailable (%v)\n", statsErr)
-		}
-	} else {
-		fmt.Fprintf(w, "Last active: %s\n", formatTime(stats.LastActiveAt))
-	}
-
 	st, err := store.OpenReadOnly(agent.Workspace)
 	if err != nil {
 		if errors.Is(err, store.ErrNoStore) {
+			fmt.Fprintln(w, "Last active: —")
 			fmt.Fprintln(w, "Jobs:        —")
-			return nil
+		} else {
+			fmt.Fprintf(w, "Last active: unavailable (%v)\n", err)
+			fmt.Fprintln(w, "Jobs:        unavailable")
 		}
-		return err
+		return nil
 	}
 	defer st.Close()
 
+	stats, err := st.Orch().Stats()
+	if err != nil {
+		fmt.Fprintf(w, "Last active: unavailable (%v)\n", err)
+		fmt.Fprintln(w, "Jobs:        unavailable")
+		return nil
+	}
+	fmt.Fprintf(w, "Last active: %s\n", formatTime(stats.LastActiveAt))
+
 	jobs, err := st.Orch().ListCronJobs()
 	if err != nil {
-		return err
+		fmt.Fprintln(w, "Jobs:        unavailable")
+		return nil
 	}
 	if len(jobs) == 0 {
 		fmt.Fprintln(w, "Jobs:        none")
