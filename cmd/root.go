@@ -15,12 +15,11 @@ func SetVersion(v string) {
 
 var rootCmd = &cobra.Command{
 	Use:   "acolyte",
-	Short: "Telegram bot gateway for OpenCode AI agent",
-	Long: `A Telegram bot that acts as a gateway to an OpenCode server,
-allowing users to interact with the OpenCode agent directly from Telegram.
+	Short: "Multi-agent orchestrator for OpenCode",
+	Long: `Acolyte is a multi-agent orchestrator for OpenCode.
 
-The bot handles text, media (images, audio, files), and provides 
-configuration via slash commands.`,
+It registers agents, routes channel messages into their OpenCode sessions,
+runs scheduled jobs, and provides durable communication delivery.`,
 }
 
 func Execute() {

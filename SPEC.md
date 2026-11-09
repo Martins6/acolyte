@@ -130,7 +130,7 @@ No engine interface/adapter. Acolyte builds directly on OpenCode V2 primitives
 | **Skills**      | `.agents/skills/` (project source); dir with `SKILL.md` (frontmatter `name`, `description`, `metadata.opencode/autoinvoke`) or flat `.md`. ID = path-derived. Loaded on demand via the `skill` tool. Extra sources via `skills: []`. | Learned skills in `.agents/skills/` (memory-access). |
 | **Instructions**| `AGENTS.md` (global + workspace-up) plus `instructions: [files, globs, URLs]`. Combined. Live-edited. | Persona (`.acolyte/*.md`) surfaced here (memory-load). |
 | **Sessions**    | Client–server service owns sessions; driven via API / `@opencode/client` / SDK / `opencode run`. **Sessions keep the full conversation + tool activity.** | Orchestrator maps threads → OpenCode session IDs (§9). |
-| **Tools**       | Built-in + `skill` + `subagent` + MCP + plugin tools.                               | Acolyte adds CLI tools (`notify`, `mail`, `schedule`, `cron`). |
+| **Tools**       | Built-in + `skill` + `subagent` + MCP + plugin tools.                               | Acolyte adds CLI tools (`notify-user`, `inbox`, `cron`, `inspect`, `attach`). |
 | **Plugins**     | Hooks/transforms/tools via `plugins` + JS/Effect.                                   | Candidate host for `memory-learn` / `memory-export`. |
 
 **How a turn runs:** the Orchestrator drives one turn through the **OpenCode V2 API**, supplying an
@@ -241,7 +241,8 @@ it produces**, documented in `docs/memory/…`.
 ### 6.4 `memory-export` — portability
 - **`opencode-export` (v0):** bundles the agent's memory (skills + persona + hub) into an
   **OpenCode-native** portable format — a drop-in skills/instructions set another OpenCode workspace
-  or Acolyte agent can import. Exposed as a CLI (`acolyte memory export`) and/or a skill.
+  or Acolyte agent can import. A future CLI entry (`acolyte memory export`) is planned but not
+  registered yet; the mode can still be run through its documented skill/artifacts.
 - *Other modes (planned):* `portable-archive`, `remote-catalog`. See `docs/memory/memory-export/`.
 
 > Because Memory is contract-free, adding a mode = adding a documented recipe under `docs/memory/…`
@@ -425,10 +426,14 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte cron view <title>` | Full JSON of one job; target-aware when titles collide across agents. |
 | `acolyte cron routine-list` | JSON catalog of registered routines + their arguments. |
 | `acolyte cron rm <title>` | Remove a job; target-aware when titles collide across agents. |
-| `acolyte cron tick` | Run one due-job pass (testing/debugging). |
+| `acolyte cron tick` | Drain currently due jobs (testing/debugging). |
 | `acolyte inbox "<text>"` | Deliver an external event to the agent on a session (§10.4). |
 | `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
-| `acolyte memory export` | Run the active `memory-export` mode. |
+| `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |
+| `acolyte attach [--session-id <id>]` | Attach the OpenCode TUI to the managed service and agent workspace/session. |
+
+> Runtime capability mutation is not exposed yet; `acolyte new` preserves existing settings on
+> adoption. See `FUTURE-IDEAS.md`.
 
 ---
 

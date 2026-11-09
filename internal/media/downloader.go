@@ -141,8 +141,9 @@ func BuildPrompt(mediaPath string, meta MediaMetadata, userMessage string) strin
 }
 
 // ExtractFileRef returns the Telegram file ref for a message. The case order
-// is intentionally kept in sync with mediaKindLabel in internal/bot/handlers.go
-// (Photo, Document, Audio, Voice, Video) so the two helpers stay paired.
+// is intentionally kept in sync with mediaKind in the Telegram adapter's
+// inbound handler (Photo, Document, Audio, Voice, Video) so the helpers stay
+// paired.
 func ExtractFileRef(message *models.Message) (fileID string, fileSize int64, mimeType string, originalName string, mediaType MediaType, ext string, ok bool) {
 	switch {
 	case len(message.Photo) > 0:

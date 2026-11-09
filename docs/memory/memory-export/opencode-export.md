@@ -16,7 +16,7 @@ The output is a drop-in set another workspace can import (place skills under `.a
 the `instructions` entries).
 
 ## Artifacts
-- A CLI entry: `acolyte memory export`.
+- A planned CLI entry: `acolyte memory export` (not registered yet).
 - Optionally a skill wrapping the export for self-service.
 - (Planned) `portable-archive` (zip) and `remote-catalog` (HTTP skill catalog) modes — see
   `FUTURE-IDEAS.md`.
