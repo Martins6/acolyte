@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 type fakeSink struct {
 	notified []string
 	inboxed  []string
+	inboxErr error
 }
 
 func (f *fakeSink) NotifyUser(_ context.Context, _ registry.Agent, text string) error {
@@ -28,7 +30,7 @@ func (f *fakeSink) NotifyUser(_ context.Context, _ registry.Agent, text string) 
 
 func (f *fakeSink) Inbox(_ context.Context, _ registry.Agent, _ string, text string, _ map[string]any) (string, string, error) {
 	f.inboxed = append(f.inboxed, text)
-	return text, "ses_inbox", nil
+	return text, "ses_inbox", f.inboxErr
 }
 
 type fakeTurn struct {
@@ -507,6 +509,43 @@ func TestRoutineInboxPersistsSession(t *testing.T) {
 		t.Fatalf("register routine: %v", err)
 	}
 	service := startTestService(t, reg, routines, &fakeSink{}, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("inbox")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	session, ok, err := st.Orch().GetSessionByThread("cron:" + job.ID)
+	if err != nil || !ok {
+		t.Fatalf("session = %+v, %v, %v", session, ok, err)
+	}
+	if session.OpenCodeSessionID != "ses_inbox" {
+		t.Errorf("session id = %q, want ses_inbox", session.OpenCodeSessionID)
+	}
+}
+
+func TestRoutineInboxPersistsSessionOnSinkError(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "inbox", Kind: "routine", Spec: "@every 1h", Routine: "inbox",
+		RoutineArgs: `{}`, AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"notify-user"}`,
+	})
+
+	routines := routine.NewRegistry()
+	if err := routines.Register(inboxRoutine{}); err != nil {
+		t.Fatalf("register routine: %v", err)
+	}
+	sink := &fakeSink{inboxErr: errors.New("notification failed")}
+	service := startTestService(t, reg, routines, sink, nil, "/bin/sh", now)
 	service.Tick(context.Background())
 	service.Wait()
 	service.Stop()

@@ -174,9 +174,17 @@ func (s *Service) Tick(ctx context.Context) {
 	s.mu.Lock()
 	pairs := make([]*agentStore, 0, len(s.stores))
 	for _, st := range s.stores {
+		st.refs++
 		pairs = append(pairs, st)
 	}
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		for _, pair := range pairs {
+			s.releaseRefLocked(pair)
+		}
+		s.mu.Unlock()
+	}()
 
 	for _, pair := range pairs {
 		jobs, err := pair.store.Orch().DueCronJobs(now)
@@ -253,6 +261,20 @@ func (s *Service) refresh() {
 	}
 }
 
+func (s *Service) releaseRefLocked(pair *agentStore) {
+	pair.refs--
+	if !pair.retired || pair.refs != 0 {
+		return
+	}
+	_ = pair.store.Close()
+	for index, retired := range s.retired {
+		if retired == pair {
+			s.retired = append(s.retired[:index], s.retired[index+1:]...)
+			break
+		}
+	}
+}
+
 func (s *Service) closeStores() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -292,16 +314,7 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 	release := func() {
 		s.mu.Lock()
 		delete(s.running, key)
-		pair.refs--
-		if pair.retired && pair.refs == 0 {
-			_ = pair.store.Close()
-			for index, retired := range s.retired {
-				if retired == pair {
-					s.retired = append(s.retired[:index], s.retired[index+1:]...)
-					break
-				}
-			}
-		}
+		s.releaseRefLocked(pair)
 		s.mu.Unlock()
 		if semHeld {
 			<-s.sem
@@ -419,14 +432,14 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 	switch action {
 	case "inbox":
 		_, inboxSession, err := s.sink.Inbox(ctx, agent, sessionID, text, map[string]any{"cron_job": job.Title})
+		if inboxSession != "" {
+			if _, persistErr := st.Orch().UpsertSession(cronThread(job), inboxSession, s.now()); persistErr != nil {
+				log.Printf("cron: persist inbox session for %s: %v", job.Title, persistErr)
+			}
+		}
 		if err != nil {
 			log.Printf("cron: route job %s to inbox: %v", job.Title, err)
 			break
-		}
-		if inboxSession != "" {
-			if _, err := st.Orch().UpsertSession(cronThread(job), inboxSession, s.now()); err != nil {
-				log.Printf("cron: persist inbox session for %s: %v", job.Title, err)
-			}
 		}
 	case "notify-user":
 		if err := s.sink.NotifyUser(ctx, agent, text); err != nil {
