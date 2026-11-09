@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/martins6/acolyte/internal/comm"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
@@ -21,12 +22,13 @@ type fakeSink struct {
 	notified    []string
 	inboxed     []string
 	inboxInputs []string
+	notifyErr   error
 	inboxErr    error
 }
 
 func (f *fakeSink) NotifyUser(_ context.Context, _ registry.Agent, text string) error {
 	f.notified = append(f.notified, text)
-	return nil
+	return f.notifyErr
 }
 
 func (f *fakeSink) Inbox(_ context.Context, _ registry.Agent, sessionID, text string, _ map[string]any) (string, string, error) {
@@ -151,6 +153,56 @@ func TestInvalidMetaDoesNotRunJob(t *testing.T) {
 
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Error("job ran despite malformed metadata")
+	}
+}
+
+func TestCronDeliveryErrorPersistsRouteAndRetries(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	script := filepath.Join(t.TempDir(), "job.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho output\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "route", Kind: "shell", Spec: "@every 1h", ShellPath: script,
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"notify-user"}`,
+	})
+	sink := &fakeSink{notifyErr: &comm.DeliveryError{ChatID: 10, Text: "output"}}
+	service := startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	routes, err := st.Orch().DueCronRoutes(now, 10)
+	if err != nil || len(routes) != 1 {
+		st.Close()
+		t.Fatalf("routes = %+v, %v; want one retry intent", routes, err)
+	}
+	st.Close()
+
+	// Retry the route with a now-working sink.
+	sink.notifyErr = nil
+	service = startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	st, err = store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 || !strings.Contains(outbox[0].Text, "output") {
+		t.Errorf("outbox = %+v, %v; want output", outbox, err)
+	}
+	if routes, _ := st.Orch().DueCronRoutes(now.Add(time.Hour), 10); len(routes) != 0 {
+		t.Errorf("routes after retry = %+v, want none", routes)
 	}
 }
 
