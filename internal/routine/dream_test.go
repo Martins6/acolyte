@@ -51,8 +51,10 @@ func TestDreamRoutineDirectWritesAndAudit(t *testing.T) {
 			fmt.Fprintf(w, `{"data":[
 				{"id":"ses_user","title":"Work","time":{"updated":%d},"location":{"directory":%q}},
 				{"id":"ses_old","time":{"updated":%d},"location":{"directory":%q}},
-				{"id":"ses_other","time":{"updated":%d},"location":{"directory":"/other"}}
-			]}`, now.UnixMilli(), ws, now.Add(-30*24*time.Hour).UnixMilli(), ws, now.UnixMilli())
+				{"id":"ses_other","time":{"updated":%d},"location":{"directory":"/other"}},
+				{"id":"ses_empty","time":{"updated":%d},"location":{"directory":""}},
+				{"id":"ses_zero","location":{"directory":%q}}
+			]}`, now.UnixMilli(), ws, now.Add(-30*24*time.Hour).UnixMilli(), ws, now.UnixMilli(), now.UnixMilli(), ws)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_user/message":
 			fmt.Fprint(w, `{"data":[{"id":"m1","type":"user","text":"remember this"},{"id":"m2","type":"assistant","content":[{"type":"text","text":"ok"}]}],"cursor":{"next":null}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_dream":
@@ -86,6 +88,11 @@ func TestDreamRoutineDirectWritesAndAudit(t *testing.T) {
 	}
 	if strings.Contains(prompt, "DRY RUN") {
 		t.Error("direct prompt unexpectedly contains DRY RUN")
+	}
+	for _, excluded := range []string{"ses_old", "ses_other", "ses_empty", "ses_zero"} {
+		if strings.Contains(prompt, excluded) {
+			t.Errorf("prompt includes excluded session %q", excluded)
+		}
 	}
 	var scanned, skills, dryRun int
 	var note string

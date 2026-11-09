@@ -48,11 +48,12 @@ func (dreamRoutine) Run(ctx context.Context, env Env, args map[string]any) (stri
 		if session.ID == env.SessionID {
 			continue
 		}
-		if session.Location.Directory != "" &&
+		if strings.TrimSpace(session.Location.Directory) == "" ||
 			filepath.Clean(session.Location.Directory) != filepath.Clean(env.Workspace) {
 			continue
 		}
-		if session.Time.Updated > 0 && time.UnixMilli(int64(session.Time.Updated)).Before(cutoff) {
+		if session.Time.Updated <= 0 ||
+			time.UnixMilli(int64(session.Time.Updated)).Before(cutoff) {
 			continue
 		}
 		selected = append(selected, session)
