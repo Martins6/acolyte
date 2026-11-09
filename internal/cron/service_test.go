@@ -173,6 +173,89 @@ func TestShellJobUsesConfiguredShell(t *testing.T) {
 	}
 }
 
+func TestShellOutputIsBounded(t *testing.T) {
+	_, ws, _ := setupCron(t)
+	script := filepath.Join(t.TempDir(), "noisy.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' x\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	service := &Service{shell: "/bin/sh"}
+	out, err := service.runShell(context.Background(), registry.Agent{Name: "valet", Workspace: ws}, orch.CronJob{
+		Title: "noisy", ShellPath: script,
+	}, jobMeta{TimeoutSeconds: 10})
+	if err != nil {
+		t.Fatalf("runShell() error: %v", err)
+	}
+	if len(out) > maxOutputBytes+len("\n[output truncated]") {
+		t.Errorf("output length = %d, want bounded", len(out))
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Error("output was not marked truncated")
+	}
+}
+
+func TestShellFailureRoutesOutput(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	script := filepath.Join(t.TempDir(), "fail.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho boom\nexit 3\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "fail", Kind: "shell", Spec: "@every 1h", ShellPath: script,
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_failure":"notify-user"}`,
+	})
+
+	sink := &fakeSink{}
+	service := startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if len(sink.notified) != 1 || !strings.Contains(sink.notified[0], "boom") {
+		t.Errorf("notified = %v, want failure output", sink.notified)
+	}
+}
+
+func TestRefreshRetiresStoreWithoutClosingRunningJob(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	script := filepath.Join(t.TempDir(), "slow.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 0.25\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "slow", Kind: "shell", Spec: "@every 1h", ShellPath: script,
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"log"}`,
+	})
+
+	service := startTestService(t, reg, routine.NewRegistry(), &fakeSink{}, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	time.Sleep(20 * time.Millisecond)
+	if _, err := reg.Delete("valet"); err != nil {
+		t.Fatalf("delete agent: %v", err)
+	}
+	service.refresh()
+	service.Wait()
+	service.Stop()
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("slow")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LastRunAt == nil {
+		t.Error("running job lost its store before completion")
+	}
+}
+
 func TestPromptJobRoutesOutputAndStoresSession(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	past := now.Add(-time.Minute)

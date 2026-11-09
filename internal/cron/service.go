@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,6 +71,7 @@ type Service struct {
 
 	mu      sync.Mutex
 	stores  map[string]*agentStore
+	retired []*agentStore
 	running map[string]bool
 	sem     chan struct{}
 	wg      sync.WaitGroup
@@ -203,7 +205,8 @@ func (s *Service) refresh() {
 	s.mu.Lock()
 	for name, st := range s.stores {
 		if _, ok := wanted[name]; !ok {
-			_ = st.store.Close()
+			// Keep the store open: a dispatched job may still hold it.
+			s.retired = append(s.retired, st)
 			delete(s.stores, name)
 		}
 	}
@@ -211,11 +214,24 @@ func (s *Service) refresh() {
 
 	for name, agent := range wanted {
 		s.mu.Lock()
-		_, exists := s.stores[name]
-		s.mu.Unlock()
-		if exists {
+		if _, exists := s.stores[name]; exists {
+			s.mu.Unlock()
 			continue
 		}
+		reused := false
+		for index, retired := range s.retired {
+			if retired.agent.Name == name && retired.agent.Workspace == agent.Workspace {
+				s.stores[name] = retired
+				s.retired = append(s.retired[:index], s.retired[index+1:]...)
+				reused = true
+				break
+			}
+		}
+		s.mu.Unlock()
+		if reused {
+			continue
+		}
+
 		st, err := store.Open(agent.Workspace)
 		if err != nil {
 			log.Printf("cron: open store for %s: %v", name, err)
@@ -234,7 +250,10 @@ func (s *Service) closeStores() {
 		_ = st.store.Close()
 		delete(s.stores, name)
 	}
-
+	for _, st := range s.retired {
+		_ = st.store.Close()
+	}
+	s.retired = nil
 }
 
 func (s *Service) dispatch(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, now time.Time) {
@@ -314,8 +333,11 @@ func (s *Service) execute(ctx context.Context, agent registry.Agent, st *store.S
 		return
 	}
 	if err != nil {
+		if strings.TrimSpace(text) == "" {
+			text = fmt.Sprintf("cron job %q failed: %v", job.Title, err)
+		}
 		s.logJob(st, job, "error", fmt.Sprintf("failed after %s: %v", s.now().Sub(started).Round(time.Millisecond), err))
-		s.route(ctx, agent, job, meta, "", "", false)
+		s.route(ctx, agent, job, meta, text, sessionID, false)
 		return
 	}
 
