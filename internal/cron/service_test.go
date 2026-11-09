@@ -168,7 +168,7 @@ func TestCronDeliveryErrorPersistsRouteAndRetries(t *testing.T) {
 		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
 		Meta: `{"on_success":"notify-user"}`,
 	})
-	sink := &fakeSink{notifyErr: &comm.DeliveryError{ChatID: 10, Text: "output"}}
+	sink := &fakeSink{notifyErr: &comm.DeliveryError{EnvelopeID: "env_route", ChatID: 10, Text: "output"}}
 	service := startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
 	service.Tick(context.Background())
 	service.Wait()
@@ -200,6 +200,9 @@ func TestCronDeliveryErrorPersistsRouteAndRetries(t *testing.T) {
 	outbox, err := st.CommTG().ListOutbox(10)
 	if err != nil || len(outbox) != 1 || !strings.Contains(outbox[0].Text, "output") {
 		t.Errorf("outbox = %+v, %v; want output", outbox, err)
+	}
+	if len(outbox) == 1 && outbox[0].EnvelopeID != "env_route" {
+		t.Errorf("outbox envelope = %q, want env_route", outbox[0].EnvelopeID)
 	}
 	if routes, _ := st.Orch().DueCronRoutes(now.Add(time.Hour), 10); len(routes) != 0 {
 		t.Errorf("routes after retry = %+v, want none", routes)

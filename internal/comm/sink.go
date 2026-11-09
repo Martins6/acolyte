@@ -31,6 +31,7 @@ type OutboxSink struct {
 // DeliveryError carries the final delivery payload when an outbox enqueue
 // fails, so cron can persist a retryable route.
 type DeliveryError struct {
+	EnvelopeID        string
 	ChatID            int64
 	Text              string
 	OpenCodeSessionID string
@@ -85,7 +86,7 @@ func (s OutboxSink) NotifyUser(_ context.Context, agent registry.Agent, text str
 		CreatedAt:  s.now(),
 	})
 	if err != nil {
-		return &DeliveryError{ChatID: chat.ChatID, Text: text, Err: err}
+		return &DeliveryError{EnvelopeID: env.ID, ChatID: chat.ChatID, Text: text, Err: err}
 	}
 	return nil
 }
@@ -137,8 +138,9 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 	if len(result.MessageIDs) > 0 {
 		sourceMessageID = result.MessageIDs[len(result.MessageIDs)-1]
 	}
+	outboundID := envelope.NewID()
 	_, err = st.CommTG().EnqueueOutbound(commtg.OutboxItem{
-		EnvelopeID:        envelope.NewID(),
+		EnvelopeID:        outboundID,
 		ChatID:            chatID,
 		Text:              result.ResponseText,
 		OpenCodeSessionID: result.SessionID,
@@ -147,6 +149,7 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 	})
 	if err != nil {
 		return result.ResponseText, result.SessionID, &DeliveryError{
+			EnvelopeID:        outboundID,
 			ChatID:            chatID,
 			Text:              result.ResponseText,
 			OpenCodeSessionID: result.SessionID,

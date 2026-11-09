@@ -496,6 +496,7 @@ func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.C
 		return
 	}
 	route := orch.CronRoute{
+		ID:                delivery.EnvelopeID,
 		AgentTarget:       agent.Name,
 		ChatID:            delivery.ChatID,
 		Text:              delivery.Text,
