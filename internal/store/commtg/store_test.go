@@ -161,6 +161,83 @@ func TestMigrateV3Resumable(t *testing.T) {
 	}
 }
 
+func TestMigrateFromV3AddsReplayColumns(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 0`); err != nil {
+		t.Fatalf("create v3 chat column: %v", err)
+	}
+	// Simulate a partial v4 migration: one replay column already exists.
+	if _, err := db.Exec(`ALTER TABLE comm_tg_inbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`); err != nil {
+		t.Fatalf("create partial v4 column: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)`, module, 3); err != nil {
+		t.Fatalf("record v3: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO comm_tg_inbox
+		(id, tg_update_id, chat_id, envelope_id, media_path, opencode_session_id, opencode_message_id, received_at)
+		VALUES (?, ?, ?, ?, '', '', '', ?)`, "old", 1, 10, "env_old", now); err != nil {
+		t.Fatalf("insert v3 inbox: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate(v3) error: %v", err)
+	}
+	var versionValue int
+	if err := db.QueryRow(`SELECT version FROM schema_meta WHERE module = ?`, module).Scan(&versionValue); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if versionValue != version {
+		t.Errorf("version = %d, want %d", versionValue, version)
+	}
+	store := New(db)
+	item, ok, err := store.GetInboxByEnvelope("env_old")
+	if err != nil || !ok {
+		t.Fatalf("GetInboxByEnvelope() = %+v, %v, %v", item, ok, err)
+	}
+	if item.ProcessedAt == nil {
+		t.Error("pre-v4 inbox row was not marked processed")
+	}
+	if pending, err := store.PendingInbound(time.Now().UTC(), 10); err != nil || len(pending) != 0 {
+		t.Errorf("PendingInbound() = %+v, %v; want none", pending, err)
+	}
+}
+
+func TestClaimInboundOnce(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID: 300, ChatID: 10, EnvelopeID: "env_claim", PendingEnvelope: "{}", ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	lease := now.Add(10 * time.Minute)
+	claimed, err := store.ClaimInbound("env_claim", "tok1", now, lease)
+	if err != nil || !claimed {
+		t.Fatalf("ClaimInbound() = %v, %v", claimed, err)
+	}
+	if claimed, err := store.ClaimInbound("env_claim", "tok2", now, lease); err != nil || claimed {
+		t.Fatalf("ClaimInbound(second) = %v, %v; want false", claimed, err)
+	}
+	if renewed, err := store.RenewInboundClaim("env_claim", "tok2", lease.Add(time.Minute)); err != nil || renewed {
+		t.Fatalf("RenewInboundClaim(wrong token) = %v, %v; want false", renewed, err)
+	}
+	if renewed, err := store.RenewInboundClaim("env_claim", "tok1", lease.Add(time.Minute)); err != nil || !renewed {
+		t.Fatalf("RenewInboundClaim() = %v, %v; want true", renewed, err)
+	}
+	if pending, err := store.PendingInbound(now, 10); err != nil || len(pending) != 0 {
+		t.Errorf("PendingInbound(leased) = %+v, %v; want none", pending, err)
+	}
+	if pending, err := store.PendingInbound(lease.Add(time.Minute+time.Second), 10); err != nil || len(pending) != 1 {
+		t.Errorf("PendingInbound(expired) = %+v, %v; want 1", pending, err)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	store := migrateTestDB(t)
 	if err := store.SetSetting("telegram.allowed_users", `["@alice"]`); err != nil {

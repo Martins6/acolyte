@@ -71,6 +71,7 @@ type Adapter struct {
 	done   chan struct{}
 
 	deliverMu sync.Mutex
+	inflight  sync.Map
 }
 
 // New validates options and builds an adapter. Start performs the network
@@ -132,7 +133,7 @@ func (a *Adapter) Start(ctx context.Context, sink comm.InboundSink) error {
 	a.mu.Lock()
 	a.ctx, a.cancel = context.WithCancel(ctx)
 	a.done = make(chan struct{})
-	a.wg.Add(2)
+	a.wg.Add(3)
 	a.mu.Unlock()
 
 	go func() {
@@ -142,6 +143,10 @@ func (a *Adapter) Start(ctx context.Context, sink comm.InboundSink) error {
 	go func() {
 		defer a.wg.Done()
 		a.outboxLoop()
+	}()
+	go func() {
+		defer a.wg.Done()
+		a.replayLoop()
 	}()
 	go func() {
 		a.wg.Wait()

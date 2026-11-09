@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -58,12 +59,18 @@ func (a *Adapter) handleUpdate(ctx context.Context, _ *bot.Bot, update *models.U
 		"telegram_user_id":    msg.From.ID,
 	}
 
+	payload, err := json.Marshal(env)
+	if err != nil {
+		log.Printf("telegram: marshal inbound for %s: %v", a.agent.Name, err)
+		return
+	}
 	inserted, err := a.store.CommTG().RecordInbound(commtg.InboxItem{
-		TGUpdateID: update.ID,
-		ChatID:     msg.Chat.ID,
-		EnvelopeID: env.ID,
-		MediaPath:  mediaPath,
-		ReceivedAt: now,
+		TGUpdateID:      update.ID,
+		ChatID:          msg.Chat.ID,
+		EnvelopeID:      env.ID,
+		MediaPath:       mediaPath,
+		PendingEnvelope: string(payload),
+		ReceivedAt:      now,
 	})
 	if err != nil {
 		log.Printf("telegram: record inbound for %s: %v", a.agent.Name, err)
@@ -72,13 +79,7 @@ func (a *Adapter) handleUpdate(ctx context.Context, _ *bot.Bot, update *models.U
 	if !inserted {
 		return
 	}
-
-	a.mu.Lock()
-	sink := a.sink
-	a.mu.Unlock()
-	if sink != nil {
-		sink(env)
-	}
+	a.admit(ctx, env)
 }
 
 func (a *Adapter) buildContent(ctx context.Context, msg *models.Message) (string, string, envelope.ContentType, error) {

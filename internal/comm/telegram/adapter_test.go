@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -84,7 +85,7 @@ func newTestAdapter(t *testing.T, allowed ...string) (*Adapter, *fakeAPI, *store
 func TestHandleUpdateAdmitsAllowedUserAndDeduplicates(t *testing.T) {
 	adapter, api, st, _ := newTestAdapter(t, "@alice", "42")
 	var captured []envelope.Envelope
-	adapter.sink = func(env envelope.Envelope) { captured = append(captured, env) }
+	adapter.sink = func(_ context.Context, env envelope.Envelope) error { captured = append(captured, env); return nil }
 
 	update := &models.Update{ID: 100, Message: &models.Message{
 		ID:   7,
@@ -121,7 +122,7 @@ func TestHandleUpdateAdmitsAllowedUserAndDeduplicates(t *testing.T) {
 func TestHandleUpdateGroupIsNotNotificationDestination(t *testing.T) {
 	adapter, _, st, _ := newTestAdapter(t, "@alice")
 	captured := 0
-	adapter.sink = func(envelope.Envelope) { captured++ }
+	adapter.sink = func(context.Context, envelope.Envelope) error { captured++; return nil }
 	update := &models.Update{ID: 103, Message: &models.Message{
 		ID:   10,
 		From: &models.User{ID: 42, Username: "alice"},
@@ -145,7 +146,7 @@ func TestHandleUpdateGroupIsNotNotificationDestination(t *testing.T) {
 func TestHandleUpdateDeniesUnknownUser(t *testing.T) {
 	adapter, api, st, _ := newTestAdapter(t, "@alice")
 	called := false
-	adapter.sink = func(envelope.Envelope) { called = true }
+	adapter.sink = func(context.Context, envelope.Envelope) error { called = true; return nil }
 	update := &models.Update{ID: 101, Message: &models.Message{
 		ID:   8,
 		From: &models.User{ID: 43, Username: "bob"},
@@ -174,7 +175,7 @@ func TestHandleUpdateReusesDownloadedMedia(t *testing.T) {
 		t.Fatalf("RecordMedia() error: %v", err)
 	}
 	var captured []envelope.Envelope
-	adapter.sink = func(env envelope.Envelope) { captured = append(captured, env) }
+	adapter.sink = func(_ context.Context, env envelope.Envelope) error { captured = append(captured, env); return nil }
 	update := &models.Update{ID: 102, Message: &models.Message{
 		ID:      9,
 		From:    &models.User{ID: 42, Username: "alice"},
@@ -284,6 +285,129 @@ func TestSendRequiresChat(t *testing.T) {
 		envelope.Content{Type: envelope.ContentText, Text: "hello"})
 	if err := adapter.Send(env); err == nil {
 		t.Fatal("Send() error = nil, want no-chat error")
+	}
+}
+
+func TestReplayPendingAdmitsAndClears(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 200, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	calls := 0
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { calls++; return nil }
+	adapter.replayPending(context.Background())
+	if calls != 1 {
+		t.Fatalf("sink calls = %d, want 1", calls)
+	}
+	item, ok, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil || !ok || item.ProcessedAt == nil || item.PendingEnvelope != "" {
+		t.Errorf("inbox = %+v, %v, %v; want processed with cleared payload", item, ok, err)
+	}
+}
+
+func TestReplayPendingRetriesFailure(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 201, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { return errors.New("temporary") }
+	adapter.replayPending(context.Background())
+	item, _, _ := st.CommTG().GetInboxByEnvelope(env.ID)
+	if item.ProcessedAt != nil || item.Attempts != 1 || item.LastError == "" {
+		t.Fatalf("inbox after failure = %+v", item)
+	}
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { return nil }
+	adapter.replayPending(context.Background())
+	item, _, _ = st.CommTG().GetInboxByEnvelope(env.ID)
+	if item.ProcessedAt == nil || item.PendingEnvelope != "" {
+		t.Errorf("inbox after retry = %+v, want processed", item)
+	}
+}
+
+func TestReplaySkipsLinkedRow(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 202, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	if err := st.CommTG().LinkInbound(env.ID, "ses_x", "msg_x"); err != nil {
+		t.Fatalf("LinkInbound() error: %v", err)
+	}
+	calls := 0
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { calls++; return nil }
+	adapter.replayPending(context.Background())
+	if calls != 0 {
+		t.Errorf("sink calls = %d, want 0 for an already-linked row", calls)
+	}
+	item, _, _ := st.CommTG().GetInboxByEnvelope(env.ID)
+	if item.ProcessedAt == nil {
+		t.Error("linked row was not marked processed")
+	}
+}
+
+func TestReplaySkipsInFlightAdmission(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 204, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	adapter.inflight.Store(env.ID, struct{}{})
+	calls := 0
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error { calls++; return nil }
+	adapter.replayPending(context.Background())
+	if calls != 0 {
+		t.Fatalf("replay called sink %d times for an in-flight admission", calls)
+	}
+	adapter.inflight.Delete(env.ID)
+	adapter.replayPending(context.Background())
+	if calls != 1 {
+		t.Errorf("replay calls after inflight cleared = %d, want 1", calls)
+	}
+}
+
+func TestHandleUpdateLeavesPendingOnSinkFailure(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "42")
+	var captured envelope.Envelope
+	adapter.sink = func(_ context.Context, env envelope.Envelope) error { captured = env; return errors.New("turn failed") }
+	update := &models.Update{ID: 203, Message: &models.Message{
+		ID:   11,
+		From: &models.User{ID: 42, Username: "alice"},
+		Chat: models.Chat{ID: 10, Type: models.ChatTypePrivate},
+		Text: "hello",
+	}}
+	adapter.handleUpdate(context.Background(), nil, update)
+	if captured.ID == "" {
+		t.Fatal("sink was not called")
+	}
+	item, ok, err := st.CommTG().GetInboxByEnvelope(captured.ID)
+	if err != nil || !ok || item.ProcessedAt != nil || item.Attempts != 1 || item.PendingEnvelope == "" {
+		t.Errorf("inbox = %+v, %v, %v; want pending retry state", item, ok, err)
 	}
 }
 

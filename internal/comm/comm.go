@@ -9,8 +9,8 @@ import (
 )
 
 // InboundSink is called by a Communication adapter for each parsed inbound
-// envelope.
-type InboundSink func(envelope.Envelope)
+// envelope. Returning an error leaves the inbound row pending for replay.
+type InboundSink func(ctx context.Context, env envelope.Envelope) error
 
 // Communication is one channel adapter.
 type Communication interface {

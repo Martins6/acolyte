@@ -35,6 +35,8 @@ An adapter is started only when:
 - Channel payload ↔ **Envelope** parsing (`SPEC.md` §7).
 - **Its own state** in `<workspace>/.acolyte.sqlite.db` under the `comm_tg_*` tables: chat
   resolution, dedup, delivery status/message IDs, and media references.
+- Durable inbound replay: an update is recorded as pending before the turn is admitted; the
+  payload is cleared only after admission/linkage, and failed rows are retried.
 - Durable outbound delivery: every reply is written to `comm_tg_outbox`; the adapter attempts it
   immediately and retries transient failures with bounded backoff.
 - It does **not** store conversation content. Inbound rows keep routing metadata and OpenCode
