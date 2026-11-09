@@ -77,12 +77,18 @@ func runInbox(ctx context.Context, w io.Writer, text, agentName, workspace, sess
 	}
 
 	if result.ResponseText != "" {
-		if _, err := config.Load(""); err == nil {
-			if err := database.Init(legacyWorkspace()); err == nil {
-				if userID := config.GetAllowedUserChatID(); userID != 0 {
-					_, _ = database.InsertNotification(userID, result.ResponseText)
-				}
-			}
+		if _, err := config.Load(""); err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if err := database.Init(legacyWorkspace()); err != nil {
+			return fmt.Errorf("initialize legacy notifier database: %w", err)
+		}
+		userID := config.GetAllowedUserChatID()
+		if userID == 0 {
+			return fmt.Errorf("no Telegram user chat id is resolved yet; message the bot first")
+		}
+		if _, err := database.InsertNotification(userID, result.ResponseText); err != nil {
+			return fmt.Errorf("queue inbox reply: %w", err)
 		}
 	}
 

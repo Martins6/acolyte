@@ -420,13 +420,17 @@ func findCronJob(title, agentName, workspace string) (cronMatch, error) {
 	for _, agent := range agents {
 		st, err := store.OpenReadOnly(agent.Workspace)
 		if err != nil {
-			continue
+			return cronMatch{}, fmt.Errorf("inspect agent %s: %w", agent.Name, err)
 		}
 		job, err := st.Orch().GetCronJobByTitle(title)
 		st.Close()
-		if err == nil {
-			matches = append(matches, cronMatch{Agent: agent, Job: job})
+		if errors.Is(err, orch.ErrJobNotFound) {
+			continue
 		}
+		if err != nil {
+			return cronMatch{}, fmt.Errorf("inspect agent %s: %w", agent.Name, err)
+		}
+		matches = append(matches, cronMatch{Agent: agent, Job: job})
 	}
 	switch len(matches) {
 	case 0:

@@ -218,6 +218,37 @@ func TestCronAmbiguousTitleRequiresTarget(t *testing.T) {
 	}
 }
 
+func TestCronViewPropagatesInspectionError(t *testing.T) {
+	t.Setenv(paths.HomeEnv, t.TempDir())
+	workspaces := map[string]string{}
+	for _, name := range []string{"one", "two"} {
+		ws := filepath.Join(t.TempDir(), name)
+		cfg, err := agent.ParseConfig(`{"memory-learn":{"args":{"days":3}},"schedule":{"timezone":"UTC"}}`)
+		if err != nil {
+			t.Fatalf("ParseConfig: %v", err)
+		}
+		if _, err := agent.Create(context.Background(), agent.CreateOptions{
+			Name: name, Workspace: ws, Config: cfg,
+		}); err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		workspaces[name] = ws
+	}
+
+	dbPath := filepath.Join(workspaces["one"], ".acolyte.sqlite.db")
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm", dbPath + "-journal"} {
+		_ = os.Remove(path)
+	}
+	if err := os.Mkdir(dbPath, 0755); err != nil {
+		t.Fatalf("corrupt store: %v", err)
+	}
+
+	err := runCronView(&bytes.Buffer{}, "dream", "", "")
+	if err == nil || !strings.Contains(err.Error(), "inspect agent") {
+		t.Fatalf("view error = %v, want inspection error", err)
+	}
+}
+
 func TestRunCronRoutineList(t *testing.T) {
 	var out bytes.Buffer
 	if err := runCronRoutineList(&out); err != nil {
