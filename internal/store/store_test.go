@@ -64,8 +64,8 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err := s.DB().QueryRow(`SELECT version FROM schema_meta WHERE module = 'comm_tg'`).Scan(&commVersion); err != nil {
 		t.Fatalf("read comm_tg version: %v", err)
 	}
-	if orchVersion != 1 || commVersion != 4 {
-		t.Errorf("versions = orch:%d comm_tg:%d, want 1/4", orchVersion, commVersion)
+	if orchVersion != 1 || commVersion != 5 {
+		t.Errorf("versions = orch:%d comm_tg:%d, want 1/5", orchVersion, commVersion)
 	}
 }
 

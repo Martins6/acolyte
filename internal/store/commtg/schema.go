@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "comm_tg"
-	version = 4
+	version = 5
 )
 
 // Migrate creates or upgrades the Telegram communication schema.
@@ -52,6 +52,12 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("comm_tg: migrate to version 4: %w", err)
 		}
 		current = 4
+	}
+	if current < 5 {
+		if err := migrateV5(db); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 5: %w", err)
+		}
+		current = 5
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -176,6 +182,20 @@ func migrateV4(db *sql.DB) error {
 	}
 	_, err = db.Exec(`UPDATE comm_tg_inbox SET processed_at = received_at
 		WHERE processed_at IS NULL AND pending_envelope = ''`)
+	return err
+}
+
+// migrateV5 adds a delivery lease so immediate admission and replay cannot
+// both run the same inbound turn.
+func migrateV5(db *sql.DB) error {
+	columns, err := tableColumns(db, "comm_tg_inbox")
+	if err != nil {
+		return err
+	}
+	if columns["claimed_until"] {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE comm_tg_inbox ADD COLUMN claimed_until DATETIME`)
 	return err
 }
 

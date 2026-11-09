@@ -203,8 +203,32 @@ func TestMigrateFromV3AddsReplayColumns(t *testing.T) {
 	if item.ProcessedAt == nil {
 		t.Error("pre-v4 inbox row was not marked processed")
 	}
-	if pending, err := store.PendingInbound(10); err != nil || len(pending) != 0 {
+	if pending, err := store.PendingInbound(time.Now().UTC(), 10); err != nil || len(pending) != 0 {
 		t.Errorf("PendingInbound() = %+v, %v; want none", pending, err)
+	}
+}
+
+func TestClaimInboundOnce(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID: 300, ChatID: 10, EnvelopeID: "env_claim", PendingEnvelope: "{}", ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	lease := now.Add(10 * time.Minute)
+	claimed, err := store.ClaimInbound("env_claim", now, lease)
+	if err != nil || !claimed {
+		t.Fatalf("ClaimInbound() = %v, %v", claimed, err)
+	}
+	if claimed, err := store.ClaimInbound("env_claim", now, lease); err != nil || claimed {
+		t.Fatalf("ClaimInbound(second) = %v, %v; want false", claimed, err)
+	}
+	if pending, err := store.PendingInbound(now, 10); err != nil || len(pending) != 0 {
+		t.Errorf("PendingInbound(leased) = %+v, %v; want none", pending, err)
+	}
+	if pending, err := store.PendingInbound(lease.Add(time.Second), 10); err != nil || len(pending) != 1 {
+		t.Errorf("PendingInbound(expired) = %+v, %v; want 1", pending, err)
 	}
 }
 

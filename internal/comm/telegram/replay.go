@@ -17,8 +17,18 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 	if sink == nil {
 		return
 	}
-	err := sink(env)
-	if err == nil {
+	if item, ok, err := a.store.CommTG().GetInboxByEnvelope(env.ID); err == nil && ok && item.OpenCodeMessageID != "" {
+		_ = a.store.CommTG().MarkInboundProcessed(env.ID, a.now())
+		return
+	}
+	now := a.now()
+	claimed, err := a.store.CommTG().ClaimInbound(env.ID, now, now.Add(10*time.Minute))
+	if err != nil || !claimed {
+		return
+	}
+
+	sinkErr := sink(env)
+	if sinkErr == nil {
 		if markErr := a.store.CommTG().MarkInboundProcessed(env.ID, a.now()); markErr != nil {
 			log.Printf("telegram: mark inbound %s processed for %s: %v", env.ID, a.agent.Name, markErr)
 		}
@@ -33,7 +43,7 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 		}
 		return
 	}
-	if recordErr := a.store.CommTG().RecordInboundFailure(env.ID, err.Error()); recordErr != nil {
+	if recordErr := a.store.CommTG().RecordInboundFailure(env.ID, sinkErr.Error()); recordErr != nil {
 		log.Printf("telegram: record inbound failure %s for %s: %v", env.ID, a.agent.Name, recordErr)
 	}
 }
@@ -53,7 +63,7 @@ func (a *Adapter) replayLoop() {
 }
 
 func (a *Adapter) replayPending(ctx context.Context) {
-	items, err := a.store.CommTG().PendingInbound(20)
+	items, err := a.store.CommTG().PendingInbound(a.now(), 20)
 	if err != nil {
 		log.Printf("telegram: list pending inbound for %s: %v", a.agent.Name, err)
 		return

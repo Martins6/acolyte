@@ -104,7 +104,7 @@ func (s *Store) MarkInboundProcessed(envelopeID string, at time.Time) error {
 		at = time.Now().UTC()
 	}
 	_, err := s.db.Exec(`UPDATE comm_tg_inbox
-		SET processed_at = ?, pending_envelope = '', last_error = ''
+		SET processed_at = ?, pending_envelope = '', last_error = '', claimed_until = NULL
 		WHERE envelope_id = ? AND processed_at IS NULL`, at, envelopeID)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark inbound processed %q: %w", envelopeID, err)
@@ -116,7 +116,7 @@ func (s *Store) MarkInboundProcessed(envelopeID string, at time.Time) error {
 // pending for replay.
 func (s *Store) RecordInboundFailure(envelopeID, errText string) error {
 	_, err := s.db.Exec(`UPDATE comm_tg_inbox
-		SET attempts = attempts + 1, last_error = ?
+		SET attempts = attempts + 1, last_error = ?, claimed_until = NULL
 		WHERE envelope_id = ? AND processed_at IS NULL`, errText, envelopeID)
 	if err != nil {
 		return fmt.Errorf("comm_tg: record inbound failure %q: %w", envelopeID, err)
@@ -124,13 +124,40 @@ func (s *Store) RecordInboundFailure(envelopeID, errText string) error {
 	return nil
 }
 
-// PendingInbound returns unprocessed rows in chronological order.
-func (s *Store) PendingInbound(limit int) ([]InboxItem, error) {
+// ClaimInbound atomically leases an unprocessed row for one admission attempt.
+// It returns false when another caller holds a live lease or the row is done.
+func (s *Store) ClaimInbound(envelopeID string, now, leaseUntil time.Time) (bool, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if leaseUntil.IsZero() {
+		leaseUntil = now.Add(10 * time.Minute)
+	}
+	result, err := s.db.Exec(`UPDATE comm_tg_inbox SET claimed_until = ?
+		WHERE envelope_id = ? AND processed_at IS NULL
+		AND (claimed_until IS NULL OR claimed_until <= ?)`,
+		leaseUntil, envelopeID, now)
+	if err != nil {
+		return false, fmt.Errorf("comm_tg: claim inbound %q: %w", envelopeID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("comm_tg: claim inbound %q: %w", envelopeID, err)
+	}
+	return affected > 0, nil
+}
+
+// PendingInbound returns unprocessed, unleased rows in chronological order.
+func (s *Store) PendingInbound(now time.Time, limit int) ([]InboxItem, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.db.Query(`SELECT `+inboxColumns+` FROM comm_tg_inbox
-		WHERE processed_at IS NULL ORDER BY received_at, id LIMIT ?`, limit)
+		WHERE processed_at IS NULL AND (claimed_until IS NULL OR claimed_until <= ?)
+		ORDER BY received_at, id LIMIT ?`, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("comm_tg: list pending inbound: %w", err)
 	}
