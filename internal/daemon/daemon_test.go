@@ -378,6 +378,31 @@ func TestDaemonInboxWithoutChatStillRuns(t *testing.T) {
 	}
 }
 
+func TestSendOutboundFallsBackToOutbox(t *testing.T) {
+	reg, pool, workspaces := setupDaemon(t, "valet")
+	factory := newFakeFactory()
+	svc := startDaemon(t, reg, pool, &fakeTurn{}, factory.make)
+	agent := registry.Agent{Name: "valet", Workspace: workspaces["valet"]}
+	svc.stopAgents()
+
+	env := envelope.New(envelope.DirectionOut, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Party{Kind: envelope.PartyUser, ID: "10"},
+		envelope.Content{Type: envelope.ContentText, Text: "durable reply"})
+	if err := svc.sendOutbound(context.Background(), agent, env); err != nil {
+		t.Fatalf("sendOutbound() error: %v", err)
+	}
+	st, release, err := pool.Acquire(agent.Workspace)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 || outbox[0].Text != "durable reply" {
+		t.Fatalf("outbox = %+v, %v; want durable reply", outbox, err)
+	}
+}
+
 func TestDaemonRefreshAddsAndRemovesAgents(t *testing.T) {
 	reg, pool, _ := setupDaemon(t, "one")
 	factory := newFakeFactory()

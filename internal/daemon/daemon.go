@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/secrets"
 	"github.com/martins6/acolyte/internal/store"
+	"github.com/martins6/acolyte/internal/store/commtg"
 	"github.com/martins6/acolyte/internal/storepool"
 )
 
@@ -334,10 +336,95 @@ func (s *Service) sendOutbound(_ context.Context, agent registry.Agent, env enve
 	s.mu.Lock()
 	rt := s.agents[agent.Name]
 	s.mu.Unlock()
-	if rt == nil || rt.agent.Workspace != agent.Workspace {
-		return fmt.Errorf("daemon: no communication adapter for %s", agent.Name)
+	if rt != nil && rt.agent.Workspace == agent.Workspace {
+		return rt.comm.Send(env)
 	}
-	return rt.comm.Send(env)
+	// The adapter may be between refreshes or deliberately stopped. Persist
+	// the reply so it is delivered when the adapter returns.
+	return s.enqueueOutbound(agent, env)
+}
+
+func (s *Service) enqueueOutbound(agent registry.Agent, env envelope.Envelope) error {
+	chatID, err := outboundChatID(env)
+	if err != nil {
+		return err
+	}
+	text := strings.TrimSpace(env.Content.Text)
+	if text == "" {
+		return fmt.Errorf("daemon: outbound text is required")
+	}
+	st, release, err := s.stores.Acquire(agent.Workspace)
+	if err != nil {
+		return fmt.Errorf("daemon: open agent store: %w", err)
+	}
+	defer release()
+	_, err = st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+		EnvelopeID:        env.ID,
+		ChatID:            chatID,
+		Text:              text,
+		ReplyTo:           daemonMetaInt64(env.Meta["reply_to_message_id"]),
+		OpenCodeSessionID: daemonMetaString(env.Meta["opencode_session_id"]),
+		SourceMessageID:   daemonMetaString(env.Meta["source_message_id"]),
+		CreatedAt:         s.now(),
+	})
+	if err != nil {
+		return fmt.Errorf("daemon: queue outbound reply: %w", err)
+	}
+	return nil
+}
+
+func outboundChatID(env envelope.Envelope) (int64, error) {
+	if chatID, ok := envelope.ParseTelegramThread(env.Thread); ok && chatID != 0 {
+		return chatID, nil
+	}
+	if chatID, err := strconv.ParseInt(strings.TrimSpace(env.To.ID), 10, 64); err == nil && chatID != 0 {
+		return chatID, nil
+	}
+	return 0, fmt.Errorf("daemon: outbound envelope has no chat id")
+}
+
+func daemonMetaInt64(value any) *int64 {
+	switch typed := value.(type) {
+	case int:
+		out := int64(typed)
+		return &out
+	case int64:
+		out := typed
+		return &out
+	case float64:
+		out := int64(typed)
+		if float64(out) != typed {
+			return nil
+		}
+		return &out
+	case json.Number:
+		out, err := typed.Int64()
+		if err != nil {
+			return nil
+		}
+		return &out
+	case string:
+		out, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil {
+			return nil
+		}
+		return &out
+	default:
+		return nil
+	}
+}
+
+func daemonMetaString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(typed)
+	}
 }
 
 func (s *Service) loadConfig(agent registry.Agent, st *store.Store) (commConfig, error) {
