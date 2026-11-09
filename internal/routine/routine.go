@@ -38,7 +38,7 @@ type Env struct {
 	Store      *store.Store
 	OpenCode   *opencode.Client
 	NotifyUser func(ctx context.Context, text string) error
-	Inbox      func(ctx context.Context, text string, meta map[string]any) (string, error)
+	Inbox      func(ctx context.Context, text string, meta map[string]any) (string, string, error)
 	Log        func(level, message string, meta map[string]any)
 }
 
