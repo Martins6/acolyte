@@ -57,6 +57,22 @@ func TestDigestSessions(t *testing.T) {
 	}
 }
 
+func TestDigestSessionsCapsOversizedHeader(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"m1","type":"user","text":"hello"}],"cursor":{"next":null}}`)
+	})
+	digest, err := client.DigestSessions(context.Background(), []SessionInfo{
+		{ID: "ses_a", Title: strings.Repeat("T", 200)},
+	}, DigestOptions{MaxTotalChars: 40})
+	if err != nil {
+		t.Fatalf("DigestSessions() error: %v", err)
+	}
+	if len(digest) > 40 {
+		t.Errorf("digest exceeds header-aware budget: %d\n%s", len(digest), digest)
+	}
+}
+
 func TestDigestSessionsCaps(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {

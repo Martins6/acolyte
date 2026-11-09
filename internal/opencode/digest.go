@@ -42,11 +42,11 @@ func (c *Client) DigestSessions(ctx context.Context, sessions []SessionInfo, opt
 	var builder strings.Builder
 	for index, session := range sessions {
 		if index >= opts.MaxSessions {
-			builder.WriteString("\n[more sessions omitted]\n")
+			_ = writeCapped(&builder, "\n[more sessions omitted]\n", opts.MaxTotalChars)
 			break
 		}
 		if builder.Len() >= opts.MaxTotalChars {
-			builder.WriteString("\n[digest truncated]\n")
+			_ = writeCapped(&builder, "\n[digest truncated]\n", opts.MaxTotalChars)
 			break
 		}
 		header := fmt.Sprintf("SESSION %s", session.ID)
@@ -56,7 +56,9 @@ func (c *Client) DigestSessions(ctx context.Context, sessions []SessionInfo, opt
 		if session.Time.Updated > 0 {
 			header += " | updated " + time.UnixMilli(int64(session.Time.Updated)).UTC().Format(time.RFC3339)
 		}
-		builder.WriteString("\n" + header + "\n")
+		if !writeCapped(&builder, "\n"+header+"\n", opts.MaxTotalChars) {
+			break
+		}
 
 		messages, _, err := c.SessionMessages(ctx, session.ID, opts.MaxPages)
 		if err != nil {
@@ -73,14 +75,24 @@ func (c *Client) DigestSessions(ctx context.Context, sessions []SessionInfo, opt
 			}
 			text = truncateText(text, opts.MaxMessageChars)
 			line := message.Type + ": " + text + "\n"
-			if builder.Len()+len(line) > opts.MaxTotalChars {
-				builder.WriteString("[digest truncated]\n")
-				return builder.String(), nil
+			if !writeCapped(&builder, line, opts.MaxTotalChars) {
+				return strings.TrimSpace(builder.String()), nil
 			}
-			builder.WriteString(line)
 		}
 	}
 	return strings.TrimSpace(builder.String()), nil
+}
+
+func writeCapped(builder *strings.Builder, text string, limit int) bool {
+	if builder.Len()+len(text) <= limit {
+		builder.WriteString(text)
+		return true
+	}
+	remaining := limit - builder.Len()
+	if remaining > 0 {
+		builder.WriteString(text[:remaining])
+	}
+	return false
 }
 
 func truncateText(text string, limit int) string {
