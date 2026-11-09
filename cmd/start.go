@@ -111,8 +111,8 @@ Press Ctrl+C to stop the bot gracefully.`,
 				log.Printf("Warning: Failed to start cron service: %v", err)
 				reg.Close()
 			} else {
-				defer cronService.Stop()
 				defer reg.Close()
+				defer cronService.Stop()
 			}
 		}
 

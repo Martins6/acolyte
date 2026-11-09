@@ -52,7 +52,8 @@ func runInbox(ctx context.Context, w io.Writer, text, agentName, workspace, sess
 	}
 	defer st.Close()
 
-	if strings.TrimSpace(sessionID) == "" {
+	explicitSession := strings.TrimSpace(sessionID) != ""
+	if !explicitSession {
 		if session, ok, err := st.Orch().LatestSession(); err != nil {
 			return err
 		} else if ok {
@@ -72,8 +73,12 @@ func runInbox(ctx context.Context, w io.Writer, text, agentName, workspace, sess
 	if err != nil {
 		return err
 	}
-	if _, err := st.Orch().UpsertSession("inbox:"+agent.Name, result.SessionID, time.Now().UTC()); err != nil {
-		return err
+	// Do not promote an explicitly targeted session in LatestSession ordering;
+	// only the default inbox thread tracks the newest session.
+	if !explicitSession {
+		if _, err := st.Orch().UpsertSession("inbox:"+agent.Name, result.SessionID, time.Now().UTC()); err != nil {
+			return err
+		}
 	}
 
 	if result.ResponseText != "" {
