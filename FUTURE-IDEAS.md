@@ -24,7 +24,12 @@
 
 ## Capabilities
 - **Smooth runtime capability updates** — change an agent's capabilities in place (switch a memory
-  mode, add/remove a channel) without re-running `acolyte new`. v0 bakes capabilities at creation.
+  mode, add/remove a channel, update Telegram allowed users, schedule, or engine) without re-running
+  `acolyte new`. v0 bakes capabilities at creation, and `acolyte new` only adopts/preserves existing
+  settings; there is currently **no CLI to mutate an agent's baked config**. Potential surface:
+  `acolyte config <agent> set <key> <value>` / `acolyte config <agent> edit` with validation,
+  diffing, and a dry-run mode. Promote to Phase 3/4 once the per-agent daemon config surface is
+  stable.
 
 ## Orchestrator
 - **`acolyte install-service`** — write the launchd plist / systemd unit for auto-start automatically.
