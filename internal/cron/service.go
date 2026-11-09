@@ -206,15 +206,17 @@ func (s *Service) refresh() {
 
 	s.mu.Lock()
 	for name, st := range s.stores {
-		if _, ok := wanted[name]; !ok {
-			delete(s.stores, name)
-			if st.refs == 0 {
-				_ = st.store.Close()
-			} else {
-				// Keep the store open until its last running job releases it.
-				st.retired = true
-				s.retired = append(s.retired, st)
-			}
+		wantedAgent, ok := wanted[name]
+		if ok && wantedAgent.Workspace == st.agent.Workspace {
+			continue
+		}
+		delete(s.stores, name)
+		if st.refs == 0 {
+			_ = st.store.Close()
+		} else {
+			// Keep the store open until its last running job releases it.
+			st.retired = true
+			s.retired = append(s.retired, st)
 		}
 	}
 	s.mu.Unlock()

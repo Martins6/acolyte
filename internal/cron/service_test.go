@@ -289,6 +289,77 @@ func TestRefreshRetiresStoreWithoutClosingRunningJob(t *testing.T) {
 	}
 }
 
+func TestRefreshSwitchesWorkspaceForSameAgentName(t *testing.T) {
+	reg, firstWS, now := setupCron(t)
+	script := filepath.Join(t.TempDir(), "job.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	addJob(t, firstWS, orch.CronJob{
+		Title: "old", Kind: "shell", Spec: "@every 1h", ShellPath: script,
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"log"}`,
+	})
+
+	service := startTestService(t, reg, routine.NewRegistry(), &fakeSink{}, nil, "/bin/sh", now)
+	defer service.Stop()
+
+	if _, err := reg.Delete("valet"); err != nil {
+		t.Fatalf("delete agent: %v", err)
+	}
+	secondWS := filepath.Join(t.TempDir(), "agent-two")
+	if err := os.MkdirAll(secondWS, 0755); err != nil {
+		t.Fatalf("mkdir second: %v", err)
+	}
+	st, err := store.Open(secondWS)
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	if err := st.Orch().AddCronJob(orch.CronJob{
+		Title: "new", Kind: "shell", Spec: "@every 1h", ShellPath: script,
+		AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"log"}`,
+	}); err != nil {
+		t.Fatalf("add new job: %v", err)
+	}
+	st.Close()
+	if err := reg.Register(registry.Agent{Name: "valet", Workspace: secondWS}); err != nil {
+		t.Fatalf("register new workspace: %v", err)
+	}
+
+	service.refresh()
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	oldStore, err := store.Open(firstWS)
+	if err != nil {
+		t.Fatalf("open first store: %v", err)
+	}
+	oldJob, err := oldStore.Orch().GetCronJobByTitle("old")
+	oldStore.Close()
+	if err != nil {
+		t.Fatalf("get old job: %v", err)
+	}
+	if oldJob.LastRunAt != nil {
+		t.Error("old workspace job ran after the agent moved")
+	}
+
+	newStore, err := store.Open(secondWS)
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	defer newStore.Close()
+	newJob, err := newStore.Orch().GetCronJobByTitle("new")
+	if err != nil {
+		t.Fatalf("get new job: %v", err)
+	}
+	if newJob.LastRunAt == nil {
+		t.Error("new workspace job did not run")
+	}
+}
+
 func TestDispatchIsBoundedByConcurrency(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	script := filepath.Join(t.TempDir(), "slow.sh")
