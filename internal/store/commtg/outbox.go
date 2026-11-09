@@ -126,7 +126,7 @@ func (s *Store) MarkOutboundSent(id string, chunksSent int, tgMessageID int64, a
 	}
 	result, err := s.db.Exec(`UPDATE comm_tg_outbox
 		SET delivery = 'sent', chunks_sent = ?, tg_message_id = ?,
-			sent_at = ?, next_attempt_at = NULL, last_error = ''
+			sent_at = ?, next_attempt_at = NULL, last_error = '', text = ''
 		WHERE id = ?`, chunksSent, tgMessageID, at, id)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark outbound sent: %w", err)
@@ -154,7 +154,7 @@ func (s *Store) MarkOutboundRetry(id string, attempts int, next time.Time, errTe
 // MarkOutboundFailed marks the row permanently failed.
 func (s *Store) MarkOutboundFailed(id, errText string) error {
 	result, err := s.db.Exec(`UPDATE comm_tg_outbox
-		SET delivery = 'failed', last_error = ?, next_attempt_at = NULL
+		SET delivery = 'failed', last_error = ?, next_attempt_at = NULL, text = ''
 		WHERE id = ?`, errText, id)
 	if err != nil {
 		return fmt.Errorf("comm_tg: mark outbound failed: %w", err)

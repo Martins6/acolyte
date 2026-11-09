@@ -112,7 +112,7 @@ func TestChats(t *testing.T) {
 func TestInboundDedupAndLink(t *testing.T) {
 	store := migrateTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
-	item := InboxItem{TGUpdateID: 100, ChatID: 10, EnvelopeID: "env_1", Text: "hello", ReceivedAt: now}
+	item := InboxItem{TGUpdateID: 100, ChatID: 10, EnvelopeID: "env_1", ReceivedAt: now}
 	inserted, err := store.RecordInbound(item)
 	if err != nil || !inserted {
 		t.Fatalf("RecordInbound() = %v, %v", inserted, err)
@@ -123,6 +123,9 @@ func TestInboundDedupAndLink(t *testing.T) {
 	}
 	if inserted {
 		t.Error("RecordInbound(duplicate) = true, want false")
+	}
+	if _, err := store.RecordInbound(InboxItem{TGUpdateID: 101, ChatID: 10, EnvelopeID: "env_1"}); err == nil {
+		t.Error("RecordInbound(duplicate envelope) error = nil, want error")
 	}
 	if err := store.LinkInbound("env_1", "ses_1", "msg_1"); err != nil {
 		t.Fatalf("LinkInbound() error: %v", err)
@@ -183,8 +186,24 @@ func TestOutboxLifecycle(t *testing.T) {
 	if err != nil || len(list) != 1 || list[0].Delivery != "sent" || list[0].SentAt == nil {
 		t.Fatalf("ListOutbox() = %+v, %v", list, err)
 	}
+	if list[0].Text != "" {
+		t.Errorf("sent outbox text = %q, want cleared after delivery", list[0].Text)
+	}
 	if err := store.MarkOutboundFailed("missing", "boom"); !errors.Is(err, ErrOutboxNotFound) {
 		t.Fatalf("MarkOutboundFailed(missing) error = %v, want ErrOutboxNotFound", err)
+	}
+	failed, err := store.EnqueueOutbound(OutboxItem{EnvelopeID: "env_2", ChatID: 10, Text: "secret", CreatedAt: now})
+	if err != nil {
+		t.Fatalf("EnqueueOutbound(failed) error: %v", err)
+	}
+	if err := store.MarkOutboundFailed(failed.ID, "permanent"); err != nil {
+		t.Fatalf("MarkOutboundFailed() error: %v", err)
+	}
+	list, _ = store.ListOutbox(10)
+	for _, item := range list {
+		if item.ID == failed.ID && item.Text != "" {
+			t.Errorf("failed outbox text = %q, want cleared after terminal state", item.Text)
+		}
 	}
 }
 

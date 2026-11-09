@@ -11,13 +11,13 @@ import (
 // ErrInboundNotFound means no inbound row matches the envelope.
 var ErrInboundNotFound = errors.New("comm_tg: inbound envelope not found")
 
-// InboxItem is one parsed inbound Telegram update.
+// InboxItem is one parsed inbound Telegram update. Conversation text is not
+// stored here; it lives in the OpenCode session.
 type InboxItem struct {
 	ID                string    `json:"id"`
 	TGUpdateID        int64     `json:"tg_update_id"`
 	ChatID            int64     `json:"chat_id"`
 	EnvelopeID        string    `json:"envelope_id"`
-	Text              string    `json:"text"`
 	MediaPath         string    `json:"media_path"`
 	OpenCodeSessionID string    `json:"opencode_session_id"`
 	OpenCodeMessageID string    `json:"opencode_message_id"`
@@ -25,7 +25,8 @@ type InboxItem struct {
 }
 
 // RecordInbound stores an inbound update and reports whether it was new.
-// Duplicate Telegram update IDs are ignored.
+// Duplicate Telegram update IDs are ignored; a duplicate envelope ID is an
+// error because it would make envelope-to-session linkage ambiguous.
 func (s *Store) RecordInbound(item InboxItem) (bool, error) {
 	if item.TGUpdateID <= 0 {
 		return false, fmt.Errorf("comm_tg: telegram update id is required")
@@ -46,11 +47,12 @@ func (s *Store) RecordInbound(item InboxItem) (bool, error) {
 	if item.ReceivedAt.IsZero() {
 		item.ReceivedAt = time.Now().UTC()
 	}
-	result, err := s.db.Exec(`INSERT OR IGNORE INTO comm_tg_inbox
-		(id, tg_update_id, chat_id, envelope_id, text, media_path,
+	result, err := s.db.Exec(`INSERT INTO comm_tg_inbox
+		(id, tg_update_id, chat_id, envelope_id, media_path,
 		 opencode_session_id, opencode_message_id, received_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		item.ID, item.TGUpdateID, item.ChatID, item.EnvelopeID, item.Text, item.MediaPath,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(tg_update_id) DO NOTHING`,
+		item.ID, item.TGUpdateID, item.ChatID, item.EnvelopeID, item.MediaPath,
 		item.OpenCodeSessionID, item.OpenCodeMessageID, item.ReceivedAt,
 	)
 	if err != nil {
@@ -88,7 +90,7 @@ func (s *Store) LinkInbound(envelopeID, opencodeSessionID, opencodeMessageID str
 
 // ListInbox returns inbound rows for a chat in chronological order.
 func (s *Store) ListInbox(chatID int64) ([]InboxItem, error) {
-	rows, err := s.db.Query(`SELECT id, tg_update_id, chat_id, envelope_id, text, media_path,
+	rows, err := s.db.Query(`SELECT id, tg_update_id, chat_id, envelope_id, media_path,
 		opencode_session_id, opencode_message_id, received_at
 		FROM comm_tg_inbox WHERE chat_id = ? ORDER BY received_at, id`, chatID)
 	if err != nil {
@@ -100,7 +102,7 @@ func (s *Store) ListInbox(chatID int64) ([]InboxItem, error) {
 	for rows.Next() {
 		var item InboxItem
 		if err := rows.Scan(&item.ID, &item.TGUpdateID, &item.ChatID, &item.EnvelopeID,
-			&item.Text, &item.MediaPath, &item.OpenCodeSessionID, &item.OpenCodeMessageID,
+			&item.MediaPath, &item.OpenCodeSessionID, &item.OpenCodeMessageID,
 			&item.ReceivedAt); err != nil {
 			return nil, fmt.Errorf("comm_tg: scan inbox: %w", err)
 		}
@@ -115,10 +117,10 @@ func (s *Store) ListInbox(chatID int64) ([]InboxItem, error) {
 // GetInboxByEnvelope returns one inbound row.
 func (s *Store) GetInboxByEnvelope(envelopeID string) (InboxItem, bool, error) {
 	var item InboxItem
-	err := s.db.QueryRow(`SELECT id, tg_update_id, chat_id, envelope_id, text, media_path,
+	err := s.db.QueryRow(`SELECT id, tg_update_id, chat_id, envelope_id, media_path,
 		opencode_session_id, opencode_message_id, received_at
 		FROM comm_tg_inbox WHERE envelope_id = ?`, envelopeID).Scan(
-		&item.ID, &item.TGUpdateID, &item.ChatID, &item.EnvelopeID, &item.Text, &item.MediaPath,
+		&item.ID, &item.TGUpdateID, &item.ChatID, &item.EnvelopeID, &item.MediaPath,
 		&item.OpenCodeSessionID, &item.OpenCodeMessageID, &item.ReceivedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

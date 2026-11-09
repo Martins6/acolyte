@@ -83,13 +83,13 @@ CREATE TABLE IF NOT EXISTS comm_tg_inbox (
   id                  TEXT PRIMARY KEY,
   tg_update_id        INTEGER NOT NULL UNIQUE,
   chat_id             INTEGER NOT NULL,
-  envelope_id         TEXT NOT NULL,
-  text                TEXT NOT NULL DEFAULT '',
+  envelope_id         TEXT NOT NULL UNIQUE,
   media_path          TEXT NOT NULL DEFAULT '',
   opencode_session_id TEXT NOT NULL DEFAULT '',
   opencode_message_id TEXT NOT NULL DEFAULT '',
   received_at         DATETIME NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_tg_inbox_envelope ON comm_tg_inbox(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_comm_tg_inbox_chat ON comm_tg_inbox(chat_id, received_at);
 
 CREATE TABLE IF NOT EXISTS comm_tg_outbox (
