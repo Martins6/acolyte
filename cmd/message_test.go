@@ -16,6 +16,8 @@ type fakeCLITurn struct {
 	userCalls  int
 	synthCalls int
 	result     *opencode.TurnResult
+	messages   []opencode.Message
+	messageErr error
 }
 
 func (f *fakeCLITurn) RunUserTurn(context.Context, string, string, opencode.TurnConfig) (*opencode.TurnResult, error) {
@@ -26,6 +28,10 @@ func (f *fakeCLITurn) RunUserTurn(context.Context, string, string, opencode.Turn
 func (f *fakeCLITurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.synthCalls++
 	return f.turnResult(), nil
+}
+
+func (f *fakeCLITurn) SessionMessages(context.Context, string, int) ([]opencode.Message, bool, error) {
+	return f.messages, false, f.messageErr
 }
 
 func (f *fakeCLITurn) turnResult() *opencode.TurnResult {
