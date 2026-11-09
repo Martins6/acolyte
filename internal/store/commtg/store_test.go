@@ -106,6 +106,61 @@ func TestMigrateFromV2AddsPrivate(t *testing.T) {
 	}
 }
 
+func TestMigrateFromV2GroupRowFailsClosed(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)`, module, 2); err != nil {
+		t.Fatalf("record v2: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO comm_tg_chats (chat_id, username, allowed, first_seen_at, last_seen_at)
+		VALUES (?, ?, ?, ?, ?)`, int64(-100123), "group", 1, now, now); err != nil {
+		t.Fatalf("insert v2 chat: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate(v2) error: %v", err)
+	}
+	store := New(db)
+	if _, ok, err := store.LatestAllowedChat(); err != nil || ok {
+		t.Errorf("LatestAllowedChat() = ok:%v err:%v, want none for an unclassified v2 chat", ok, err)
+	}
+	chat, ok, err := store.GetChat(-100123)
+	if err != nil || !ok || chat.Private {
+		t.Errorf("chat = %+v, %v, %v; want non-private fail-closed row", chat, ok, err)
+	}
+}
+
+func TestMigrateV3Resumable(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 0`); err != nil {
+		t.Fatalf("simulate partial v3: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)`, module, 2); err != nil {
+		t.Fatalf("record v2: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate(partial v3) error: %v", err)
+	}
+	var versionValue int
+	if err := db.QueryRow(`SELECT version FROM schema_meta WHERE module = ?`, module).Scan(&versionValue); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if versionValue != version {
+		t.Errorf("version = %d, want %d", versionValue, version)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	store := migrateTestDB(t)
 	if err := store.SetSetting("telegram.allowed_users", `["@alice"]`); err != nil {

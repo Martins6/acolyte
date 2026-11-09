@@ -42,7 +42,7 @@ func Migrate(db *sql.DB) error {
 		current = 2
 	}
 	if current < 3 {
-		if _, err := db.Exec(schemaV3); err != nil {
+		if err := migrateV3(db); err != nil {
 			return fmt.Errorf("comm_tg: migrate to version 3: %w", err)
 		}
 		current = 3
@@ -129,8 +129,35 @@ CREATE TABLE IF NOT EXISTS comm_tg_media (
 );
 `
 
-// schemaV3 distinguishes private chats (valid notification destinations) from
-// groups/channels, where a reply would be visible to every member.
-const schemaV3 = `
-ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 1;
-`
+// schemaV3 adds the private-chat flag. Existing rows default to 0 (fail
+// closed): pre-v3 data cannot distinguish private chats from groups, so a user
+// must message the bot again before notifications become eligible.
+func migrateV3(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(comm_tg_chats)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "private" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if found {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
