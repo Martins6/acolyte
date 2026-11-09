@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -230,16 +231,43 @@ func TestRouteFallbackFile(t *testing.T) {
 	}
 }
 
+func TestRouteFallbackRejectsUnsafeID(t *testing.T) {
+	workspace := t.TempDir()
+	if err := writeRouteFallback(workspace, orch.CronRoute{ID: "../evil", ChatID: 10, Text: "x"}); err == nil {
+		t.Fatal("writeRouteFallback(unsafe id) error = nil, want error")
+	}
+	if err := removeRouteFallback(workspace, "../../outside"); err == nil {
+		t.Fatal("removeRouteFallback(unsafe id) error = nil, want error")
+	}
+	dir := filepath.Join(workspace, routeFallbackDir)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("mkdir fallback dir: %v", err)
+	}
+	raw, _ := json.Marshal(orch.CronRoute{ID: "../evil", ChatID: 10, Text: "x"})
+	if err := os.WriteFile(filepath.Join(dir, "evil.json"), raw, 0600); err != nil {
+		t.Fatalf("write crafted fallback: %v", err)
+	}
+	if routes, err := readRouteFallbacks(workspace); err != nil || len(routes) != 0 {
+		t.Errorf("readRouteFallbacks(crafted) = %+v, %v; want none", routes, err)
+	}
+}
+
 func TestMemoryRouteFallback(t *testing.T) {
 	service := &Service{}
-	route := orch.CronRoute{ID: "env_mem", AgentTarget: "valet", ChatID: 10, Text: "output"}
-	service.addMemoryRoute(route)
-	service.addMemoryRoute(route)
-	routes := service.takeMemoryRoutes()
-	if len(routes) != 1 || routes[0].ID != route.ID {
-		t.Fatalf("memory routes = %+v, want one deduplicated route", routes)
+	routeA := orch.CronRoute{ID: "env_a", AgentTarget: "a", ChatID: 10, Text: "a"}
+	routeB := orch.CronRoute{ID: "env_b", AgentTarget: "b", ChatID: 20, Text: "b"}
+	service.addMemoryRoute("/ws/a", routeA)
+	service.addMemoryRoute("/ws/a", routeA)
+	service.addMemoryRoute("/ws/b", routeB)
+	routesA := service.takeMemoryRoutes("/ws/a")
+	if len(routesA) != 1 || routesA[0].ID != routeA.ID {
+		t.Fatalf("memory routes A = %+v, want one", routesA)
 	}
-	if remaining := service.takeMemoryRoutes(); len(remaining) != 0 {
+	routesB := service.takeMemoryRoutes("/ws/b")
+	if len(routesB) != 1 || routesB[0].ID != routeB.ID {
+		t.Fatalf("memory routes B = %+v, want one", routesB)
+	}
+	if remaining := service.takeMemoryRoutes("/ws/a"); len(remaining) != 0 {
 		t.Errorf("memory routes after take = %+v, want empty", remaining)
 	}
 }

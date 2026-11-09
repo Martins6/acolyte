@@ -94,7 +94,12 @@ type Service struct {
 	wg       sync.WaitGroup
 
 	routeMu      sync.Mutex
-	memoryRoutes []orch.CronRoute
+	memoryRoutes []memoryRoute
+}
+
+type memoryRoute struct {
+	workspace string
+	route     orch.CronRoute
 }
 
 // Start starts the cron service. It performs one store refresh before returning.
@@ -526,26 +531,34 @@ func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.C
 		return
 	}
 	// Last resort: keep the payload in memory rather than re-running the job.
-	s.addMemoryRoute(route)
+	s.addMemoryRoute(agent.Workspace, route)
 	s.logJob(st, job, "error", "queued undelivered output in memory (DB and file unavailable): "+routeErr.Error())
 }
 
-func (s *Service) addMemoryRoute(route orch.CronRoute) {
+func (s *Service) addMemoryRoute(workspace string, route orch.CronRoute) {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
 	for _, existing := range s.memoryRoutes {
-		if existing.ID == route.ID {
+		if existing.workspace == workspace && existing.route.ID == route.ID {
 			return
 		}
 	}
-	s.memoryRoutes = append(s.memoryRoutes, route)
+	s.memoryRoutes = append(s.memoryRoutes, memoryRoute{workspace: workspace, route: route})
 }
 
-func (s *Service) takeMemoryRoutes() []orch.CronRoute {
+func (s *Service) takeMemoryRoutes(workspace string) []orch.CronRoute {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	routes := s.memoryRoutes
-	s.memoryRoutes = nil
+	var routes []orch.CronRoute
+	var kept []memoryRoute
+	for _, item := range s.memoryRoutes {
+		if item.workspace == workspace {
+			routes = append(routes, item.route)
+		} else {
+			kept = append(kept, item)
+		}
+	}
+	s.memoryRoutes = kept
 	return routes
 }
 
@@ -593,7 +606,7 @@ func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
 		_ = removeRouteFallback(pair.agent.Workspace, route.ID)
 	}
 
-	for _, route := range s.takeMemoryRoutes() {
+	for _, route := range s.takeMemoryRoutes(pair.agent.Workspace) {
 		_, enqueueErr := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
 			ID:                route.ID,
 			EnvelopeID:        route.ID,
@@ -604,13 +617,17 @@ func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
 			CreatedAt:         s.now(),
 		})
 		if enqueueErr != nil {
-			s.addMemoryRoute(route)
+			s.addMemoryRoute(pair.agent.Workspace, route)
 		}
 	}
 }
 
 func writeRouteFallback(workspace string, route orch.CronRoute) error {
-	dir := filepath.Join(workspace, routeFallbackDir)
+	path, err := routeFallbackPath(workspace, route.ID)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -618,12 +635,11 @@ func writeRouteFallback(workspace string, route orch.CronRoute) error {
 	if err != nil {
 		return err
 	}
-	final := filepath.Join(dir, route.ID+".json")
-	temp := final + ".tmp"
+	temp := path + ".tmp"
 	if err := os.WriteFile(temp, raw, 0600); err != nil {
 		return err
 	}
-	return os.Rename(temp, final)
+	return os.Rename(temp, path)
 }
 
 func readRouteFallbacks(workspace string) ([]orch.CronRoute, error) {
@@ -640,12 +656,16 @@ func readRouteFallbacks(workspace string) ([]orch.CronRoute, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if _, err := routeFallbackPath(workspace, id); err != nil {
+			continue
+		}
 		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
 			continue
 		}
 		var route orch.CronRoute
-		if err := json.Unmarshal(raw, &route); err != nil || route.ID == "" || route.ChatID == 0 || route.Text == "" {
+		if err := json.Unmarshal(raw, &route); err != nil || route.ID != id || route.ChatID == 0 || route.Text == "" {
 			continue
 		}
 		routes = append(routes, route)
@@ -654,7 +674,23 @@ func readRouteFallbacks(workspace string) ([]orch.CronRoute, error) {
 }
 
 func removeRouteFallback(workspace, id string) error {
-	return os.Remove(filepath.Join(workspace, routeFallbackDir, id+".json"))
+	path, err := routeFallbackPath(workspace, id)
+	if err != nil {
+		return err
+	}
+	return os.Remove(path)
+}
+
+func routeFallbackPath(workspace, id string) (string, error) {
+	if id == "" || filepath.Base(id) != id || id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
+		return "", fmt.Errorf("cron: unsafe route fallback id %q", id)
+	}
+	dir := filepath.Clean(filepath.Join(workspace, routeFallbackDir))
+	path := filepath.Join(dir, id+".json")
+	if filepath.Dir(path) != dir {
+		return "", fmt.Errorf("cron: route fallback path escapes %s", dir)
+	}
+	return path, nil
 }
 
 func routeBackoff(attempts int) time.Duration {
