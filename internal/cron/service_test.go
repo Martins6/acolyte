@@ -289,6 +289,58 @@ func TestRefreshRetiresStoreWithoutClosingRunningJob(t *testing.T) {
 	}
 }
 
+func TestDispatchIsBoundedByConcurrency(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	script := filepath.Join(t.TempDir(), "slow.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 0.2\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	for _, title := range []string{"one", "two"} {
+		addJob(t, ws, orch.CronJob{
+			Title: title, Kind: "shell", Spec: "@every 1h", ShellPath: script,
+			AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+			Meta: `{"on_success":"log"}`,
+		})
+	}
+
+	service, err := Start(context.Background(), Options{
+		Registry:        reg,
+		Routines:        routine.NewRegistry(),
+		Sink:            &fakeSink{},
+		Shell:           "/bin/sh",
+		MaxConcurrency:  1,
+		Interval:        time.Hour,
+		RefreshInterval: time.Hour,
+		Now:             func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	jobs, err := st.Orch().ListCronJobs()
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	ran := 0
+	for _, job := range jobs {
+		if job.LastRunAt != nil {
+			ran++
+		}
+	}
+	if ran != 1 {
+		t.Errorf("ran jobs = %d, want 1 with MaxConcurrency=1", ran)
+	}
+}
+
 func TestPromptJobRoutesOutputAndStoresSession(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	past := now.Add(-time.Minute)

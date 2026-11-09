@@ -267,9 +267,20 @@ func (s *Service) closeStores() {
 func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJob, now time.Time) {
 	agent := pair.agent
 	key := agent.Name + "/" + job.ID
+
+	// Bound dispatched work before claiming: a large due backlog must not
+	// create an unbounded number of blocked goroutines.
+	select {
+	case s.sem <- struct{}{}:
+	default:
+		return
+	}
+	semHeld := true
+
 	s.mu.Lock()
 	if s.running[key] {
 		s.mu.Unlock()
+		<-s.sem
 		return
 	}
 	s.running[key] = true
@@ -278,7 +289,6 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 
 	release := func() {
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		delete(s.running, key)
 		pair.refs--
 		if pair.retired && pair.refs == 0 {
@@ -289,6 +299,11 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 					break
 				}
 			}
+		}
+		s.mu.Unlock()
+		if semHeld {
+			<-s.sem
+			semHeld = false
 		}
 	}
 
@@ -327,8 +342,6 @@ func (s *Service) dispatch(ctx context.Context, pair *agentStore, job orch.CronJ
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.sem <- struct{}{}
-		defer func() { <-s.sem }()
 		defer release()
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -359,13 +372,13 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 			text = fmt.Sprintf("cron job %q failed: %v", job.Title, err)
 		}
 		s.logJob(st, job, "error", fmt.Sprintf("failed after %s: %v", s.now().Sub(started).Round(time.Millisecond), err))
-		s.route(ctx, agent, job, meta, text, sessionID, false)
+		s.route(ctx, st, agent, job, meta, text, sessionID, false)
 		return
 	}
 
 	s.logJob(st, job, "info", fmt.Sprintf("completed in %s", s.now().Sub(started).Round(time.Millisecond)))
 	if text != "" {
-		s.route(ctx, agent, job, meta, text, sessionID, true)
+		s.route(ctx, st, agent, job, meta, text, sessionID, true)
 	}
 }
 
@@ -383,9 +396,12 @@ func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.St
 	}
 }
 
-func (s *Service) route(ctx context.Context, agent registry.Agent, job orch.CronJob, meta jobMeta, text, sessionID string, success bool) {
+func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Agent, job orch.CronJob, meta jobMeta, text, sessionID string, success bool) {
 	if text == "" {
 		return
+	}
+	if len(text) > maxOutputBytes {
+		text = text[:maxOutputBytes] + "\n[output truncated]"
 	}
 	action := meta.OnSuccess
 	if !success {
@@ -408,6 +424,7 @@ func (s *Service) route(ctx context.Context, agent registry.Agent, job orch.Cron
 			log.Printf("cron: route job %s to user: %v", job.Title, err)
 		}
 	case "log":
+		s.logJob(st, job, "info", "output: "+text)
 	}
 }
 
