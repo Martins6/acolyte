@@ -11,6 +11,7 @@ import (
 	"github.com/martins6/acolyte/internal/agent"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
+	"github.com/martins6/acolyte/internal/store"
 )
 
 func setupAgentHome(t *testing.T) string {
@@ -92,6 +93,35 @@ func TestRunStatusDetailUnavailable(t *testing.T) {
 	}
 	if err := os.Mkdir(dbPath, 0755); err != nil {
 		t.Fatalf("replace store with directory: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runStatus(&out, "valet"); err != nil {
+		t.Fatalf("runStatus() error: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "Last active: unavailable") {
+		t.Errorf("output missing unavailable activity:\n%s", text)
+	}
+	if !strings.Contains(text, "Jobs:        unavailable") {
+		t.Errorf("output missing unavailable jobs:\n%s", text)
+	}
+}
+
+func TestRunStatusDetailStatsFailure(t *testing.T) {
+	setupAgentHome(t)
+	ws := filepath.Join(t.TempDir(), "valet")
+	createTestAgent(t, "valet", ws, `{}`)
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.DB().Exec(`DROP TABLE orch_cron_jobs`); err != nil {
+		t.Fatalf("drop cron table: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
 	}
 
 	var out bytes.Buffer
