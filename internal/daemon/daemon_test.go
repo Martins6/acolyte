@@ -519,6 +519,38 @@ func TestSendOutboundUsesRegistryDuringRefreshGap(t *testing.T) {
 	}
 }
 
+func TestSendOutboundUsesRegistryBeforeRuntime(t *testing.T) {
+	reg, pool, workspaces := setupDaemon(t, "valet")
+	svc := startDaemon(t, reg, pool, &fakeTurn{}, newFakeFactory().make)
+	oldAgent := registry.Agent{Name: "valet", Workspace: workspaces["valet"]}
+
+	newWS := filepath.Join(t.TempDir(), "valet-new")
+	prepareAgentWorkspace(t, newWS, "token-new")
+	if _, err := reg.Delete("valet"); err != nil {
+		t.Fatalf("delete old agent: %v", err)
+	}
+	if err := reg.Register(registry.Agent{Name: "valet", Workspace: newWS}); err != nil {
+		t.Fatalf("register new workspace: %v", err)
+	}
+	// Deliberately do not refresh: the old runtime still exists.
+	env := envelope.New(envelope.DirectionOut, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Party{Kind: envelope.PartyUser, ID: "10"},
+		envelope.Content{Type: envelope.ContentText, Text: "pre-refresh reply"})
+	if err := svc.sendOutbound(context.Background(), oldAgent, env); err != nil {
+		t.Fatalf("sendOutbound() error: %v", err)
+	}
+	newStore, release, err := pool.Acquire(newWS)
+	if err != nil {
+		t.Fatalf("Acquire(new) error: %v", err)
+	}
+	defer release()
+	outbox, err := newStore.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 || outbox[0].Text != "pre-refresh reply" {
+		t.Errorf("new outbox = %+v, %v; want pre-refresh reply", outbox, err)
+	}
+}
+
 func TestDaemonRefreshAddsAndRemovesAgents(t *testing.T) {
 	reg, pool, _ := setupDaemon(t, "one")
 	factory := newFakeFactory()

@@ -339,14 +339,16 @@ func (s *Service) sendOutbound(_ context.Context, agent registry.Agent, env enve
 }
 
 func (s *Service) desiredAgent(agent registry.Agent) registry.Agent {
+	// The registry is the source of truth: it may already point at a new
+	// workspace before the next refresh retires the old runtime.
+	if current, err := s.registry.GetByName(agent.Name); err == nil {
+		return current
+	}
 	s.mu.Lock()
 	rt := s.agents[agent.Name]
 	s.mu.Unlock()
 	if rt != nil {
 		return rt.agent
-	}
-	if current, err := s.registry.GetByName(agent.Name); err == nil {
-		return current
 	}
 	return agent
 }
