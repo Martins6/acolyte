@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "orch"
-	version = 1
+	version = 2
 )
 
 // Migrate creates or upgrades the orchestrator schema.
@@ -33,8 +33,11 @@ func Migrate(db *sql.DB) error {
 		return nil
 	}
 
-	if _, err := db.Exec(schemaV1); err != nil {
-		return fmt.Errorf("orch: migrate to version %d: %w", version, err)
+	if current < 2 {
+		if _, err := db.Exec(schemaV2); err != nil {
+			return fmt.Errorf("orch: migrate to version 2: %w", err)
+		}
+		current = 2
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -99,4 +102,21 @@ CREATE TABLE IF NOT EXISTS orch_settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+`
+
+const schemaV2 = schemaV1 + `
+CREATE TABLE IF NOT EXISTS orch_cron_routes (
+  id                  TEXT PRIMARY KEY,
+  agent_target        TEXT NOT NULL,
+  chat_id             INTEGER NOT NULL,
+  text                TEXT NOT NULL,
+  opencode_session_id TEXT NOT NULL DEFAULT '',
+  source_message_id   TEXT NOT NULL DEFAULT '',
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at     DATETIME,
+  last_error          TEXT NOT NULL DEFAULT '',
+  created_at          DATETIME NOT NULL,
+  delivered_at        DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_orch_cron_routes_due ON orch_cron_routes(delivered_at, next_attempt_at);
 `

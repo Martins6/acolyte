@@ -10,10 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/martins6/acolyte/internal/comm"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/routine"
 	"github.com/martins6/acolyte/internal/store"
+	"github.com/martins6/acolyte/internal/store/commtg"
 	"github.com/martins6/acolyte/internal/store/orch"
 	"github.com/martins6/acolyte/internal/storepool"
 	cronlib "github.com/robfig/cron/v3"
@@ -216,6 +218,7 @@ func (s *Service) Tick(ctx context.Context) int {
 
 	dispatched := 0
 	for _, pair := range pairs {
+		s.retryRoutes(ctx, pair)
 		jobs, err := pair.store.Orch().DueCronJobs(now)
 		if err != nil {
 			log.Printf("cron: list due jobs for %s: %v", pair.agent.Name, err)
@@ -398,11 +401,8 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	}
 	text, sessionID, err := s.runJob(ctx, agent, st, job, meta)
 
-	if markErr := st.Orch().MarkCronJobRun(job.ID, s.now()); markErr != nil {
-		log.Printf("cron: mark job %s: %v", job.Title, markErr)
-	}
-
 	if errors.Is(err, routine.ErrPendingPhase4) {
+		_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 		s.logJob(st, job, "info", fmt.Sprintf("pending Phase 4: %v", err))
 		return
 	}
@@ -411,14 +411,28 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 			text = fmt.Sprintf("cron job %q failed: %v", job.Title, err)
 		}
 		s.logJob(st, job, "error", fmt.Sprintf("failed after %s: %v", s.now().Sub(started).Round(time.Millisecond), err))
-		s.route(ctx, st, agent, job, meta, text, sessionID, false)
+		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, false); routeErr != nil {
+			if persistErr := s.persistRoute(st, agent, job, routeErr); persistErr != nil {
+				s.logJob(st, job, "error", "persist route: "+persistErr.Error())
+				_ = st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second))
+				return
+			}
+		}
+		_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 		return
 	}
 
 	s.logJob(st, job, "info", fmt.Sprintf("completed in %s", s.now().Sub(started).Round(time.Millisecond)))
 	if text != "" {
-		s.route(ctx, st, agent, job, meta, text, sessionID, true)
+		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, true); routeErr != nil {
+			if persistErr := s.persistRoute(st, agent, job, routeErr); persistErr != nil {
+				s.logJob(st, job, "error", "persist route: "+persistErr.Error())
+				_ = st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second))
+				return
+			}
+		}
 	}
+	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 }
 
 func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, error) {
@@ -441,9 +455,9 @@ func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.St
 	}
 }
 
-func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Agent, job orch.CronJob, meta jobMeta, text, sessionID string, success bool) {
+func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Agent, job orch.CronJob, meta jobMeta, text, sessionID string, success bool) error {
 	if text == "" {
-		return
+		return nil
 	}
 	if len(text) > maxOutputBytes {
 		text = text[:maxOutputBytes] + "\n[output truncated]"
@@ -468,21 +482,81 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 			}
 		}
 		if err != nil {
-			log.Printf("cron: route job %s to inbox: %v", job.Title, err)
-			break
+			return err
 		}
+		return nil
 	case "notify-user":
-		if err := s.sink.NotifyUser(ctx, agent, text); err != nil {
-			log.Printf("cron: route job %s to user: %v", job.Title, err)
-		}
+		return s.sink.NotifyUser(ctx, agent, text)
 	case "log":
 		s.logJob(st, job, "info", "output: "+text)
+		return nil
 	default:
 		log.Printf("cron: job %s has invalid routing action %q; falling back to notify-user", job.Title, action)
-		if err := s.sink.NotifyUser(ctx, agent, text); err != nil {
-			log.Printf("cron: route job %s to user: %v", job.Title, err)
+		return s.sink.NotifyUser(ctx, agent, text)
+	}
+}
+
+// persistRoute stores a delivery intent when the outbox enqueue failed.
+func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) error {
+	var delivery *comm.DeliveryError
+	if !errors.As(routeErr, &delivery) {
+		s.logJob(st, job, "error", "route failed: "+routeErr.Error())
+		return nil
+	}
+	route := orch.CronRoute{
+		ID:                delivery.EnvelopeID,
+		AgentTarget:       agent.Name,
+		ChatID:            delivery.ChatID,
+		Text:              delivery.Text,
+		OpenCodeSessionID: delivery.OpenCodeSessionID,
+		SourceMessageID:   delivery.SourceMessageID,
+		CreatedAt:         s.now(),
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if lastErr = st.Orch().AddCronRoute(route); lastErr == nil {
+			s.logJob(st, job, "warn", "queued undelivered output for retry: "+routeErr.Error())
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return lastErr
+}
+
+func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
+	routes, err := pair.store.Orch().DueCronRoutes(s.now(), 20)
+	if err != nil {
+		log.Printf("cron: list due routes for %s: %v", pair.agent.Name, err)
+		return
+	}
+	for _, route := range routes {
+		_, enqueueErr := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
+			ID:                route.ID,
+			EnvelopeID:        route.ID,
+			ChatID:            route.ChatID,
+			Text:              route.Text,
+			OpenCodeSessionID: route.OpenCodeSessionID,
+			SourceMessageID:   route.SourceMessageID,
+			CreatedAt:         s.now(),
+		})
+		if enqueueErr != nil {
+			attempts := route.Attempts + 1
+			_ = pair.store.Orch().MarkCronRouteRetry(route.ID, attempts, s.now().Add(routeBackoff(attempts)), enqueueErr.Error())
+			continue
+		}
+		_ = pair.store.Orch().MarkCronRouteDelivered(route.ID, s.now())
+	}
+}
+
+func routeBackoff(attempts int) time.Duration {
+	delay := 5 * time.Second
+	for index := 1; index < attempts; index++ {
+		delay *= 3
+		if delay >= 15*time.Minute {
+			return 15 * time.Minute
 		}
 	}
+	return delay
 }
 
 func (s *Service) logJob(st *store.Store, job orch.CronJob, level, message string) {

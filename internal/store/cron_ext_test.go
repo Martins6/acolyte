@@ -122,6 +122,61 @@ func TestDueCronJobsAndClaim(t *testing.T) {
 	}
 }
 
+func TestCronRouteLifecycle(t *testing.T) {
+	s, _ := openTest(t)
+	now := time.Now().UTC()
+	route := orch.CronRoute{
+		AgentTarget: "valet", ChatID: 10, Text: "output",
+		OpenCodeSessionID: "ses_x", SourceMessageID: "msg_x", CreatedAt: now,
+	}
+	if err := s.Orch().AddCronRoute(route); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+	due, err := s.Orch().DueCronRoutes(now, 10)
+	if err != nil || len(due) != 1 || due[0].Text != "output" {
+		t.Fatalf("DueCronRoutes() = %+v, %v", due, err)
+	}
+	next := now.Add(time.Minute)
+	if err := s.Orch().MarkCronRouteRetry(due[0].ID, 1, next, "busy"); err != nil {
+		t.Fatalf("MarkCronRouteRetry() error: %v", err)
+	}
+	if due, _ := s.Orch().DueCronRoutes(now, 10); len(due) != 0 {
+		t.Errorf("DueCronRoutes(before retry) = %+v, want none", due)
+	}
+	if due, _ := s.Orch().DueCronRoutes(next, 10); len(due) != 1 || due[0].Attempts != 1 {
+		t.Errorf("DueCronRoutes(retry) = %+v", due)
+	}
+	if err := s.Orch().MarkCronRouteDelivered(due[0].ID, next); err != nil {
+		t.Fatalf("MarkCronRouteDelivered() error: %v", err)
+	}
+	if due, _ := s.Orch().DueCronRoutes(next.Add(time.Hour), 10); len(due) != 0 {
+		t.Errorf("DueCronRoutes(delivered) = %+v, want none", due)
+	}
+}
+
+func TestRequeueCronJob(t *testing.T) {
+	s, _ := openTest(t)
+	job := orch.CronJob{Title: "requeue", Kind: "shell", Spec: "@every 1h", Enabled: true}
+	if err := s.Orch().AddCronJob(job); err != nil {
+		t.Fatalf("AddCronJob() error: %v", err)
+	}
+	stored, err := s.Orch().GetCronJobByTitle("requeue")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	next := time.Now().UTC().Add(30 * time.Second)
+	if err := s.Orch().RequeueCronJob(stored.ID, next); err != nil {
+		t.Fatalf("RequeueCronJob() error: %v", err)
+	}
+	stored, err = s.Orch().GetCronJobByTitle("requeue")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if stored.NextRunAt == nil || !stored.NextRunAt.Equal(next) {
+		t.Errorf("next run = %v, want %v", stored.NextRunAt, next)
+	}
+}
+
 func TestSessions(t *testing.T) {
 	s, _ := openTest(t)
 	now := time.Now().UTC()

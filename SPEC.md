@@ -349,6 +349,12 @@ CREATE TABLE orch_logs (              -- append-only audit log
 CREATE TABLE orch_settings (          -- baked capability metadata (non-secret)
   key TEXT PRIMARY KEY, value TEXT NOT NULL
 );
+CREATE TABLE orch_cron_routes (       -- durable cron output retries
+  id TEXT PRIMARY KEY, agent_target TEXT NOT NULL, chat_id INTEGER NOT NULL,
+  text TEXT NOT NULL, opencode_session_id TEXT, source_message_id TEXT,
+  attempts INTEGER DEFAULT 0, next_attempt_at DATETIME, last_error TEXT,
+  created_at DATETIME NOT NULL, delivered_at DATETIME
+);
 
 -- Communication / Telegram (prefix: comm_tg_)  -- routing/delivery state, NOT conversation content
 CREATE TABLE comm_tg_settings ( key TEXT PRIMARY KEY, value TEXT NOT NULL );  -- allowed users, channel settings
