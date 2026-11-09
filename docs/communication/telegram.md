@@ -41,7 +41,7 @@ workspace.
 | Table | Holds |
 | ----- | ----- |
 | `comm_tg_chats` | chat_id, username, allowed, first/last seen |
-| `comm_tg_inbox` | unique tg_update_id, chat_id, envelope_id, media_path, pending replay payload, processed_at, attempts, OpenCode session/message IDs |
+| `comm_tg_inbox` | unique tg_update_id, chat_id, envelope_id, media_path, pending replay payload/reply, processed_at, attempts, OpenCode session/message IDs |
 | `comm_tg_outbox` | envelope_id, chat_id, text (pending only), reply_to, chunk progress, attempts, delivery, tg_message_id, source message |
 | `comm_tg_media` | tg_file_id, file_path, type, chat_id, saved_at |
 | `comm_tg_settings` | non-secret channel settings (`channels`, `telegram.allowed_users`) |

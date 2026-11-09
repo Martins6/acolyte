@@ -111,10 +111,17 @@ func (s *Store) LinkInbound(envelopeID, opencodeSessionID, opencodeMessageID str
 
 // SetInboundReply stores a turn reply that could not be enqueued yet.
 func (s *Store) SetInboundReply(envelopeID, reply string) error {
-	_, err := s.db.Exec(`UPDATE comm_tg_inbox SET pending_reply = ?
+	result, err := s.db.Exec(`UPDATE comm_tg_inbox SET pending_reply = ?
 		WHERE envelope_id = ? AND processed_at IS NULL`, reply, envelopeID)
 	if err != nil {
 		return fmt.Errorf("comm_tg: set inbound reply %q: %w", envelopeID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("comm_tg: set inbound reply %q: %w", envelopeID, err)
+	}
+	if affected == 0 {
+		return ErrInboundNotFound
 	}
 	return nil
 }

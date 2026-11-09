@@ -30,10 +30,6 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 	if sink == nil {
 		return
 	}
-	if item, ok, err := a.store.CommTG().GetInboxByEnvelope(env.ID); err == nil && ok && item.OpenCodeMessageID != "" {
-		_ = a.store.CommTG().MarkInboundProcessedUnconditional(env.ID, a.now())
-		return
-	}
 	if _, busy := a.inflight.LoadOrStore(env.ID, struct{}{}); busy {
 		return
 	}
@@ -43,6 +39,23 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 	now := a.now()
 	claimed, err := a.store.CommTG().ClaimInbound(env.ID, token, now, now.Add(claimLease))
 	if err != nil || !claimed {
+		return
+	}
+	item, ok, getErr := a.store.CommTG().GetInboxByEnvelope(env.ID)
+	if getErr != nil {
+		_ = a.store.CommTG().RecordInboundFailure(env.ID, token, getErr.Error())
+		return
+	}
+	if ok && item.OpenCodeMessageID != "" {
+		if item.PendingReply != "" {
+			if deliverErr := a.deliverPendingReply(item); deliverErr != nil {
+				_ = a.store.CommTG().RecordInboundFailure(env.ID, token, deliverErr.Error())
+				return
+			}
+		}
+		if markErr := a.store.CommTG().MarkInboundProcessed(env.ID, token, a.now()); markErr != nil {
+			log.Printf("telegram: mark linked inbound %s processed for %s: %v", env.ID, a.agent.Name, markErr)
+		}
 		return
 	}
 

@@ -193,7 +193,9 @@ func (r *Router) sendReply(ctx context.Context, st *store.Store, agent registry.
 		return err
 	}
 	if err := st.CommTG().SetInboundReply(in.ID, string(raw)); err != nil {
-		return err
+		if !errors.Is(err, commtg.ErrInboundNotFound) {
+			return err
+		}
 	}
 	if err := r.outbound(ctx, agent, out); err != nil {
 		return err
