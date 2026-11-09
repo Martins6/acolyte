@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/big"
 	"strconv"
 	"strings"
 )
@@ -112,38 +111,83 @@ func asInt(raw any) (int, bool) {
 		}
 		return boundedInt(int64(value))
 	case json.Number:
-		raw := value.String()
-		if parsed, err := value.Int64(); err == nil {
-			return boundedInt(parsed)
-		}
-		if !safeNumberMagnitude(raw) {
-			return 0, false
-		}
-		// Accept exact integral forms such as 1.0 and 1e3 without going
-		// through float64 (which would round large integers).
-		rat, ok := new(big.Rat).SetString(raw)
-		if !ok || !rat.IsInt() || !rat.Num().IsInt64() {
-			return 0, false
-		}
-		return boundedInt(rat.Num().Int64())
+		return parseJSONInteger(value.String())
 	default:
 		return 0, false
 	}
 }
 
-// safeNumberMagnitude rejects inputs that would make big.Rat allocate huge
-// powers of ten before the int-range check can run.
-func safeNumberMagnitude(raw string) bool {
-	if len(raw) > 1024 {
-		return false
+// parseJSONInteger evaluates a JSON number exactly without constructing large
+// powers of ten. Decimal/exponent forms are accepted only when the exact value
+// is an integer that fits the platform int.
+func parseJSONInteger(raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 4096 {
+		return 0, false
 	}
+
+	negative := false
+	if raw[0] == '-' {
+		negative = true
+		raw = raw[1:]
+	}
+	if raw == "" {
+		return 0, false
+	}
+
+	exponent := int64(0)
 	if index := strings.IndexAny(raw, "eE"); index >= 0 {
-		exponent, err := strconv.Atoi(raw[index+1:])
-		if err != nil || exponent > 1000 || exponent < -1000 {
-			return false
+		parsed, err := strconv.ParseInt(raw[index+1:], 10, 64)
+		if err != nil {
+			return 0, false
 		}
+		exponent = parsed
+		raw = raw[:index]
 	}
-	return true
+
+	fractionLen := int64(0)
+	if index := strings.IndexByte(raw, '.'); index >= 0 {
+		fractionLen = int64(len(raw) - index - 1)
+		raw = raw[:index] + raw[index+1:]
+	}
+
+	digits := strings.TrimLeft(raw, "0")
+	if digits == "" {
+		return 0, true
+	}
+	for len(digits) > 0 && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+		exponent++
+	}
+	exponent -= fractionLen
+	if exponent < 0 {
+		return 0, false
+	}
+	// 19 decimal digits is enough for uint64; the platform int bound is
+	// checked after parsing.
+	if int64(len(digits))+exponent > 19 {
+		return 0, false
+	}
+	numeric := digits + strings.Repeat("0", int(exponent))
+	value, err := strconv.ParseUint(numeric, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	maxInt := uint64(^uint(0) >> 1)
+	if negative {
+		if value > maxInt+1 {
+			return 0, false
+		}
+		if value == maxInt+1 {
+			return -int(maxInt) - 1, true
+		}
+		return -int(value), true
+	}
+	if value > maxInt {
+		return 0, false
+	}
+	return int(value), true
 }
 
 func boundedInt(value int64) (int, bool) {
