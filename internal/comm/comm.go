@@ -27,5 +27,6 @@ type PendingReply struct {
 	Text              string `json:"text"`
 	ReplyTo           *int64 `json:"reply_to,omitempty"`
 	OpenCodeSessionID string `json:"opencode_session_id,omitempty"`
+	InputID           string `json:"input_id,omitempty"`
 	SourceMessageID   string `json:"source_message_id,omitempty"`
 }

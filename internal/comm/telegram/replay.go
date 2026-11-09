@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -183,6 +184,12 @@ func (a *Adapter) deliverPendingReply(item commtg.InboxItem) error {
 	var reply comm.PendingReply
 	if err := json.Unmarshal([]byte(item.PendingReply), &reply); err != nil {
 		return err
+	}
+	if reply.InputID != "" {
+		if err := a.store.CommTG().LinkInbound(item.EnvelopeID, reply.OpenCodeSessionID, reply.InputID); err != nil &&
+			!errors.Is(err, commtg.ErrInboundNotFound) {
+			return err
+		}
 	}
 	if strings.TrimSpace(reply.Text) == "" {
 		return nil

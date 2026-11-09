@@ -145,14 +145,23 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		if err := r.linkInbound(st, env, result); err != nil {
 			return err
 		}
+		_ = st.CommTG().ClearInboundReply(env.ID)
 		return turnErr
 	}
+	sent := false
 	if result != nil && strings.TrimSpace(result.ResponseText) != "" {
 		if err := r.sendReply(ctx, st, agent, env, result, result.ResponseText); err != nil {
 			return err
 		}
+		sent = true
 	}
-	return r.linkInbound(st, env, result)
+	if err := r.linkInbound(st, env, result); err != nil {
+		return err
+	}
+	if sent {
+		_ = st.CommTG().ClearInboundReply(env.ID)
+	}
+	return nil
 }
 
 func (r *Router) linkInbound(st *store.Store, env envelope.Envelope, result *opencode.TurnResult) error {
@@ -192,24 +201,25 @@ func (r *Router) sendReply(ctx context.Context, st *store.Store, agent registry.
 		Text:              text,
 		ReplyTo:           routerMetaInt64(out.Meta["reply_to_message_id"]),
 		OpenCodeSessionID: routerMetaString(out.Meta["opencode_session_id"]),
+		InputID:           routerResultInputID(result),
 		SourceMessageID:   routerMetaString(out.Meta["source_message_id"]),
 	}
 	raw, err := json.Marshal(pending)
 	if err != nil {
 		return err
 	}
-	stagingErr := st.CommTG().SetInboundReply(in.ID, string(raw))
-	if stagingErr != nil && !errors.Is(stagingErr, commtg.ErrInboundNotFound) {
-		// Try the outbound anyway; if it succeeds the reply is delivered.
-		stagingErr = nil
-	}
-	if err := r.outbound(ctx, agent, out); err != nil {
+	if err := st.CommTG().SetInboundReply(in.ID, string(raw)); err != nil &&
+		!errors.Is(err, commtg.ErrInboundNotFound) {
 		return err
 	}
-	if stagingErr == nil {
-		_ = st.CommTG().ClearInboundReply(in.ID)
+	return r.outbound(ctx, agent, out)
+}
+
+func routerResultInputID(result *opencode.TurnResult) string {
+	if result == nil {
+		return ""
 	}
-	return nil
+	return result.InputID
 }
 
 func routerMetaInt64(value any) *int64 {

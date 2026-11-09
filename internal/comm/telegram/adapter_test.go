@@ -416,6 +416,41 @@ func TestReplayPendingReplyEnqueuesOutbox(t *testing.T) {
 	}
 }
 
+func TestReplayPendingReplyLinksAndEnqueues(t *testing.T) {
+	adapter, _, st, _ := newTestAdapter(t, "42")
+	reply := comm.PendingReply{
+		ID: "comm_out_link", Text: "recovered", OpenCodeSessionID: "ses_x",
+		InputID: "msg_in", SourceMessageID: "msg_out",
+	}
+	rawReply, _ := json.Marshal(reply)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 207, ChatID: 10, EnvelopeID: "env_link", PendingEnvelope: "{}",
+		PendingReply: string(rawReply), ReceivedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	adapter.sink = func(context.Context, envelope.Envelope) error {
+		t.Fatal("sink should not run when a pending reply exists")
+		return nil
+	}
+	adapter.replayPending(context.Background())
+
+	item, _, err := st.CommTG().GetInboxByEnvelope("env_link")
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.OpenCodeMessageID != "msg_in" || item.OpenCodeSessionID != "ses_x" {
+		t.Errorf("inbox = %+v, want linked input", item)
+	}
+	if item.ProcessedAt == nil || item.PendingReply != "" {
+		t.Errorf("inbox = %+v, want processed with cleared reply", item)
+	}
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 || outbox[0].Text != "recovered" {
+		t.Errorf("outbox = %+v, %v; want recovered reply", outbox, err)
+	}
+}
+
 func TestReplaySkipsInFlightAdmission(t *testing.T) {
 	adapter, _, st, _ := newTestAdapter(t, "42")
 	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
