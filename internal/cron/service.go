@@ -92,6 +92,9 @@ type Service struct {
 	running  map[string]bool
 	sem      chan struct{}
 	wg       sync.WaitGroup
+
+	routeMu      sync.Mutex
+	memoryRoutes []orch.CronRoute
 }
 
 // Start starts the cron service. It performs one store refresh before returning.
@@ -415,11 +418,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		}
 		s.logJob(st, job, "error", fmt.Sprintf("failed after %s: %v", s.now().Sub(started).Round(time.Millisecond), err))
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, false); routeErr != nil {
-			if persistErr := s.persistRoute(st, agent, job, routeErr); persistErr != nil {
-				s.logJob(st, job, "error", "persist route: "+persistErr.Error())
-				s.requeueAfterPersistFailure(st, job)
-				return
-			}
+			s.persistRoute(st, agent, job, routeErr)
 		}
 		_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 		return
@@ -428,11 +427,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	s.logJob(st, job, "info", fmt.Sprintf("completed in %s", s.now().Sub(started).Round(time.Millisecond)))
 	if text != "" {
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, true); routeErr != nil {
-			if persistErr := s.persistRoute(st, agent, job, routeErr); persistErr != nil {
-				s.logJob(st, job, "error", "persist route: "+persistErr.Error())
-				s.requeueAfterPersistFailure(st, job)
-				return
-			}
+			s.persistRoute(st, agent, job, routeErr)
 		}
 	}
 	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
@@ -500,11 +495,11 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 }
 
 // persistRoute stores a delivery intent when the outbox enqueue failed.
-func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) error {
+func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) {
 	var delivery *comm.DeliveryError
 	if !errors.As(routeErr, &delivery) {
 		s.logJob(st, job, "error", "route failed: "+routeErr.Error())
-		return nil
+		return
 	}
 	route := orch.CronRoute{
 		ID:                delivery.EnvelopeID,
@@ -522,27 +517,36 @@ func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.C
 	for attempt := 0; attempt < 3; attempt++ {
 		if lastErr = st.Orch().AddCronRoute(route); lastErr == nil {
 			s.logJob(st, job, "warn", "queued undelivered output for retry: "+routeErr.Error())
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err := writeRouteFallback(agent.Workspace, route); err != nil {
-		return fmt.Errorf("add route: %v; fallback file: %w", lastErr, err)
-	}
-	s.logJob(st, job, "warn", "queued undelivered output in fallback file: "+routeErr.Error())
-	return nil
-}
-
-// requeueAfterPersistFailure retries moving the job's next run so a failed
-// route insert is not treated as a completed run.
-func (s *Service) requeueAfterPersistFailure(st *store.Store, job orch.CronJob) {
-	for attempt := 0; attempt < 3; attempt++ {
-		if err := st.Orch().RequeueCronJob(job.ID, s.now().Add(30*time.Second)); err == nil {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	log.Printf("cron: CRITICAL: could not requeue %s after route persistence failure; output may be lost", job.Title)
+	if err := writeRouteFallback(agent.Workspace, route); err == nil {
+		s.logJob(st, job, "warn", "queued undelivered output in fallback file: "+routeErr.Error())
+		return
+	}
+	// Last resort: keep the payload in memory rather than re-running the job.
+	s.addMemoryRoute(route)
+	s.logJob(st, job, "error", "queued undelivered output in memory (DB and file unavailable): "+routeErr.Error())
+}
+
+func (s *Service) addMemoryRoute(route orch.CronRoute) {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	for _, existing := range s.memoryRoutes {
+		if existing.ID == route.ID {
+			return
+		}
+	}
+	s.memoryRoutes = append(s.memoryRoutes, route)
+}
+
+func (s *Service) takeMemoryRoutes() []orch.CronRoute {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	routes := s.memoryRoutes
+	s.memoryRoutes = nil
+	return routes
 }
 
 func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
@@ -587,6 +591,21 @@ func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
 			continue
 		}
 		_ = removeRouteFallback(pair.agent.Workspace, route.ID)
+	}
+
+	for _, route := range s.takeMemoryRoutes() {
+		_, enqueueErr := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
+			ID:                route.ID,
+			EnvelopeID:        route.ID,
+			ChatID:            route.ChatID,
+			Text:              route.Text,
+			OpenCodeSessionID: route.OpenCodeSessionID,
+			SourceMessageID:   route.SourceMessageID,
+			CreatedAt:         s.now(),
+		})
+		if enqueueErr != nil {
+			s.addMemoryRoute(route)
+		}
 	}
 }
 

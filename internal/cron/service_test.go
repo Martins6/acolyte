@@ -230,6 +230,20 @@ func TestRouteFallbackFile(t *testing.T) {
 	}
 }
 
+func TestMemoryRouteFallback(t *testing.T) {
+	service := &Service{}
+	route := orch.CronRoute{ID: "env_mem", AgentTarget: "valet", ChatID: 10, Text: "output"}
+	service.addMemoryRoute(route)
+	service.addMemoryRoute(route)
+	routes := service.takeMemoryRoutes()
+	if len(routes) != 1 || routes[0].ID != route.ID {
+		t.Fatalf("memory routes = %+v, want one deduplicated route", routes)
+	}
+	if remaining := service.takeMemoryRoutes(); len(remaining) != 0 {
+		t.Errorf("memory routes after take = %+v, want empty", remaining)
+	}
+}
+
 func TestShellJobUsesConfiguredShell(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	dir := t.TempDir()

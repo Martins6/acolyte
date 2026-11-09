@@ -215,16 +215,6 @@ func (s *Store) ClaimCronJob(id string, expectedNext *time.Time, next time.Time)
 	return affected > 0, nil
 }
 
-// RequeueCronJob moves the next run so a job whose output could not be
-// persisted is retried instead of being silently dropped.
-func (s *Store) RequeueCronJob(id string, next time.Time) error {
-	_, err := s.db.Exec(`UPDATE orch_cron_jobs SET next_run_at = ? WHERE id = ?`, next, id)
-	if err != nil {
-		return fmt.Errorf("orch: requeue cron job %q: %w", id, err)
-	}
-	return nil
-}
-
 // MarkCronJobRun records a completed run. Missing jobs are ignored.
 func (s *Store) MarkCronJobRun(id string, at time.Time) error {
 	if at.IsZero() {
