@@ -11,14 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/martins6/acolyte/internal/config"
+	"github.com/martins6/acolyte/internal/comm"
 	cronsvc "github.com/martins6/acolyte/internal/cron"
-	"github.com/martins6/acolyte/internal/database"
-	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/routine"
 	"github.com/martins6/acolyte/internal/store"
 	"github.com/martins6/acolyte/internal/store/orch"
+	"github.com/martins6/acolyte/internal/storepool"
 	cronlib "github.com/robfig/cron/v3"
 	"github.com/spf13/cobra"
 )
@@ -495,15 +494,9 @@ func runCronRoutineList(w io.Writer) error {
 }
 
 func runCronTick(ctx context.Context, w io.Writer) error {
-	client, err := opencode.Ensure(ctx)
+	client, err := openCodeEnsure(ctx)
 	if err != nil {
 		return fmt.Errorf("opencode service unavailable: %w", err)
-	}
-	if _, err := config.Load(""); err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	if err := database.Init(legacyWorkspace()); err != nil {
-		return fmt.Errorf("initialize legacy notifier database: %w", err)
 	}
 	reg, err := registry.OpenDefault()
 	if err != nil {
@@ -511,11 +504,14 @@ func runCronTick(ctx context.Context, w io.Writer) error {
 	}
 	defer reg.Close()
 
+	pool := storepool.New()
+	defer pool.CloseAll()
 	service, err := cronsvc.Start(ctx, cronsvc.Options{
 		Registry:        reg,
 		Routines:        routine.Default(),
-		Sink:            cronsvc.LegacySink{UserIDFunc: config.GetAllowedUserChatID, Turn: client},
+		Sink:            comm.OutboxSink{Stores: pool, Turn: client},
 		OpenCode:        client,
+		Stores:          pool,
 		Interval:        time.Hour,
 		RefreshInterval: time.Hour,
 	})

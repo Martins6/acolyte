@@ -3,11 +3,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/martins6/acolyte/internal/config"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
@@ -65,16 +62,4 @@ func verifySessionMapping(st *store.Store, sessionID string) error {
 		return fmt.Errorf("session %q is not mapped to this agent; omit --session-id or use a session created by this agent", sessionID)
 	}
 	return nil
-}
-
-// legacyWorkspace returns the workspace used by the transitional notifier.
-func legacyWorkspace() string {
-	if cfg := config.Get(); cfg != nil && cfg.Workspace.Path != "" {
-		return cfg.Workspace.Path
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".acolyte")
-	}
-	return filepath.Join(home, ".acolyte")
 }
