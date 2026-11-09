@@ -62,6 +62,105 @@ func TestMigrateFromV1(t *testing.T) {
 	}
 }
 
+func TestMigrateFromV2AddsPrivate(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)`, module, 2); err != nil {
+		t.Fatalf("record v2: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate(v2) error: %v", err)
+	}
+	var versionValue int
+	if err := db.QueryRow(`SELECT version FROM schema_meta WHERE module = ?`, module).Scan(&versionValue); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if versionValue != version {
+		t.Errorf("version = %d, want %d", versionValue, version)
+	}
+	rows, err := db.Query(`PRAGMA table_info(comm_tg_chats)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info: %v", err)
+		}
+		if name == "private" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("comm_tg_chats is missing the private column after v2 migration")
+	}
+}
+
+func TestMigrateFromV2GroupRowFailsClosed(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)`, module, 2); err != nil {
+		t.Fatalf("record v2: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO comm_tg_chats (chat_id, username, allowed, first_seen_at, last_seen_at)
+		VALUES (?, ?, ?, ?, ?)`, int64(-100123), "group", 1, now, now); err != nil {
+		t.Fatalf("insert v2 chat: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate(v2) error: %v", err)
+	}
+	store := New(db)
+	if _, ok, err := store.LatestAllowedChat(); err != nil || ok {
+		t.Errorf("LatestAllowedChat() = ok:%v err:%v, want none for an unclassified v2 chat", ok, err)
+	}
+	chat, ok, err := store.GetChat(-100123)
+	if err != nil || !ok || chat.Private {
+		t.Errorf("chat = %+v, %v, %v; want non-private fail-closed row", chat, ok, err)
+	}
+}
+
+func TestMigrateV3Resumable(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 0`); err != nil {
+		t.Fatalf("simulate partial v3: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)`, module, 2); err != nil {
+		t.Fatalf("record v2: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate(partial v3) error: %v", err)
+	}
+	var versionValue int
+	if err := db.QueryRow(`SELECT version FROM schema_meta WHERE module = ?`, module).Scan(&versionValue); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if versionValue != version {
+		t.Errorf("version = %d, want %d", versionValue, version)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	store := migrateTestDB(t)
 	if err := store.SetSetting("telegram.allowed_users", `["@alice"]`); err != nil {
@@ -83,10 +182,10 @@ func TestSettings(t *testing.T) {
 func TestChats(t *testing.T) {
 	store := migrateTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
-	if err := store.UpsertChat(10, "alice", true, now); err != nil {
+	if err := store.UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
-	if err := store.UpsertChat(20, "bob", false, now.Add(time.Minute)); err != nil {
+	if err := store.UpsertChat(20, "bob", false, true, now.Add(time.Minute)); err != nil {
 		t.Fatalf("UpsertChat(denied) error: %v", err)
 	}
 	chat, ok, err := store.GetChat(10)
@@ -97,12 +196,19 @@ func TestChats(t *testing.T) {
 	if err != nil || !ok || latest.ChatID != 10 {
 		t.Fatalf("LatestAllowedChat() = %+v, %v, %v", latest, ok, err)
 	}
-	if err := store.UpsertChat(10, "alice2", true, now.Add(2*time.Minute)); err != nil {
+	if err := store.UpsertChat(10, "alice2", true, true, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("UpsertChat(update) error: %v", err)
+	}
+	if err := store.UpsertChat(30, "group", true, false, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("UpsertChat(group) error: %v", err)
 	}
 	latest, _, _ = store.LatestAllowedChat()
 	if latest.ChatID != 10 || latest.Username != "alice2" {
-		t.Errorf("latest = %+v, want chat 10 with alice2", latest)
+		t.Errorf("latest = %+v, want private chat 10 even though the group is newer", latest)
+	}
+	group, ok, err := store.GetChat(30)
+	if err != nil || !ok || group.Private {
+		t.Errorf("group = %+v, %v, %v; want non-private chat", group, ok, err)
 	}
 	if _, ok, err := store.GetChat(999); err != nil || ok {
 		t.Errorf("GetChat(missing) = ok:%v err:%v", ok, err)

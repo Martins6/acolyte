@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "comm_tg"
-	version = 2
+	version = 3
 )
 
 // Migrate creates or upgrades the Telegram communication schema.
@@ -35,8 +35,17 @@ func Migrate(db *sql.DB) error {
 
 	// schemaV2 is idempotent and includes the v1 settings table, so it
 	// upgrades both fresh databases and v1 installations in one step.
-	if _, err := db.Exec(schemaV2); err != nil {
-		return fmt.Errorf("comm_tg: migrate to version %d: %w", version, err)
+	if current < 2 {
+		if _, err := db.Exec(schemaV2); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 2: %w", err)
+		}
+		current = 2
+	}
+	if current < 3 {
+		if err := migrateV3(db); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 3: %w", err)
+		}
+		current = 3
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -119,3 +128,36 @@ CREATE TABLE IF NOT EXISTS comm_tg_media (
   saved_at   DATETIME NOT NULL
 );
 `
+
+// schemaV3 adds the private-chat flag. Existing rows default to 0 (fail
+// closed): pre-v3 data cannot distinguish private chats from groups, so a user
+// must message the bot again before notifications become eligible.
+func migrateV3(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(comm_tg_chats)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "private" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if found {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE comm_tg_chats ADD COLUMN private INTEGER NOT NULL DEFAULT 0`)
+	return err
+}

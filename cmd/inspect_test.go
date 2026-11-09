@@ -24,7 +24,7 @@ func TestInspectMergesCommunicationAndOpenCode(t *testing.T) {
 	if _, err := st.Orch().UpsertSession(envelope.TelegramThread(10), "ses_x", now); err != nil {
 		t.Fatalf("UpsertSession() error: %v", err)
 	}
-	if err := st.CommTG().UpsertChat(10, "alice", true, now); err != nil {
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
 	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{

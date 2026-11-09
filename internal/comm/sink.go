@@ -45,7 +45,7 @@ func (s OutboxSink) NotifyUser(_ context.Context, agent registry.Agent, text str
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("comm: agent %q has no Telegram chat; message the bot first", agent.Name)
+		return fmt.Errorf("comm: agent %q has no private Telegram chat; message the bot first", agent.Name)
 	}
 	env := envelope.New(envelope.DirectionOut, "telegram", envelope.TelegramThread(chat.ChatID),
 		envelope.Party{Kind: envelope.PartyAgent, ID: agent.Name, Name: agent.Name},

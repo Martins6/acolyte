@@ -50,7 +50,7 @@ func TestOutboxSinkNotifyUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() error: %v", err)
 	}
-	if err := st.CommTG().UpsertChat(10, "alice", true, time.Now().UTC()); err != nil {
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, time.Now().UTC()); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
 	release()
@@ -104,10 +104,10 @@ func TestOutboxSinkInboxUsesSessionThread(t *testing.T) {
 		t.Fatalf("Acquire() error: %v", err)
 	}
 	now := time.Now().UTC()
-	if err := st.CommTG().UpsertChat(10, "old", true, now); err != nil {
+	if err := st.CommTG().UpsertChat(10, "old", true, true, now); err != nil {
 		t.Fatalf("UpsertChat(old): %v", err)
 	}
-	if err := st.CommTG().UpsertChat(20, "new", true, now.Add(time.Minute)); err != nil {
+	if err := st.CommTG().UpsertChat(20, "new", true, true, now.Add(time.Minute)); err != nil {
 		t.Fatalf("UpsertChat(new): %v", err)
 	}
 	if _, err := st.Orch().UpsertSession(envelope.TelegramThread(10), "ses_synth", now); err != nil {

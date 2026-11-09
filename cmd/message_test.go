@@ -61,7 +61,7 @@ func seedChat(t *testing.T, workspace string) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
-	if err := st.CommTG().UpsertChat(10, "alice", true, time.Now().UTC()); err != nil {
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, time.Now().UTC()); err != nil {
 		t.Fatalf("upsert chat: %v", err)
 	}
 }

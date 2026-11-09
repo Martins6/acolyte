@@ -25,7 +25,8 @@ func (a *Adapter) handleUpdate(ctx context.Context, _ *bot.Bot, update *models.U
 	}
 
 	now := a.now()
-	if err := a.store.CommTG().UpsertChat(msg.Chat.ID, msg.From.Username, true, now); err != nil {
+	privateChat := msg.Chat.Type == models.ChatTypePrivate
+	if err := a.store.CommTG().UpsertChat(msg.Chat.ID, msg.From.Username, true, privateChat, now); err != nil {
 		log.Printf("telegram: upsert chat for %s: %v", a.agent.Name, err)
 	}
 
