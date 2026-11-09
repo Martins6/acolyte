@@ -24,13 +24,18 @@
 Named, headless behaviors registered by modules (`dream`, `heartbeat`) with an argument schema. See
 the [routines catalog](../README.md#routines) and `acolyte cron routine-list`.
 
-In Phase 2 the catalog and schemas are live, but the actual `dream`/`heartbeat` behavior is deferred to
-Phase 4. Firing one writes a `pending Phase 4` audit row and advances its schedule.
+- **`dream`** — reviews recent sessions and conservatively writes persona/skill memory. Direct write by
+  default; `--dry-run` makes the prompt proposal-only and audits any changed paths in `mem_dreams`.
+- **`heartbeat`** — prompt-guided: reads `HEARTBEAT.md` + the latest non-cron session and instructs the
+  agent to use `acolyte inbox` only when something is genuinely interesting; otherwise `NO_ACTION`.
+
+Routine output returns empty so cron does not double-notify; heartbeat delivery is the agent’s
+explicit inbox call.
 
 ## CLI
 ```bash
 acolyte cron --title <t> --datetime <cron> (--prompt <text> | --shell <path> | --routine <name>) \
-  [--routine-args '<json>'] [--agent-name <n> | --workspace-folder <p>] [--session-id <id>] \
+  [--routine-args '<json>'] [--dry-run] [--agent-name <n> | --workspace-folder <p>] [--session-id <id>] \
   [--timezone <IANA>] [--on-success inbox|notify-user|log] [--on-failure inbox|notify-user|log]
 acolyte cron list              # markdown table: title | datetime | agent | owner | kind | prompt | shell | session
 acolyte cron view <title>      # full JSON of one job (target-aware when titles collide)

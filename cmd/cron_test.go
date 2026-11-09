@@ -171,6 +171,38 @@ func TestRunCronCreatePromptAndRoutine(t *testing.T) {
 	}
 }
 
+func TestRunCronCreateDryRun(t *testing.T) {
+	ws := setupCronCLI(t)
+	fixedCronNow(t)
+	if err := runCronCreate(&bytes.Buffer{}, cronCreateOptions{
+		Title: "dream-dry", Datetime: "@every 72h", Routine: "dream",
+		RoutineArgs: `{"days":3}`, AgentName: "valet", DryRun: true,
+	}); err != nil {
+		t.Fatalf("create dry-run routine: %v", err)
+	}
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("dream-dry")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	var meta cronJobMeta
+	if err := json.Unmarshal([]byte(job.Meta), &meta); err != nil {
+		t.Fatalf("meta: %v", err)
+	}
+	if !meta.DryRun {
+		t.Errorf("meta = %+v, want dry_run true", meta)
+	}
+	if err := runCronCreate(&bytes.Buffer{}, cronCreateOptions{
+		Title: "prompt-dry", Datetime: "@every 1h", Prompt: "hello", AgentName: "valet", DryRun: true,
+	}); err == nil {
+		t.Fatal("dry-run prompt error = nil, want error")
+	}
+}
+
 func TestRunCronCreateValidation(t *testing.T) {
 	setupCronCLI(t)
 	fixedCronNow(t)
