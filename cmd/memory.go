@@ -96,9 +96,15 @@ func runMemoryExport(ctx context.Context, w io.Writer, opts memoryExportOptions)
 	if err != nil {
 		return err
 	}
-	st, err := store.OpenReadOnly(agent.Workspace)
+	st, err := store.Open(agent.Workspace)
 	if err != nil {
-		return fmt.Errorf("open agent store: %w", err)
+		// Fall back to a read-only open so an export still works on a
+		// read-only filesystem. store.Open is preferred because it applies
+		// migrations, which guarantees the newer tables exist.
+		st, err = store.OpenReadOnly(agent.Workspace)
+		if err != nil {
+			return fmt.Errorf("open agent store: %w", err)
+		}
 	}
 	defer st.Close()
 
