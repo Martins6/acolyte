@@ -29,15 +29,15 @@ the [routines catalog](../README.md#routines) and `acolyte cron routine-list`.
   Both phases run under a session-scoped permission ruleset: analysis is read-only; the writer may
   edit only `.acolyte/*.md` (not `HEARTBEAT.md`) and `.agents/skills/<id>/SKILL.md`.
 - **`heartbeat`** — prompt-guided: reads `HEARTBEAT.md` + the latest non-cron session and instructs the
-  agent to use `acolyte inbox` only when something is genuinely interesting; otherwise `NO_ACTION`.
-  Its turn is read-only apart from the `acolyte inbox` shell command.
+  agent to reply `NOTIFY: <message>` only when something is genuinely interesting; otherwise
+  `NO_ACTION`. Its turn is fully read-only; the routine delivers the notification itself.
 
 Routine turns apply their rules with `PATCH /api/session/{id}` before the turn and restore the
 previous session rules afterwards. OpenCode evaluates session rules after the agent's rules
 (last match wins), so this is an enforced tool boundary rather than prompt guidance.
 
-Routine output returns empty so cron does not double-notify; heartbeat delivery is the agent’s
-explicit inbox call.
+Routine output returns empty so cron does not double-notify; heartbeat delivery is performed by the
+routine through the communication sink.
 
 ## CLI
 ```bash

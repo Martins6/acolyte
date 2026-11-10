@@ -105,7 +105,7 @@ func TestDreamWriterPermissionsAllowOnlyMemoryPaths(t *testing.T) {
 	}
 }
 
-func TestHeartbeatPermissionsAllowOnlyInboxCommand(t *testing.T) {
+func TestHeartbeatPermissionsAreReadOnly(t *testing.T) {
 	ws := t.TempDir()
 	base := filepath.ToSlash(filepath.Clean(ws))
 	rules := heartbeatPermissions(ws)
@@ -115,11 +115,9 @@ func TestHeartbeatPermissionsAllowOnlyInboxCommand(t *testing.T) {
 		resource string
 		want     string
 	}{
-		{"shell", `acolyte inbox --agent-name valet --session-id ses_user "hi"`, opencode.PermissionAllow},
-		{"shell", `/usr/local/bin/acolyte inbox --agent-name valet "hi"`, opencode.PermissionAllow},
+		{"shell", `acolyte inbox --agent-name valet --session-id ses_user "hi"`, opencode.PermissionDeny},
+		{"shell", `/usr/local/bin/acolyte inbox --agent-name valet "hi"`, opencode.PermissionDeny},
 		{"shell", "rm -rf " + base, opencode.PermissionDeny},
-		{"shell", "acolyte inbox", opencode.PermissionAllow},
-		{"shell", "acolyte inboxx", opencode.PermissionDeny},
 		{"read", base + "/.acolyte/HEARTBEAT.md", opencode.PermissionAllow},
 		{"edit", base + "/.acolyte/HEARTBEAT.md", opencode.PermissionDeny},
 		{"edit", base + "/main.go", opencode.PermissionDeny},
@@ -128,11 +126,5 @@ func TestHeartbeatPermissionsAllowOnlyInboxCommand(t *testing.T) {
 		if got := permissionEffect(rules, tt.action, tt.resource); got != tt.want {
 			t.Errorf("%s %s = %s, want %s", tt.action, tt.resource, got, tt.want)
 		}
-	}
-
-	// OpenCode scans compound shell commands into separate resources, so a
-	// chained write does not inherit the acolyte inbox allow.
-	if got := permissionEffect(rules, "shell", "rm -rf "+base); got != opencode.PermissionDeny {
-		t.Errorf("chained write = %s, want deny", got)
 	}
 }
