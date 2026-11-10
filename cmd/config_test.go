@@ -299,3 +299,56 @@ func TestRunConfigSetUnknownKey(t *testing.T) {
 		t.Fatalf("error = %v, want unsupported-key error", err)
 	}
 }
+
+// TestRunConfigSetDryRunDoesNotTouchStore pins the no-write guarantee: a dry
+// run plans against a read-only store and must never create or migrate the
+// database.
+func TestRunConfigSetDryRunDoesNotTouchStore(t *testing.T) {
+	ws := setupCronCLI(t)
+	dbPath := filepath.Join(ws, ".acolyte.sqlite.db")
+
+	removeStore := func() {
+		t.Helper()
+		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+			if err := os.Remove(dbPath + suffix); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("remove %s: %v", dbPath+suffix, err)
+			}
+		}
+	}
+
+	// No store at all: the dry run must fail without creating one.
+	removeStore()
+	var out bytes.Buffer
+	if err := runConfigSet(&out, "valet", "schedule.heartbeat_minutes", "30", true, false); err == nil {
+		t.Fatal("dry-run without a store error = nil, want error")
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created the database: %v", err)
+	}
+
+	// Control: a real set opens (creating/migrating) the store, which proves
+	// the dry-run assertion above is what makes the difference.
+	if err := runConfigSet(&out, "valet", "description", "hello", false, false); err != nil {
+		t.Fatalf("real set error: %v", err)
+	}
+	info, err := os.Stat(dbPath)
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("real set did not create the store: %v", err)
+	}
+
+	// An old (empty) store must not be migrated by a dry run either.
+	removeStore()
+	if err := os.WriteFile(dbPath, nil, 0600); err != nil {
+		t.Fatalf("write empty store: %v", err)
+	}
+	if err := runConfigSet(&out, "valet", "schedule.heartbeat_minutes", "30", true, false); err == nil {
+		t.Fatal("dry-run on an old store error = nil, want error")
+	}
+	raw, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	if len(raw) != 0 {
+		t.Errorf("dry-run migrated the old store (%d bytes)", len(raw))
+	}
+}

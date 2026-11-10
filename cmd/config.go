@@ -159,7 +159,15 @@ func runConfigSet(w io.Writer, ref, key, value string, dryRun, jsonOut bool) err
 	}
 	defer held.Release()
 
-	st, err := store.Open(target.Workspace)
+	// A dry run must not create or migrate the database: planning only
+	// reads, so open the store read-only and let a missing/old store fail
+	// loudly instead of being written.
+	var st *store.Store
+	if dryRun {
+		st, err = store.OpenReadOnly(target.Workspace)
+	} else {
+		st, err = store.Open(target.Workspace)
+	}
 	if err != nil {
 		return err
 	}

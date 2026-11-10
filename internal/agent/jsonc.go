@@ -86,16 +86,31 @@ func maskJSONC(raw string) (string, error) {
 }
 
 // parseJSONC decodes JSONC (JSON with // and /* */ comments and trailing
-// commas) into v.
+// commas) into v. The top-level value must be a JSON object.
 func parseJSONC(raw string, v any) error {
 	masked, err := maskJSONC(raw)
 	if err != nil {
 		return fmt.Errorf("invalid JSONC: %w", err)
 	}
-	if err := json.Unmarshal([]byte(masked), v); err != nil {
+	if err := decodeJSONObject(masked, v); err != nil {
 		return fmt.Errorf("invalid JSONC: %w", err)
 	}
 	return nil
+}
+
+// decodeJSONObject decodes already-masked JSON into v and requires the
+// top-level value to be an object: json.Unmarshal into a struct accepts
+// `null` silently (leaving every field empty), which would let `edit`
+// replace the config with a value OpenCode cannot use.
+func decodeJSONObject(masked string, v any) error {
+	var value any
+	if err := json.Unmarshal([]byte(masked), &value); err != nil {
+		return err
+	}
+	if _, ok := value.(map[string]any); !ok {
+		return fmt.Errorf("top-level value must be an object")
+	}
+	return json.Unmarshal([]byte(masked), v)
 }
 
 // skipJSONCString returns the index just past the string literal that starts
@@ -170,21 +185,36 @@ func jsoncDepth(masked string, pos int) int {
 
 // duplicateTopLevelKey returns the first key that appears more than once at
 // depth 1 of a masked document, or "" when every top-level key is unique.
-// JSON decoding silently keeps the last duplicate, so an ambiguous document
-// must be rejected before it is read or edited.
+// Keys are compared by their decoded value, so a unicode-escaped spelling of
+// "model" and the plain one count as the same key. JSON decoding silently
+// keeps the last duplicate, so an ambiguous document must be rejected before
+// it is read or edited.
 func duplicateTopLevelKey(masked string) string {
 	seen := map[string]int{}
 	for _, loc := range topLevelKeyPattern.FindAllStringSubmatchIndex(masked, -1) {
 		if jsoncDepth(masked, loc[0]) != 1 {
 			continue
 		}
-		key := masked[loc[2]:loc[3]]
+		key, err := unquoteJSONKey(masked[loc[2]:loc[3]])
+		if err != nil {
+			continue // undecodable: the document decode rejects it later
+		}
 		seen[key]++
 		if seen[key] > 1 {
 			return key
 		}
 	}
 	return ""
+}
+
+// unquoteJSONKey decodes a quoted JSON string token (its quotes excluded)
+// so escaped spellings compare equal to the plain one.
+func unquoteJSONKey(content string) (string, error) {
+	var key string
+	if err := json.Unmarshal([]byte(`"`+content+`"`), &key); err != nil {
+		return "", err
+	}
+	return key, nil
 }
 
 // trimJSONCIndent detects the indentation used by the first indented line of

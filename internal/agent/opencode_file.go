@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // opencodeConfigName is the OpenCode project config every agent workspace
@@ -69,9 +70,10 @@ func writeOpencodeConfig(workspace, content string) error {
 // restoreOpencodeConfig recreates <workspace>/opencode.jsonc with the given
 // content after a failed edit. Unlike writeOpencodeConfig it tolerates the
 // editor having deleted the file or replaced it: symlinks and other
-// non-directory entries are removed (the mode of a regular file is kept),
-// directories are refused, and the file is recreated with a temp file +
-// fsync + rename. Mode 0644 is the fallback when no regular file existed.
+// non-directory entries are removed (the mode of a regular file is kept), an
+// unexpected directory is preserved under a unique sibling name, and the
+// file is recreated with a temp file + fsync + rename. Mode 0644 is the
+// fallback when no regular file existed.
 func restoreOpencodeConfig(workspace, content string) error {
 	path := filepath.Join(workspace, opencodeConfigName)
 	mode := os.FileMode(0644)
@@ -79,7 +81,10 @@ func restoreOpencodeConfig(workspace, content string) error {
 	switch {
 	case err == nil:
 		if info.IsDir() {
-			return fmt.Errorf("workspace: refusing to replace directory %s", opencodeConfigName)
+			if err := preserveConflictingDir(path); err != nil {
+				return err
+			}
+			break
 		}
 		if info.Mode().IsRegular() {
 			mode = info.Mode().Perm()
@@ -93,6 +98,18 @@ func restoreOpencodeConfig(workspace, content string) error {
 		return fmt.Errorf("workspace: stat %s: %w", opencodeConfigName, err)
 	}
 	return atomicWriteFile(path, content, mode)
+}
+
+// preserveConflictingDir moves an unexpected directory standing where the
+// config file belongs to a unique sibling path, so restoring the original
+// file never destroys what the editor put there. Any rename failure is
+// reported instead of deleting the directory.
+func preserveConflictingDir(path string) error {
+	conflict := fmt.Sprintf("%s.conflict-%d", path, time.Now().UnixNano())
+	if err := os.Rename(path, conflict); err != nil {
+		return fmt.Errorf("workspace: preserve conflicting directory %s: %w", filepath.Base(path), err)
+	}
+	return nil
 }
 
 // atomicWriteFile writes content to path through a temp file in the same
@@ -250,7 +267,7 @@ func parseEngineDoc(raw string) (opencodeEngineDoc, error) {
 		return opencodeEngineDoc{}, fmt.Errorf("duplicate top-level key %q (ambiguous document)", key)
 	}
 	var doc opencodeEngineDoc
-	if err := json.Unmarshal([]byte(masked), &doc); err != nil {
+	if err := decodeJSONObject(masked, &doc); err != nil {
 		return opencodeEngineDoc{}, err
 	}
 	return doc, nil
@@ -335,13 +352,19 @@ func setOpencodeString(raw, key, value string) (string, error) {
 }
 
 // countTopLevelKey counts depth-1 occurrences of a key in a masked document.
+// Occurrences are compared by decoded value, so a unicode-escaped spelling
+// of the key counts the same as the plain one.
 func countTopLevelKey(masked, key string) int {
-	pattern := regexp.MustCompile(`"` + regexp.QuoteMeta(key) + `"\s*:`)
 	count := 0
-	for _, loc := range pattern.FindAllStringIndex(masked, -1) {
-		if jsoncDepth(masked, loc[0]) == 1 {
-			count++
+	for _, loc := range topLevelKeyPattern.FindAllStringSubmatchIndex(masked, -1) {
+		if jsoncDepth(masked, loc[0]) != 1 {
+			continue
 		}
+		decoded, err := unquoteJSONKey(masked[loc[2]:loc[3]])
+		if err != nil || decoded != key {
+			continue
+		}
+		count++
 	}
 	return count
 }
