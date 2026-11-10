@@ -33,6 +33,51 @@ func SupportedSetKeys() []string {
 	}
 }
 
+// capabilityJob is the expected identity of a capability cron job. Cron
+// titles are not reserved, so a user job may hold the same title; only a job
+// matching owner + kind + routine is the capability.
+type capabilityJob struct {
+	title   string
+	owner   string
+	routine string
+}
+
+var (
+	dreamCapability     = capabilityJob{title: "dream", owner: "memory-learn", routine: "dream"}
+	heartbeatCapability = capabilityJob{title: "heartbeat", owner: "heartbeat", routine: "heartbeat"}
+)
+
+// jobState classifies what sits at a capability job's title.
+type jobState int
+
+const (
+	jobAbsent jobState = iota
+	jobMatches
+	jobConflicts
+)
+
+// fetchCapabilityJob looks up the capability job by title and classifies it.
+// Read paths treat a conflict as absent so `get` never misreports a user job;
+// mutation paths must call conflictError instead of deleting or rewriting it.
+func fetchCapabilityJob(orchStore *orch.Store, cap capabilityJob) (orch.CronJob, jobState, error) {
+	job, exists, err := existingJob(orchStore, cap.title)
+	if err != nil || !exists {
+		return orch.CronJob{}, jobAbsent, err
+	}
+	if job.Owner != cap.owner || job.Kind != "routine" || job.Routine != cap.routine {
+		return job, jobConflicts, nil
+	}
+	return job, jobMatches, nil
+}
+
+// conflictError names the title and the unexpected owner/kind/routine so the
+// user can see which job is in the way.
+func (c capabilityJob) conflictError(job orch.CronJob) error {
+	return fmt.Errorf(
+		"config: refusing to modify cron job %q: found owner=%q kind=%q routine=%q, want owner=%q kind=%q routine=%q (a user job with this title is not the capability job)",
+		c.title, job.Owner, job.Kind, job.Routine, c.owner, "routine", c.routine)
+}
+
 // LoadConfig assembles the effective runtime config of a registered agent:
 // identity from the registry, engine from opencode.jsonc, and memory,
 // communication, and schedule from the per-agent store (settings + the
@@ -74,18 +119,22 @@ func LoadConfig(st *store.Store, a registry.Agent) (Config, error) {
 	}
 	cfg.Communication.Telegram.AllowedUsers = allowedUsers
 
-	dream, dreamExists, err := existingJob(orchStore, "dream")
+	// Cron titles are not reserved: a user job may hold "dream" or
+	// "heartbeat". Only a job with the expected owner/kind/routine counts as
+	// the capability, so `get` never misreports a user job (conflicts are
+	// ignored here and rejected by the mutation paths below).
+	dream, dreamState, err := fetchCapabilityJob(orchStore, dreamCapability)
 	if err != nil {
 		return Config{}, err
 	}
-	if dreamExists {
+	if dreamState == jobMatches {
 		cfg.MemoryLearn = &MemoryConfig{
 			Mode: "simple-dreaming",
 			Args: map[string]any{"days": dreamDays(dream)},
 		}
 	}
 
-	heartbeat, heartbeatExists, err := existingJob(orchStore, "heartbeat")
+	heartbeat, heartbeatState, err := fetchCapabilityJob(orchStore, heartbeatCapability)
 	if err != nil {
 		return Config{}, err
 	}
@@ -96,14 +145,14 @@ func LoadConfig(st *store.Store, a registry.Agent) (Config, error) {
 	} else if ok {
 		timezone = strings.TrimSpace(raw)
 	}
-	if timezone == "" && heartbeatExists {
+	if timezone == "" && heartbeatState == jobMatches {
 		timezone = strings.TrimSpace(heartbeat.Timezone)
 	}
-	if timezone == "" && dreamExists {
+	if timezone == "" && dreamState == jobMatches {
 		timezone = strings.TrimSpace(dream.Timezone)
 	}
 	cfg.Schedule.Timezone = timezone
-	if heartbeatExists {
+	if heartbeatState == jobMatches {
 		cfg.Schedule.HeartbeatMinutes = heartbeatMinutes(heartbeat)
 	}
 
@@ -267,12 +316,16 @@ func planSet(st *store.Store, a registry.Agent, key, value string, current Confi
 		}
 		// A timezone change re-times the existing routine jobs and their
 		// next run, matching the parser/nextRun pattern used by `new`.
-		for _, title := range []string{"dream", "heartbeat"} {
-			job, exists, err := existingJob(orchStore, title)
+		// A user job holding a capability title is never rewritten.
+		for _, cap := range []capabilityJob{dreamCapability, heartbeatCapability} {
+			job, state, err := fetchCapabilityJob(orchStore, cap)
 			if err != nil {
 				return nil, err
 			}
-			if !exists || job.Timezone == timezone {
+			if state == jobConflicts {
+				return nil, cap.conflictError(job)
+			}
+			if state != jobMatches || job.Timezone == timezone {
 				continue
 			}
 			next, err := nextRun(job.Spec, timezone)
@@ -281,7 +334,7 @@ func planSet(st *store.Store, a registry.Agent, key, value string, current Confi
 			}
 			job.Timezone = timezone
 			job.NextRunAt = next
-			res.Jobs = append(res.Jobs, JobChange{Action: "upsert", Title: title, Job: job})
+			res.Jobs = append(res.Jobs, JobChange{Action: "upsert", Title: cap.title, Job: job})
 		}
 
 	case "schedule.heartbeat_minutes":
@@ -399,10 +452,14 @@ func planCommSetting(res *SetResult, get func(string) (string, bool, error), key
 }
 
 func planHeartbeat(res *SetResult, orchStore *orch.Store, agentName string, minutes int, timezone string) error {
-	heartbeat, exists, err := existingJob(orchStore, "heartbeat")
+	heartbeat, state, err := fetchCapabilityJob(orchStore, heartbeatCapability)
 	if err != nil {
 		return err
 	}
+	if state == jobConflicts {
+		return heartbeatCapability.conflictError(heartbeat)
+	}
+	exists := state == jobMatches
 	if minutes == 0 {
 		if exists {
 			res.Jobs = append(res.Jobs, JobChange{Action: "delete", Title: "heartbeat"})
@@ -434,10 +491,14 @@ func planHeartbeat(res *SetResult, orchStore *orch.Store, agentName string, minu
 }
 
 func planDream(res *SetResult, orchStore *orch.Store, agentName string, desired *MemoryConfig, timezone string) error {
-	dream, exists, err := existingJob(orchStore, "dream")
+	dream, state, err := fetchCapabilityJob(orchStore, dreamCapability)
 	if err != nil {
 		return err
 	}
+	if state == jobConflicts {
+		return dreamCapability.conflictError(dream)
+	}
+	exists := state == jobMatches
 	storedSetting, settingExists, err := orchStore.GetSetting("memory.learn")
 	if err != nil {
 		return err

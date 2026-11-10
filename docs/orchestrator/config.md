@@ -59,6 +59,10 @@ Guarantees:
   rejected instead of duplicated. Writes refuse a symlinked file and go temp-file + rename.
 - **Idempotent.** Re-setting the same value reports `no changes` and does not reset a job's
   `next_run_at`.
+- **Capability titles are not trusted.** Cron titles are not reserved: `set` verifies that an
+  existing `dream`/`heartbeat` job has the expected owner, kind, and routine before touching it,
+  and refuses (naming the job) to delete or rewrite a user job that merely shares the title.
+  `get` ignores such a job instead of reporting it as the capability.
 - `--json` prints the result object (`key`, `before`, `after`, `changed`, `dry_run`,
   `opencode_diff`, `settings`, `jobs`).
 

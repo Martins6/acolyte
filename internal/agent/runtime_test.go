@@ -2,14 +2,17 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
+	"github.com/martins6/acolyte/internal/store/orch"
 )
 
 // createRuntimeAgent scaffolds + registers "valet" with the given --config.
@@ -462,7 +465,10 @@ func TestMaskJSONC(t *testing.T) {
   "instructions": ["// not a comment", "/* also not */"],
   "default_agent": "build", // trailing comma follows
 }`
-	masked := maskJSONC(raw)
+	masked, err := maskJSONC(raw)
+	if err != nil {
+		t.Fatalf("maskJSONC() error: %v", err)
+	}
 	var doc opencodeEngineDoc
 	if err := parseJSONC(raw, &doc); err != nil {
 		t.Fatalf("parseJSONC() error: %v", err)
@@ -483,13 +489,82 @@ func TestMaskJSONC(t *testing.T) {
 		t.Errorf("real model key depth = %d, want 1", jsoncDepth(masked, index))
 	}
 	// A quoted key inside a string literal is not a top-level key.
-	nested := `{"instructions": ["x"], "model": "acme/real"}`
-	inString := `{"note": "he said \"model\": \"fake\""}`
-	if got := jsoncDepth(maskJSONC(nested), strings.Index(maskJSONC(nested), `"model"`)); got != 1 {
+	nested, err := maskJSONC(`{"instructions": ["x"], "model": "acme/real"}`)
+	if err != nil {
+		t.Fatalf("maskJSONC(nested) error: %v", err)
+	}
+	if got := jsoncDepth(nested, strings.Index(nested, `"model"`)); got != 1 {
 		t.Errorf("top-level key depth = %d, want 1", got)
 	}
-	if got := jsoncDepth(maskJSONC(inString), strings.Index(maskJSONC(inString), `model`)); got != -1 {
+	inString, err := maskJSONC(`{"note": "he said \"model\": \"fake\""}`)
+	if err != nil {
+		t.Fatalf("maskJSONC(inString) error: %v", err)
+	}
+	if got := jsoncDepth(inString, strings.Index(inString, `model`)); got != -1 {
 		t.Errorf("in-string key depth = %d, want -1", got)
+	}
+}
+
+// TestMaskJSONCRejectsMalformed pins the malformed-document rejections: an
+// unterminated "/*" must never mask into valid JSON (that would let `edit`
+// accept a broken opencode.jsonc instead of rolling it back).
+func TestMaskJSONCRejectsMalformed(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string // error substring; empty means the document must parse
+	}{
+		{name: "block comment at eof", raw: `{"a": 1} /*`, want: "unterminated block comment"},
+		{name: "block comment never closes", raw: "{\n  \"a\": 1,\n  /* dangling\n}", want: "unterminated block comment"},
+		{name: "unterminated string", raw: `{"a": "b`, want: "unterminated string"},
+		{name: "unterminated string after comment", raw: "{ // ok\n  \"a\": \"x\n}", want: "unterminated string"},
+		{name: "comment markers inside string", raw: `{"a": "/* not a comment */ // nope"}`, want: ""},
+		{name: "valid block comment", raw: "{\n  /* c */ \"a\": 1 // line\n}", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			masked, err := maskJSONC(tc.raw)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("maskJSONC() error = %v, want nil", err)
+				}
+				var value map[string]any
+				if err := json.Unmarshal([]byte(masked), &value); err != nil {
+					t.Fatalf("masked output is not valid JSON: %v\n%s", err, masked)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("maskJSONC() error = %v, want containing %q", err, tc.want)
+				}
+			}
+			var value map[string]any
+			err = parseJSONC(tc.raw, &value)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("parseJSONC() error = %v, want nil", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("parseJSONC() error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestEditOpencodeRejectsUnterminatedComment(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	original := readOpencode(t, ws)
+
+	changed, err := EditOpencode(ws, func(path string) error {
+		return os.WriteFile(path, []byte(original+"\n/* dangling\n"), 0644)
+	})
+	if err == nil || !strings.Contains(err.Error(), "unterminated block comment") {
+		t.Fatalf("EditOpencode() error = %v, want unterminated-block-comment error", err)
+	}
+	if changed {
+		t.Error("EditOpencode() changed = true, want false")
+	}
+	if restored := readOpencode(t, ws); restored != original {
+		t.Errorf("invalid edit was not rolled back:\n%s", restored)
 	}
 }
 
@@ -531,3 +606,142 @@ func TestUnifiedDiff(t *testing.T) {
 		t.Error("identical texts should produce no diff")
 	}
 }
+
+// addUserCronJob inserts a user-owned job (owner "user", like `acolyte cron`)
+// and returns its stored snapshot for before/after comparisons.
+func addUserCronJob(t *testing.T, st *store.Store, job orch.CronJob) orch.CronJob {
+	t.Helper()
+	if err := st.Orch().AddCronJob(job); err != nil {
+		t.Fatalf("AddCronJob(%q): %v", job.Title, err)
+	}
+	stored, err := st.Orch().GetCronJobByTitle(job.Title)
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle(%q): %v", job.Title, err)
+	}
+	return stored
+}
+
+func userCapabilityJobs(t *testing.T, st *store.Store) (orch.CronJob, orch.CronJob) {
+	t.Helper()
+	next := time.Now().UTC().Add(time.Hour)
+	dream := addUserCronJob(t, st, orch.CronJob{
+		Title: "dream", Owner: "user", Kind: "prompt", Prompt: "hello",
+		Spec: "@every 1h", AgentTarget: "valet", Timezone: "UTC",
+		Enabled: true, NextRunAt: &next,
+	})
+	heartbeat := addUserCronJob(t, st, orch.CronJob{
+		Title: "heartbeat", Owner: "user", Kind: "routine", Routine: "heartbeat",
+		RoutineArgs: `{"interval":5}`, Spec: "@every 5m", AgentTarget: "valet",
+		Timezone: "UTC", Enabled: true, NextRunAt: &next,
+	})
+	return dream, heartbeat
+}
+
+// TestLoadConfigIgnoresUserJobTitles: a user job holding a capability title
+// is not reported as the capability by `get`.
+func TestLoadConfigIgnoresUserJobTitles(t *testing.T) {
+	ws := createRuntimeAgent(t, `{"schedule": {"timezone": "UTC"}}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+	dreamBefore, heartbeatBefore := userCapabilityJobs(t, st)
+
+	cfg, err := LoadConfig(st, target)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.MemoryLearn != nil {
+		t.Errorf("memory-learn = %+v, want nil (user dream job is not the capability)", cfg.MemoryLearn)
+	}
+	if cfg.Schedule.HeartbeatMinutes != 0 {
+		t.Errorf("heartbeat_minutes = %d, want 0 (user heartbeat job is not the capability)", cfg.Schedule.HeartbeatMinutes)
+	}
+
+	dreamAfter, err := st.Orch().GetCronJobByTitle("dream")
+	if err != nil {
+		t.Fatalf("get dream: %v", err)
+	}
+	heartbeatAfter, err := st.Orch().GetCronJobByTitle("heartbeat")
+	if err != nil {
+		t.Fatalf("get heartbeat: %v", err)
+	}
+	if !reflect.DeepEqual(dreamBefore, dreamAfter) || !reflect.DeepEqual(heartbeatBefore, heartbeatAfter) {
+		t.Error("LoadConfig modified the user jobs")
+	}
+}
+
+// TestSetRefusesConflictingDreamJob: memory-learn mutations and timezone
+// changes must reject — never delete or rewrite — a user job titled "dream".
+func TestSetRefusesConflictingDreamJob(t *testing.T) {
+	ws := createRuntimeAgent(t, `{"schedule": {"timezone": "UTC"}}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+	before := addUserCronJob(t, st, orch.CronJob{
+		Title: "dream", Owner: "user", Kind: "prompt", Prompt: "hello",
+		Spec: "@every 1h", AgentTarget: "valet", Timezone: "UTC",
+		Enabled: true, NextRunAt: ptrTime(time.Now().UTC().Add(time.Hour)),
+	})
+
+	for _, value := range []string{"null", `{"args":{"days":3}}`} {
+		_, err := SetConfig(st, target, SetOptions{Key: "memory-learn", Value: value})
+		if err == nil {
+			t.Fatalf("SetConfig(memory-learn %s) error = nil, want conflict error", value)
+		}
+		if !strings.Contains(err.Error(), `refusing to modify cron job "dream"`) ||
+			!strings.Contains(err.Error(), `owner="user"`) {
+			t.Fatalf("SetConfig(memory-learn %s) error = %v, want conflict error naming the job", value, err)
+		}
+	}
+
+	_, err := SetConfig(st, target, SetOptions{Key: "schedule.timezone", Value: "America/Sao_Paulo"})
+	if err == nil || !strings.Contains(err.Error(), `refusing to modify cron job "dream"`) {
+		t.Fatalf("SetConfig(timezone) error = %v, want dream conflict error", err)
+	}
+
+	after, err := st.Orch().GetCronJobByTitle("dream")
+	if err != nil {
+		t.Fatalf("get dream: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("user dream job changed:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+// TestSetRefusesConflictingHeartbeatJob: heartbeat_minutes and timezone must
+// reject a user job titled "heartbeat" (even one running the heartbeat
+// routine under owner "user") instead of deleting or rewriting it.
+func TestSetRefusesConflictingHeartbeatJob(t *testing.T) {
+	ws := createRuntimeAgent(t, `{"schedule": {"timezone": "UTC"}}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+	before := addUserCronJob(t, st, orch.CronJob{
+		Title: "heartbeat", Owner: "user", Kind: "routine", Routine: "heartbeat",
+		RoutineArgs: `{"interval":5}`, Spec: "@every 5m", AgentTarget: "valet",
+		Timezone: "UTC", Enabled: true, NextRunAt: ptrTime(time.Now().UTC().Add(time.Hour)),
+	})
+
+	for _, value := range []string{"0", "30"} {
+		_, err := SetConfig(st, target, SetOptions{Key: "schedule.heartbeat_minutes", Value: value})
+		if err == nil {
+			t.Fatalf("SetConfig(heartbeat_minutes %s) error = nil, want conflict error", value)
+		}
+		if !strings.Contains(err.Error(), `refusing to modify cron job "heartbeat"`) ||
+			!strings.Contains(err.Error(), `owner="user"`) {
+			t.Fatalf("SetConfig(heartbeat_minutes %s) error = %v, want conflict error naming the job", value, err)
+		}
+	}
+
+	_, err := SetConfig(st, target, SetOptions{Key: "schedule.timezone", Value: "America/Sao_Paulo"})
+	if err == nil || !strings.Contains(err.Error(), `refusing to modify cron job "heartbeat"`) {
+		t.Fatalf("SetConfig(timezone) error = %v, want heartbeat conflict error", err)
+	}
+
+	after, err := st.Orch().GetCronJobByTitle("heartbeat")
+	if err != nil {
+		t.Fatalf("get heartbeat: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("user heartbeat job changed:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+func ptrTime(value time.Time) *time.Time { return &value }

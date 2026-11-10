@@ -10,7 +10,11 @@ import (
 // is plain JSON whose byte offsets are identical to the original text. String
 // literals are preserved verbatim, which is what targeted edits need: regexes
 // run against the mask and are applied back to the original bytes.
-func maskJSONC(raw string) string {
+//
+// Unterminated strings or block comments are rejected instead of being masked
+// through EOF: otherwise a valid config followed by a dangling "/*" would
+// mask into valid JSON and malformed JSONC would be silently accepted.
+func maskJSONC(raw string) (string, error) {
 	out := []byte(raw)
 
 	// Pass 1: comments -> spaces (newlines inside block comments are kept so
@@ -19,7 +23,11 @@ func maskJSONC(raw string) string {
 	for i < len(out) {
 		switch {
 		case out[i] == '"':
-			i = skipJSONCString(out, i)
+			end, ok := stringEnd(raw, i)
+			if !ok {
+				return "", fmt.Errorf("unterminated string literal at byte %d", i)
+			}
+			i = end
 		case out[i] == '/' && i+1 < len(out) && out[i+1] == '/':
 			for i < len(out) && out[i] != '\n' {
 				out[i] = ' '
@@ -28,11 +36,17 @@ func maskJSONC(raw string) string {
 		case out[i] == '/' && i+1 < len(out) && out[i+1] == '*':
 			start := i
 			i += 2
-			for i < len(out) && !(out[i] == '*' && i+1 < len(out) && out[i+1] == '/') {
+			closed := false
+			for i < len(out) {
+				if out[i] == '*' && i+1 < len(out) && out[i+1] == '/' {
+					i += 2
+					closed = true
+					break
+				}
 				i++
 			}
-			if i < len(out) {
-				i += 2 // consume the closing "*/"
+			if !closed {
+				return "", fmt.Errorf("unterminated block comment starting at byte %d", start)
 			}
 			for j := start; j < i; j++ {
 				if out[j] != '\n' && out[j] != '\r' {
@@ -45,6 +59,7 @@ func maskJSONC(raw string) string {
 	}
 
 	// Pass 2: trailing commas before "}" or "]" -> spaces (JSONC allows them).
+	// Pass 1 already rejected unterminated strings, so skipping them is safe.
 	for i = 0; i < len(out); {
 		if out[i] == '"' {
 			i = skipJSONCString(out, i)
@@ -61,13 +76,17 @@ func maskJSONC(raw string) string {
 		}
 		i++
 	}
-	return string(out)
+	return string(out), nil
 }
 
 // parseJSONC decodes JSONC (JSON with // and /* */ comments and trailing
 // commas) into v.
 func parseJSONC(raw string, v any) error {
-	if err := json.Unmarshal([]byte(maskJSONC(raw)), v); err != nil {
+	masked, err := maskJSONC(raw)
+	if err != nil {
+		return fmt.Errorf("invalid JSONC: %w", err)
+	}
+	if err := json.Unmarshal([]byte(masked), v); err != nil {
 		return fmt.Errorf("invalid JSONC: %w", err)
 	}
 	return nil

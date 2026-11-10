@@ -234,7 +234,10 @@ func EditOpencode(workspace string, editor func(path string) error) (bool, error
 // with a targeted text edit, preserving comments, formatting, and unrelated
 // keys. A missing key is inserted before the final "}".
 func setOpencodeString(raw, key, value string) (string, error) {
-	masked := maskJSONC(raw)
+	masked, err := maskJSONC(raw)
+	if err != nil {
+		return "", fmt.Errorf("workspace: %s: %w", opencodeConfigName, err)
+	}
 	quoted, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("workspace: quote %s value: %w", key, err)
@@ -269,7 +272,10 @@ func setOpencodeString(raw, key, value string) (string, error) {
 // comma after the last structural entry when one is missing. Bytes between
 // the last entry and the closing brace (whitespace and comments) are kept.
 func insertTopLevelString(raw, key, quotedValue string) (string, error) {
-	masked := maskJSONC(raw)
+	masked, err := maskJSONC(raw)
+	if err != nil {
+		return "", fmt.Errorf("workspace: %s: %w", opencodeConfigName, err)
+	}
 	last := lastStructural(masked)
 	if last < 0 || masked[last] != '}' {
 		return "", fmt.Errorf("workspace: %s: top-level value is not an object", opencodeConfigName)
