@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +30,10 @@ const (
 	// DefaultMaxMessageChars keeps chunks below Telegram's 4096 UTF-16-unit
 	// limit (the constant name is retained for compatibility).
 	DefaultMaxMessageChars = 4000
+	// ServerURLEnv overrides the Telegram Bot API base URL. It exists for a
+	// local Bot API server and for hermetic tests. Tokens are sent to this
+	// URL, so a plain http override is only accepted for loopback hosts.
+	ServerURLEnv = "ACOLYTE_TELEGRAM_API_URL"
 )
 
 // API is the Telegram surface the adapter uses. *bot.Bot implements it.
@@ -47,6 +53,9 @@ type Options struct {
 	PollInterval    time.Duration
 	MaxAttempts     int
 	MaxMessageChars int
+	// ServerURL overrides the Telegram Bot API base URL. Empty falls back to
+	// ServerURLEnv, then the public API.
+	ServerURL string
 }
 
 // Adapter is the Communication implementation for one Telegram bot.
@@ -59,6 +68,7 @@ type Adapter struct {
 	pollInterval    time.Duration
 	maxAttempts     int
 	maxMessageChars int
+	serverURL       string
 
 	api  API
 	bot  *bot.Bot
@@ -98,6 +108,10 @@ func New(opts Options) (*Adapter, error) {
 	if opts.MaxMessageChars <= 0 {
 		opts.MaxMessageChars = DefaultMaxMessageChars
 	}
+	serverURL, err := resolveServerURL(opts.ServerURL)
+	if err != nil {
+		return nil, err
+	}
 	return &Adapter{
 		agent:           opts.Agent,
 		store:           opts.Store,
@@ -107,7 +121,32 @@ func New(opts Options) (*Adapter, error) {
 		pollInterval:    opts.PollInterval,
 		maxAttempts:     opts.MaxAttempts,
 		maxMessageChars: opts.MaxMessageChars,
+		serverURL:       serverURL,
 	}, nil
+}
+
+// resolveServerURL validates an explicit override or ServerURLEnv. An empty
+// result means the public Telegram API.
+func resolveServerURL(explicit string) (string, error) {
+	raw := strings.TrimSpace(explicit)
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv(ServerURLEnv))
+	}
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("telegram: invalid API server URL %q", raw)
+	}
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
+		return "", fmt.Errorf("telegram: API server URL %q must use https or loopback http", raw)
+	}
+	return strings.TrimRight(raw, "/"), nil
+}
+
+func isLoopbackHost(host string) bool {
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 // Name returns the channel name.
@@ -123,7 +162,7 @@ func (a *Adapter) Start(ctx context.Context, sink comm.InboundSink) error {
 	a.sink = sink
 	a.mu.Unlock()
 
-	b, err := bot.New(a.token, bot.WithDefaultHandler(a.handleUpdate))
+	b, err := bot.New(a.token, a.botOptions()...)
 	if err != nil {
 		return fmt.Errorf("telegram: create bot: %w", err)
 	}
@@ -153,6 +192,14 @@ func (a *Adapter) Start(ctx context.Context, sink comm.InboundSink) error {
 		close(a.done)
 	}()
 	return nil
+}
+
+func (a *Adapter) botOptions() []bot.Option {
+	options := []bot.Option{bot.WithDefaultHandler(a.handleUpdate)}
+	if a.serverURL != "" {
+		options = append(options, bot.WithServerURL(a.serverURL))
+	}
+	return options
 }
 
 // Stop terminates polling and the outbox loop.

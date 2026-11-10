@@ -257,7 +257,7 @@ func commandEnv(home string) []string {
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
-		case "ACOLYTE_HOME", "ACOLYTE_WORKSPACE_PATH", "TELEGRAM_BOT_TOKEN":
+		case "ACOLYTE_HOME", "ACOLYTE_WORKSPACE_PATH", "TELEGRAM_BOT_TOKEN", "ACOLYTE_TELEGRAM_API_URL":
 			continue
 		}
 		env = append(env, entry)

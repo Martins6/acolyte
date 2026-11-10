@@ -46,6 +46,28 @@ workspace.
 | `comm_tg_media` | tg_file_id, file_path, type, chat_id, saved_at |
 | `comm_tg_settings` | non-secret channel settings (`channels`, `telegram.allowed_users`) |
 
+## Testing
+
+`internal/comm/telegram/telegramtest` is an in-process Telegram Bot API
+emulator. It serves `getMe`, `getUpdates`, `sendMessage`, `getFile` and file
+downloads over a real HTTP listener and exposes helpers to queue updates,
+inspect sent messages, register files and inject API failures. Tests point the
+adapter at it with `telegram.Options.ServerURL`; the emulator is never used by
+production code.
+
+Run the hermetic suite with:
+
+```bash
+go test -race -count=1 -v -run EmulatedTelegram ./internal/comm/telegram/... ./internal/daemon/
+```
+
+The live E2E suite also starts the real daemon against the emulator and a real
+OpenCode service (`e2e/telegram_test.go`, build tag `e2e`).
+
+For a local Bot API server, set `ACOLYTE_TELEGRAM_API_URL`. Because the bot
+token is sent there, plain `http` is accepted only for loopback hosts; use
+`https` for anything remote.
+
 ## Config
 
 Non-secret settings live in `comm_tg_settings`, seeded by `acolyte new`:
