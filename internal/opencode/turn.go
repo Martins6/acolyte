@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/martins6/acolyte/internal/lock"
 )
 
 // turnTimeout matches the retired CLI runner's 5-minute cap.
@@ -60,11 +62,41 @@ type TurnResult struct {
 func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg TurnConfig) (result *TurnResult, err error) {
 	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
+	sessionID = strings.TrimSpace(sessionID)
+
+	var held *lock.Lock
+	defer func() {
+		if held == nil {
+			return
+		}
+		if releaseErr := held.Release(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("opencode: release session lock: %w", releaseErr))
+		}
+	}()
+
+	// Existing sessions are locked before any session mutation so two
+	// callers cannot interleave prompts on the same conversation.
+	if sessionID != "" {
+		held, err = lock.AcquireSession(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("opencode: lock session %s: %w", sessionID, err)
+		}
+	}
 
 	info, err := c.ensureSession(ctx, sessionID, cfg)
 	if err != nil {
 		return nil, err
 	}
+
+	// A new session id is unique to this call, so it only needs a lock once
+	// the server has assigned it.
+	if sessionID == "" {
+		held, err = lock.AcquireSession(ctx, info.ID)
+		if err != nil {
+			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: lock session %s: %w", info.ID, err)
+		}
+	}
+
 	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID}, err
@@ -91,11 +123,37 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (result *TurnResult, err error) {
 	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
+	sessionID = strings.TrimSpace(sessionID)
+
+	var held *lock.Lock
+	defer func() {
+		if held == nil {
+			return
+		}
+		if releaseErr := held.Release(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("opencode: release session lock: %w", releaseErr))
+		}
+	}()
+
+	if sessionID != "" {
+		held, err = lock.AcquireSession(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("opencode: lock session %s: %w", sessionID, err)
+		}
+	}
 
 	info, err := c.ensureSession(ctx, sessionID, cfg)
 	if err != nil {
 		return nil, err
 	}
+
+	if sessionID == "" {
+		held, err = lock.AcquireSession(ctx, info.ID)
+		if err != nil {
+			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: lock session %s: %w", info.ID, err)
+		}
+	}
+
 	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID}, err
