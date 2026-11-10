@@ -1,0 +1,116 @@
+name: test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Rapid pushes cancel the in-flight run so only the latest PR state is tested.
+concurrency:
+  group: test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast, secret-free checks. This runs for every PR, including drafts and
+  # forks, because it only needs the read-only GITHUB_TOKEN.
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test -race -count=1 ./...
+
+  # Live end-to-end check. It needs a provider API key, so it only runs where
+  # the secret is available: non-draft, same-repository, owner-authored PRs.
+  # Use pull_request (never pull_request_target): fork PRs never receive the
+  # secret, and the PR cannot redefine this workflow before it runs.
+  e2e:
+    needs: unit
+    if: |
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # Hard cap. The suite allows at most three turns (two live turns plus one
+    # zero-cost failure case); anything slower than 15 minutes fails the check.
+    timeout-minutes: 15
+    environment: OPENCODE_GO_API_KEY
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Install OpenCode CLI
+        # Pin the CLI to the version the V2 client contract is tested against.
+        run: |
+          npm install --global @opencode/cli@2.2.6
+          opencode --version
+
+      # The key is scoped to this step only: the background service inherits
+      # it when it starts from this shell, and the test step below never sees
+      # the secret. The managed service also writes ~/.config/opencode/service.json,
+      # which is exactly what Acolyte's Ensure path reads.
+      - name: Start OpenCode service
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: |
+          opencode service start
+          for attempt in $(seq 1 30); do
+            if opencode api get /api/info >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          opencode api get /api/info
+
+      - name: Run live E2E (max 3 turns)
+        env:
+          ACOLYTE_E2E: "1"
+          ACOLYTE_E2E_MODEL: opencode-go/gpt-6-luna
+        run: go test -tags=e2e ./e2e/... -v -count=1
+
+      - name: Collect OpenCode logs
+        if: failure()
+        run: |
+          mkdir -p opencode-logs
+          cp -R "$HOME/.local/share/opencode/log" opencode-logs/ 2>/dev/null || true
+          cp -R "$HOME/.local/state/opencode/log" opencode-logs/ 2>/dev/null || true
+
+      - name: Upload OpenCode logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: opencode-e2e-logs
+          path: opencode-logs
+          if-no-files-found: ignore

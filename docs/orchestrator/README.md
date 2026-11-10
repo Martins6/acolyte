@@ -22,6 +22,7 @@ turn loop, and provides the shared services every module relies on. It is **fixe
 | `acolyte cron ...` | List/add/remove prompt, shell, or routine jobs. |
 | `acolyte notify-user` | Queue a user-only notification through the target agent. |
 | `acolyte inbox` | Deliver a synthetic external event to an agent session. |
+| `acolyte run` | Run one real user turn headlessly (no Telegram/TUI). |
 | `acolyte inspect` | Merge OpenCode history with communication routing events. |
 | `acolyte attach` | Attach the OpenCode TUI to the managed service/session. |
 | `acolyte start` | Run the daemon (turn loop + cron + channels). |

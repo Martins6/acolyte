@@ -116,7 +116,9 @@ func runInspect(ctx context.Context, w io.Writer, opts inspectOptions) error {
 		out.Warnings = append(out.Warnings, "session is not mapped to an agent thread; communication events are unavailable")
 	}
 
-	if !opts.NoComm && out.Thread != "" {
+	// CLI runs are mapped to cli:<agent> threads and are expected to have no
+	// Telegram routing events; only warn for other non-Telegram threads.
+	if !opts.NoComm && out.Thread != "" && !strings.HasPrefix(out.Thread, "cli:") {
 		chatID, ok := envelope.ParseTelegramThread(out.Thread)
 		if !ok {
 			out.Warnings = append(out.Warnings, fmt.Sprintf("thread %q is not a Telegram thread", out.Thread))

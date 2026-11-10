@@ -18,11 +18,23 @@ type fakeCLITurn struct {
 	result     *opencode.TurnResult
 	messages   []opencode.Message
 	messageErr error
+
+	userSessionID string
+	userText      string
+	userConfig    opencode.TurnConfig
+	userErr       error
 }
 
-func (f *fakeCLITurn) RunUserTurn(context.Context, string, string, opencode.TurnConfig) (*opencode.TurnResult, error) {
+func (f *fakeCLITurn) RunUserTurn(_ context.Context, sessionID, text string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.userCalls++
-	return f.turnResult(), nil
+	f.userSessionID = sessionID
+	f.userText = text
+	f.userConfig = cfg
+	result := f.turnResult()
+	if sessionID != "" {
+		result.SessionID = sessionID
+	}
+	return result, f.userErr
 }
 
 func (f *fakeCLITurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
