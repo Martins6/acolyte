@@ -309,15 +309,15 @@ go test -tags=e2e ./e2e/... -v -count=1
 ```
 
 The live suite is deliberately small (two live turns plus one zero-cost failure
-case). CI runs the unit suite on every PR; the live job runs only on non-draft,
-same-repository, owner-authored PRs where `OPENCODE_GO_API_KEY` is available,
-and has a hard 15-minute timeout.
+case). CI runs the unit suite on every PR. The live job runs after merges to
+`dev` (and on manual dispatch), not on PRs, because the provider credential must
+not be exposed to PR-controlled code. It has a hard 15-minute timeout.
 
 ### GitHub Workflow
 
 GitHub Actions runs the PR test suite and automatic review:
 
-- `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR. When the `OPENCODE_GO_API_KEY` environment is available (non-draft, same-repository, owner-authored PRs), it also starts the managed OpenCode service and runs the live E2E suite with a hard 15-minute timeout.
+- `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR. After merges to `dev` (and on manual dispatch), it starts the managed OpenCode service with `OPENCODE_GO_API_KEY` and runs the live E2E suite with a hard 15-minute timeout. PRs never receive the provider credential.
 - `.github/workflows/opencode-review.yml` — reviews every non-draft PR opened by the repository owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs from any other author never trigger the agent.
 
 Each review posts exactly one PR review whose body starts with a `## Verdict` heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff. The workflow removes the action's automatic comment so the review is the only thing left on the PR.
@@ -326,7 +326,7 @@ The model is pinned in the workflow itself (`opencode-go/gpt-6-luna`); no projec
 
 Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner, and only the owner has merge rights. The gate (`.github/workflows/pr-guard.yml`) runs from the base branch definition via `pull_request_target` and posts a `pr-guard` commit status on the PR head SHA, so a PR cannot redefine its own gate.
 
-Mark `test / unit` as a required status check for `dev`. Keep `test / e2e` required only where the secret is available (owner-authored, same-repository, non-draft PRs), because it is intentionally skipped on forks and drafts. A live run that exceeds the 15-minute cap fails the check.
+Mark `test / unit` as a required status check for PRs. The live E2E is a post-merge check on `dev` (and manual dispatch); it does not run on PRs because it needs the provider credential. A live run that exceeds the 15-minute cap fails the check.
 
 To enable it:
 
