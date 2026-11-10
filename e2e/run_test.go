@@ -6,8 +6,9 @@
 //	ACOLYTE_E2E=1 ACOLYTE_E2E_MODEL=opencode-go/gpt-6-luna \
 //	  go test -tags=e2e ./e2e/... -v
 //
-// The suite is deliberately small: two live turns (fresh + continue) and one
-// zero-cost failure case. It never uses Telegram, a bot token, or the TUI.
+// The run tests use two live turns (fresh + continue) and one zero-cost
+// failure case. telegram_test.go adds one live daemon turn through the
+// in-process Telegram emulator. No real bot token or TUI is used.
 package e2e
 
 import (
