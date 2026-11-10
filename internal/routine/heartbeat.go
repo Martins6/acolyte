@@ -32,7 +32,10 @@ func (heartbeatRoutine) Run(ctx context.Context, env Env, args map[string]any) (
 		return "", err
 	}
 	interval, _ := args["interval"].(int)
-	notes := readHeartbeatNotes(env.Workspace)
+	notes, err := readHeartbeatNotes(env.Workspace)
+	if err != nil {
+		return "", err
+	}
 
 	targetSessionID := ""
 	digest := ""
@@ -111,12 +114,32 @@ func heartbeatNotification(reply string) (string, bool) {
 	return "", false
 }
 
-func readHeartbeatNotes(workspace string) string {
-	raw, err := os.ReadFile(filepath.Join(workspace, ".acolyte", "HEARTBEAT.md"))
-	if err != nil {
-		return ""
+// readHeartbeatNotes reads the persona notes without following symlinks. The
+// notes are injected into the model prompt, so a link to an external file
+// (for example .env) must fail closed instead of leaking its contents.
+func readHeartbeatNotes(workspace string) (string, error) {
+	if err := checkMemoryRoots(workspace); err != nil {
+		return "", err
 	}
-	return string(raw)
+	path := filepath.Join(workspace, ".acolyte", "HEARTBEAT.md")
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("routine: inspect heartbeat notes: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("routine: heartbeat notes are a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("routine: heartbeat notes are not a regular file")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("routine: read heartbeat notes: %w", err)
+	}
+	return string(raw), nil
 }
 
 func buildHeartbeatPrompt(agent, targetSessionID, notes, digest string) string {

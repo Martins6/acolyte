@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -222,4 +223,49 @@ func TestHeartbeatDeliversNotification(t *testing.T) {
 	if got := permissionEffect(permissions[0].rules, "shell", `acolyte inbox --agent-name valet --session-id ses_user "hi"`); got != opencode.PermissionDeny {
 		t.Errorf("heartbeat shell permission = %s, want deny", got)
 	}
+}
+
+func TestHeartbeatRejectsUnsafeNotes(t *testing.T) {
+	t.Run("symlinked file", func(t *testing.T) {
+		ws := t.TempDir()
+		external := filepath.Join(t.TempDir(), "secret.txt")
+		if err := os.WriteFile(external, []byte("SECRET-CONTENT"), 0600); err != nil {
+			t.Fatalf("write secret: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(ws, ".acolyte"), 0755); err != nil {
+			t.Fatalf("create .acolyte: %v", err)
+		}
+		if err := os.Symlink(external, filepath.Join(ws, ".acolyte", "HEARTBEAT.md")); err != nil {
+			t.Fatalf("symlink notes: %v", err)
+		}
+
+		env := Env{
+			Workspace: ws,
+			OpenCode:  opencode.NewClient("http://127.0.0.1:1", ""),
+			Log:       func(string, string, map[string]any) {},
+		}
+		if _, err := (heartbeatRoutine{}).Run(context.Background(), env, map[string]any{"interval": 60}); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("heartbeat Run() error = %v, want symlink refusal", err)
+		}
+	})
+
+	t.Run("symlinked root", func(t *testing.T) {
+		ws := t.TempDir()
+		externalDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(externalDir, "HEARTBEAT.md"), []byte("SECRET-CONTENT"), 0600); err != nil {
+			t.Fatalf("write secret notes: %v", err)
+		}
+		if err := os.Symlink(externalDir, filepath.Join(ws, ".acolyte")); err != nil {
+			t.Fatalf("symlink .acolyte: %v", err)
+		}
+
+		env := Env{
+			Workspace: ws,
+			OpenCode:  opencode.NewClient("http://127.0.0.1:1", ""),
+			Log:       func(string, string, map[string]any) {},
+		}
+		if _, err := (heartbeatRoutine{}).Run(context.Background(), env, map[string]any{"interval": 60}); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("heartbeat Run() error = %v, want symlink refusal", err)
+		}
+	})
 }
