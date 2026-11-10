@@ -90,11 +90,11 @@ func TestDaemonRoutesThroughEmulatedTelegram(t *testing.T) {
 		t.Errorf("reply_to = %v, want %d", reply.ReplyTo, update.Message.ID)
 	}
 
-	st, err = store.Open(ws)
+	st, release, err := pool.Acquire(ws)
 	if err != nil {
-		t.Fatalf("reopen store: %v", err)
+		t.Fatalf("acquire store: %v", err)
 	}
-	defer st.Close()
+	defer release()
 	items, err := st.CommTG().ListInbox(10)
 	if err != nil {
 		t.Fatalf("list inbox: %v", err)
@@ -109,9 +109,18 @@ func TestDaemonRoutesThroughEmulatedTelegram(t *testing.T) {
 	if err != nil || !ok || session.OpenCodeSessionID != "ses_user" {
 		t.Errorf("session = %+v, %v, %v", session, ok, err)
 	}
-	outbox, err := st.CommTG().ListOutbox(10)
-	if err != nil || len(outbox) != 1 || outbox[0].Delivery != "sent" || outbox[0].Text != "" {
-		t.Errorf("outbox = %+v, %v", outbox, err)
+	// sendMessage is recorded before the adapter persists delivery progress,
+	// so wait for the durable row rather than racing the response handling.
+	outboxDeadline := time.Now().Add(15 * time.Second)
+	for {
+		outbox, listErr := st.CommTG().ListOutbox(10)
+		if listErr == nil && len(outbox) == 1 && outbox[0].Delivery == "sent" && outbox[0].Text == "" {
+			break
+		}
+		if time.Now().After(outboxDeadline) {
+			t.Fatalf("outbox = %+v, %v; want one sent row", outbox, listErr)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
