@@ -104,7 +104,7 @@ them with an argument schema; `acolyte cron routine-list` dumps the catalog as J
 
 | Routine | Owner | Args | What it does | Doc |
 | ------- | ----- | ---- | ------------ | --- |
-| `dream` | `memory-learn` | `days:int` | Every `days` days, review the last `days` days and conservatively distill persona/skills (direct write; `--dry-run` for proposals). | [`memory-learn/simple-dreaming.md`](memory/memory-learn/simple-dreaming.md) |
+| `dream` | `memory-learn` | `days:int` | Every `days` days, review the last `days` days and conservatively distill persona/skills (direct write; `--dry-run` for proposals). Both phases use a session-scoped permission ruleset: analysis is read-only, writer limited to memory paths. | [`memory-learn/simple-dreaming.md`](memory/memory-learn/simple-dreaming.md) |
 | `heartbeat` | `heartbeat` | `interval:int` | Every `interval` minutes, review `HEARTBEAT.md` + the latest non-cron session; inbox the user only when something is genuinely interesting. | [`heartbeat.md`](orchestrator/heartbeat.md) |
 
 `acolyte cron routine-list` output shape (per routine):

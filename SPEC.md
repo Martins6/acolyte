@@ -159,8 +159,8 @@ debugging.
 
 **Key endpoints:** `POST /api/session`, `GET /api/session`, `POST /api/session/{id}/synthetic`,
 `POST /api/session/{id}/inbox` (+ `inbox/{id}/steer` | `inbox/{id}/queue`),
-`POST /api/session/{id}/prompt` (real user turns), `GET /api/session/stats`,
-`GET /api/agent`, `event.subscribe()`.
+`POST /api/session/{id}/prompt` (real user turns), `PATCH /api/session/{id}` (session-scoped
+permission rules), `GET /api/session/stats`, `GET /api/agent`, `event.subscribe()`.
 
 **Caveats:**
 - The orchestrator must discover/start the OpenCode service (`opencode serve --service`); internal
@@ -236,7 +236,12 @@ it produces**, documented in `docs/memory/…`.
   **Conservative:** when in doubt, don't write — only when it's *super extra clear*; and be **super
   compact** when there are many sessions. The run is prompt-guided and uses its own cron session;
   every run records a `mem_dreams` audit row (sessions scanned, skills created, dry-run, changed
-  paths). `acolyte cron --dry-run` makes the same prompt proposal-only.
+  paths). `acolyte cron --dry-run` makes the same prompt proposal-only. Both model phases run under
+  a **session-scoped OpenCode permission ruleset** (`PATCH /api/session/{id}`): the analysis phase is
+  read-only, and the writer phase can edit only `.acolyte/*.md` (never `HEARTBEAT.md`) or
+  `.agents/skills/<id>/SKILL.md`. Edit and shell are denied everywhere else (including
+  `external_directory`), so a prompt-injected phase cannot write outside the memory roots or replace
+  a root with a symlink; the post-turn snapshot remains as a second, policy-level check.
 - *Other modes (planned):* `post-session`, `inline` (`acolyte learn` tool), `plugin-hook`,
   `consolidate`. See `docs/memory/memory-learn/simple-dreaming.md`.
 
@@ -412,7 +417,9 @@ Runs every `schedule.heartbeat_minutes` minutes **in its own session**. It reads
 prompt instructs the agent to use
 `acolyte inbox --agent-name <agent> --session-id <latest-user-session> "<message>"` only when
 something is genuinely interesting; otherwise it replies exactly `NO_ACTION`. The routine returns
-empty so cron does not double-notify. See `docs/orchestrator/heartbeat.md`.
+empty so cron does not double-notify. The turn runs under a session-scoped permission ruleset that is
+read-only apart from an `acolyte inbox` shell command, so injected session text cannot edit the
+workspace or run unrelated commands. See `docs/orchestrator/heartbeat.md`.
 
 ### 10.4 Message primitives
 Two ways to move a message (both target an agent/session like the CLI below):
@@ -608,8 +615,9 @@ admit a synthetic event; output is routed via Communication.
     hardening is deferred (`FUTURE-IDEAS.md`).
 24. **`acolyte status` uses fan-out reads in v0** (§12); the `agent_status` snapshot cache is deferred.
 25. **Dream writes** are prompt-guided and direct/conservative by default; `dry_run` meta +
-    `acolyte cron --dry-run` make the run proposal-only. Every run records `mem_dreams` with the
-    changed paths (§6.3).
+    `acolyte cron --dry-run` make the run proposal-only. Both model phases use a session-scoped
+    OpenCode permission ruleset (analysis read-only; writer limited to the memory allowlist), and
+    every run records `mem_dreams` with the changed paths (§6.3).
 26. **Heartbeat delivery** is prompt-guided: the default prompt instructs `acolyte inbox` on the
     latest non-cron session when genuinely interesting; otherwise `NO_ACTION`. The routine returns
     empty so cron does not double-notify (§10.3).

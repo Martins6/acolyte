@@ -12,6 +12,9 @@ cron job) that runs every `schedule.heartbeat_minutes` minutes.
    - if something is genuinely interesting, use
      `acolyte inbox --agent-name <agent> --session-id <latest-user-session> "<message>"`;
    - otherwise reply exactly `NO_ACTION` and do not notify anyone.
+   The turn runs under a session-scoped permission ruleset: read-only memory discovery plus an
+   `acolyte inbox` shell command. `edit`, other shell commands, network tools, subagents, and
+   `external_directory` are denied, so injected session text cannot modify the workspace.
 5. The routine returns empty, so cron does not send a second notification. Delivery is the agent's
    explicit `acolyte inbox` call.
 

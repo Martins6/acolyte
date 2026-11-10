@@ -207,7 +207,9 @@ sends back to the user is currently text-only; sender-side media is deferred.
 | `acolyte update`                             | Check & apply updates                          |
 | `acolyte version`                            | Print binary version                           |
 
-> Routine jobs support `acolyte cron --dry-run` (dream proposal-only runs).
+> Routine jobs support `acolyte cron --dry-run` (dream proposal-only runs). Dream and heartbeat
+> turns run under a session-scoped OpenCode permission ruleset: dream analysis is read-only, the
+> dream writer is limited to memory paths, and heartbeat can only run `acolyte inbox`.
 
 > Runtime capability edits are not exposed yet: `acolyte new` preserves existing
 > settings/jobs when adopting an agent. See `FUTURE-IDEAS.md`.
