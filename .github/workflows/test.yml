@@ -106,7 +106,7 @@ jobs:
         run: |
           npm install --global "@opencode/cli@${OPENCODE_VERSION}"
           opencode --version
-          test "$(opencode --version)" = "v${OPENCODE_VERSION}"
+          test "$(opencode --version | awk '{print $2}')" = "v${OPENCODE_VERSION}"
 
       # The key is scoped to this step only: the background service inherits
       # it when it starts from this shell, and the test step below never sees
