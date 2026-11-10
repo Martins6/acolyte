@@ -445,6 +445,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte cron rm <title>` | Remove a job; target-aware when titles collide across agents. |
 | `acolyte cron tick` | Drain currently due jobs (testing/debugging). |
 | `acolyte inbox "<text>"` | Deliver an external event to the agent on a session (§10.4). |
+| `acolyte run "<text>"` | Run one real user turn headlessly, print the reply, and map the session to `cli:<agent>`; `--continue` reuses it. Default is a new session, not the latest. |
 | `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
 | `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |
 | `acolyte attach [--session-id <id>]` | Attach the OpenCode TUI to the managed service and agent workspace/session. |

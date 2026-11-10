@@ -27,6 +27,10 @@ Cron prompt/routine jobs and `acolyte inbox` admit **synthetic** events. Turns a
 persist, even when no channel can deliver the reply; delivery is a separate, durable outbox step.
 `acolyte notify-user` is user-only and therefore requires a registered chat.
 
+`acolyte run` is the headless, channel-free path: it runs a real user turn, maps the session to
+`cli:<agent>`, and never starts an adapter or queues a delivery. `--continue` reuses that CLI
+session; the reply is printed directly (plain or `--json`).
+
 ## Sessions and inspection
 
 OpenCode owns the conversation history. Acolyte stores only routing/delivery metadata plus the
