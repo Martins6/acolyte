@@ -588,6 +588,38 @@ func TestContext(t *testing.T) {
 	}
 }
 
+func TestExportSession(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/experimental/session/ses_x/export" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if user, pass, ok := r.BasicAuth(); !ok || user != "opencode" || pass != "pw" {
+			t.Errorf("missing/incorrect basic auth: %q %q %v", user, pass, ok)
+		}
+		fmt.Fprint(w, `{"data":{"info":{"id":"ses_x"},"messages":[{"id":"msg_x","type":"user","time":{"created":1},"text":"hello"}]}}`)
+	})
+
+	raw, err := client.ExportSession(context.Background(), "ses_x")
+	if err != nil {
+		t.Fatalf("ExportSession: %v", err)
+	}
+	var payload struct {
+		Info     SessionInfo `json:"info"`
+		Messages []Message   `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode export payload: %v", err)
+	}
+	if payload.Info.ID != "ses_x" || len(payload.Messages) != 1 || payload.Messages[0].Text != "hello" {
+		t.Errorf("unexpected export payload: %+v", payload)
+	}
+	if len(payload.Messages[0].Raw) == 0 {
+		t.Error("decoded message did not retain its raw JSON")
+	}
+}
+
 func TestAssistantText(t *testing.T) {
 	t.Parallel()
 
