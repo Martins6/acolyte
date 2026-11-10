@@ -73,6 +73,12 @@ type FileAPI interface {
 	Token() string
 }
 
+// FileLinker is implemented by *bot.Bot. Using it keeps downloads on the same
+// API base URL as the client (a local Bot API server or a test emulator).
+type FileLinker interface {
+	FileDownloadLink(*models.File) string
+}
+
 func DownloadFile(ctx context.Context, api FileAPI, fileID string) ([]byte, string, error) {
 	file, err := api.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
 	if err != nil {
@@ -80,6 +86,9 @@ func DownloadFile(ctx context.Context, api FileAPI, fileID string) ([]byte, stri
 	}
 
 	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", api.Token(), file.FilePath)
+	if linker, ok := api.(FileLinker); ok {
+		url = linker.FileDownloadLink(file)
+	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Get(url)
