@@ -141,6 +141,8 @@ docs/
 ├── communication/
 │   ├── README.md
 │   └── <channel>.md                ← telegram.md
+├── opencode/
+│   └── v2-contract.md              ← pinned V2 API version + update procedure
 └── orchestrator/
     ├── README.md
     ├── daemon.md                   ← per-agent adapters, routing, inspect/attach
@@ -160,4 +162,5 @@ file** covers intent, arguments, how it works, and the OpenCode/cron artifacts i
 | **Orchestrator** | [`orchestrator/`](orchestrator/README.md) | `acolyte` daemon: turn loop, envelope bus, cron, store, registry. |
 
 The **Engine** (OpenCode) is the platform, not a module — see the
-[OpenCode V2 docs](https://opencode.ai/v2/docs/) and `SPEC.md` §5.
+[OpenCode V2 docs](https://opencode.ai/v2/docs/), the pinned
+[V2 contract](opencode/v2-contract.md), and `SPEC.md` §5.
