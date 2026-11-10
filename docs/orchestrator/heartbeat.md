@@ -9,14 +9,15 @@ cron job) that runs every `schedule.heartbeat_minutes` minutes.
 2. It runs in **its own session** (separate from the user's conversations).
 3. It reads the **`HEARTBEAT.md`** persona file and the latest **non-cron** session.
 4. It runs a **prompt-guided turn**. The default prompt instructs the agent:
-   - if something is genuinely interesting, use
-     `acolyte inbox --agent-name <agent> --session-id <latest-user-session> "<message>"`;
+   - if something is genuinely interesting, reply `NOTIFY: <one concise message for the user>`;
    - otherwise reply exactly `NO_ACTION` and do not notify anyone.
-   The turn runs under a session-scoped permission ruleset: read-only memory discovery plus an
-   `acolyte inbox` shell command. `edit`, other shell commands, network tools, subagents, and
-   `external_directory` are denied, so injected session text cannot modify the workspace.
-5. The routine returns empty, so cron does not send a second notification. Delivery is the agent's
-   explicit `acolyte inbox` call.
+   The turn runs under a session-scoped permission ruleset that is fully read-only: memory
+   discovery is allowed, while `edit`, every shell command, network tools, subagents, and
+   `external_directory` are denied. Injected session text cannot modify the workspace or run
+   commands.
+5. The routine parses the `NOTIFY:` reply and delivers it to the latest user session through the
+   communication sink. The model never runs a shell command, and the routine returns empty so cron
+   does not send a second notification.
 
 ## Err on silence
 The heartbeat **always errs on the side of not sending anything**: "didn't find anything particularly

@@ -47,13 +47,9 @@ func dreamWriterPermissions(workspace string) []opencode.PermissionRule {
 	return rules
 }
 
-// heartbeatPermissions keeps the heartbeat turn read-only except for its one
-// explicit delivery command. OpenCode scans shell commands individually, so a
-// chained write cannot ride along with the allow.
+// heartbeatPermissions keeps the heartbeat turn read-only. Notification
+// delivery is performed by the routine after the turn, not by a
+// model-controlled shell command.
 func heartbeatPermissions(workspace string) []opencode.PermissionRule {
-	rules := readOnlyPermissions(workspace)
-	rules = append(rules,
-		opencode.PermissionRule{Action: "shell", Resource: "*acolyte inbox *", Effect: opencode.PermissionAllow},
-	)
-	return rules
+	return readOnlyPermissions(workspace)
 }
