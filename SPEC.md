@@ -104,11 +104,14 @@ OpenCode's own auth store.
 extend it (add tools/skills); **the agent may edit it on the fly** (OpenCode reloads on save). Rule:
 targeted edits that preserve unrelated keys.
 
-**Capabilities are baked, not runtime-selected.** `acolyte new` takes a `--config` capability selector
-(see `docs/README.md`) and realizes
-them as concrete artifacts (opencode.jsonc entries, skills, cron jobs, persona). Changing a
-capability later = re-run a capability step or edit artifacts — smooth in-place capability updates
-are **deferred** (`FUTURE-IDEAS.md`).
+**Capabilities are baked, then runtime-editable.** `acolyte new` takes a `--config` capability
+selector (see `docs/README.md`) and realizes
+them as concrete artifacts (opencode.jsonc entries, skills, cron jobs, persona). The listed keys
+can afterwards be changed in place with **`acolyte config <agent> get|set|edit`** (§10.5): each
+`set` is validated before anything is written, supports `--dry-run` diffs, and mutates the same
+artifacts `acolyte new` wrote (targeted `opencode.jsonc` edits, registry, store settings, and the
+dream/heartbeat jobs). Keys outside that surface (new memory modes, new channels) still require
+re-running a capability step — see `FUTURE-IDEAS.md`.
 
 **Identity note / tradeoff:** because there's no per-folder config, `name`/`description` live in the
 **registry**, not the folder. Moving a folder to a new machine = re-register (`acolyte new` on the
@@ -441,6 +444,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | Command | Behavior |
 | ------- | -------- |
 | `acolyte new --name <name> --workspace-folder <path> --config '<json>'` | **Scaffold + validate + register** a fresh agent with the capabilities chosen in `--config` (full key reference in [`docs/README.md`](docs/README.md)). On an existing folder it validates + adopts. |
+| `acolyte config <agent> get \| set <key> <value> \| edit` | **Runtime capability mutation** (§4): `get` prints the effective config as `--config`-shaped JSON; `set` updates one durable key (`description`, `engine.model/agent`, `communication.*`, `schedule.*`, `memory-*`) with validate-before-write, `--dry-run` diffs, and `--json`; `edit` opens `opencode.jsonc` in `$EDITOR` and re-validates it (invalid edits are rolled back). Reference: [`docs/orchestrator/config.md`](docs/orchestrator/config.md). |
 | `acolyte status [name \| workspace]` | All agents, or one: name, workspace, last message, job count + next job. |
 | `acolyte delete <name \| workspace>` | Remove from the registry **only**. Folder untouched. |
 | `acolyte cron --title <t> --datetime <cron> (--prompt <text> \| --shell <path> \| --routine <name>) [--routine-args '<json>'] [--dry-run] [--agent-name\|--workspace-folder] [--session-id] [--timezone <IANA>] [--on-success inbox\|notify-user\|log] [--on-failure inbox\|notify-user\|log]` | Create a job. `--title` unique per agent; `--datetime` cron syntax; actions mutually exclusive; agent-name/workspace-folder mutually exclusive; `--dry-run` only with `--routine`. |
@@ -456,8 +460,9 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |
 | `acolyte attach [--session-id <id>]` | Attach the OpenCode TUI to the managed service and agent workspace/session. |
 
-> Runtime capability mutation is not exposed yet; `acolyte new` preserves existing settings on
-> adoption. See `FUTURE-IDEAS.md`.
+> Runtime capability mutation is supported for the keys listed above via `acolyte config` (§4);
+> `acolyte new` still preserves existing settings/jobs on adoption. New modes/channels remain
+> deferred — see `FUTURE-IDEAS.md`.
 
 ---
 
@@ -592,7 +597,10 @@ admit a synthetic event; output is routed via Communication.
 6. **Per-module namespaced schemas** in `.acolyte.sqlite.db` (prefixes) (§9).
 7. **Shared cron service**; `acolyte cron list` shows all jobs from every module (§10).
 8. **No `.acolyte.jsonc`** — capabilities in `opencode.jsonc` + CLI; identity in the registry (§4).
-9. **`acolyte new` bakes capabilities at creation**; smooth capability updates deferred (§4/§10).
+9. **`acolyte new` bakes capabilities at creation**; runtime mutation of the listed keys
+   (`description`, `engine.*`, `communication.*`, `schedule.*`, `memory-*`) is supported through
+   `acolyte config <agent> get|set|edit` with validate-before-write and `--dry-run` (§4/§10.5).
+   New modes/channels stay deferred (`FUTURE-IDEAS.md`).
 10. **`CONFIG.md`** persona file for meta-awareness (§11).
 11. **Docs live in `docs/`** per module/mode (§ see `docs/`), linked from `CONFIG.md`.
 12. **Deferred ideas live in `FUTURE-IDEAS.md`.**

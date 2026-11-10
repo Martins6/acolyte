@@ -140,6 +140,58 @@ func (s *Store) AddCronJob(job CronJob) error {
 	return fmt.Errorf("orch: add cron job %q: %w", job.Title, err)
 }
 
+// UpsertCronJob inserts a job or updates the mutable scheduling fields of the
+// job with the same title, preserving id, created_at, and last_run_at. It is
+// how capability jobs (dream, heartbeat) are re-created with a new spec,
+// timezone, or routine args.
+func (s *Store) UpsertCronJob(job CronJob) error {
+	job.Title = strings.TrimSpace(job.Title)
+	job.Kind = strings.TrimSpace(job.Kind)
+	job.Spec = strings.TrimSpace(job.Spec)
+	if job.Title == "" {
+		return fmt.Errorf("orch: cron job title is required")
+	}
+	if job.Kind == "" {
+		return fmt.Errorf("orch: cron job kind is required")
+	}
+	if job.Spec == "" {
+		return fmt.Errorf("orch: cron job spec is required")
+	}
+	if job.ID == "" {
+		job.ID = newID()
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
+	}
+
+	_, err := s.db.Exec(
+		`INSERT INTO orch_cron_jobs (`+cronColumns+`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(title) DO UPDATE SET
+		   owner = excluded.owner,
+		   kind = excluded.kind,
+		   spec = excluded.spec,
+		   prompt = excluded.prompt,
+		   shell_path = excluded.shell_path,
+		   routine = excluded.routine,
+		   routine_args = excluded.routine_args,
+		   agent_target = excluded.agent_target,
+		   session_id = excluded.session_id,
+		   timezone = excluded.timezone,
+		   enabled = excluded.enabled,
+		   next_run_at = excluded.next_run_at,
+		   meta = excluded.meta`,
+		job.ID, job.Title, job.Owner, job.Kind, job.Spec, job.Prompt, job.ShellPath,
+		job.Routine, defaultString(job.RoutineArgs, "{}"), job.AgentTarget, job.SessionID,
+		job.Timezone, boolInt(job.Enabled), job.LastRunAt, job.NextRunAt, job.CreatedAt,
+		defaultString(job.Meta, "{}"),
+	)
+	if err != nil {
+		return fmt.Errorf("orch: upsert cron job %q: %w", job.Title, err)
+	}
+	return nil
+}
+
 // DeleteCronJob removes a job by title.
 func (s *Store) DeleteCronJob(title string) error {
 	result, err := s.db.Exec(`DELETE FROM orch_cron_jobs WHERE title = ?`, strings.TrimSpace(title))

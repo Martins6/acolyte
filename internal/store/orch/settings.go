@@ -55,3 +55,16 @@ func (s *Store) ListSettings() (map[string]string, error) {
 	}
 	return settings, nil
 }
+
+// DeleteSetting removes a non-secret capability setting. Missing keys are
+// ignored so callers can clear state idempotently.
+func (s *Store) DeleteSetting(key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("orch: setting key is required")
+	}
+	if _, err := s.db.Exec(`DELETE FROM orch_settings WHERE key = ?`, key); err != nil {
+		return fmt.Errorf("orch: delete setting %q: %w", key, err)
+	}
+	return nil
+}

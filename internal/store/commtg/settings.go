@@ -63,3 +63,16 @@ func (s *Store) ListSettings() (map[string]string, error) {
 	}
 	return settings, nil
 }
+
+// DeleteSetting removes a non-secret channel setting. Missing keys are
+// ignored so callers can clear state idempotently.
+func (s *Store) DeleteSetting(key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("comm_tg: setting key is required")
+	}
+	if _, err := s.db.Exec(`DELETE FROM comm_tg_settings WHERE key = ?`, key); err != nil {
+		return fmt.Errorf("comm_tg: delete setting %q: %w", key, err)
+	}
+	return nil
+}

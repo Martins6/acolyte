@@ -17,6 +17,7 @@ turn loop, and provides the shared services every module relies on. It is **fixe
 | Command | Purpose |
 | ------- | ------- |
 | `acolyte new` | Scaffold + validate + register a fresh agent with chosen capabilities. |
+| `acolyte config <agent> get\|set\|edit` | Read or update an agent's runtime capabilities in place ([`config.md`](config.md)). |
 | `acolyte status` | Show agents (name, workspace, last message, jobs + next job). |
 | `acolyte delete` | Remove an agent from the registry (folder untouched). |
 | `acolyte cron ...` | List/add/remove prompt, shell, or routine jobs. |
@@ -34,4 +35,5 @@ The daemon runs at boot via `launchd` (macOS) or `systemd` (Linux) — see
 ## Docs
 - [`daemon.md`](daemon.md) — per-agent adapters, turn routing, inspect/attach.
 - [`cron.md`](cron.md) — the shared cron service.
+- [`config.md`](config.md) — `acolyte config` runtime capability updates.
 - [`autostart.md`](autostart.md) — running always-on.
