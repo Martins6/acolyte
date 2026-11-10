@@ -41,6 +41,30 @@ jobs:
       - name: Unit tests
         run: go test -race -count=1 ./...
 
+  # Hermetic Telegram regression suite. It talks to the in-process Bot API
+  # emulator over HTTP, so it needs no bot token, network, or OpenCode service
+  # and runs for every PR, including forks and drafts.
+  telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Telegram emulator suite
+        run: go test -race -count=1 -v -run EmulatedTelegram ./internal/comm/telegram/... ./internal/daemon/
+
   # Live end-to-end check. It runs only on a push to dev or a manual dispatch,
   # never on a PR: the provider credential is available to the service process
   # and the test code runs on the same runner, so exposing it to PR-controlled
@@ -49,7 +73,7 @@ jobs:
     needs: unit
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Hard cap. The suite allows at most three turns (two live turns plus one
+    # Hard cap. The suite allows at most four turns (three live turns plus one
     # zero-cost failure case); anything slower than 15 minutes fails the check.
     timeout-minutes: 15
     environment: OPENCODE_GO_API_KEY
@@ -96,7 +120,7 @@ jobs:
           done
           opencode api get /api/info
 
-      - name: Run live E2E (max 3 turns)
+      - name: Run live E2E (max 4 turns)
         env:
           ACOLYTE_E2E: "1"
           ACOLYTE_E2E_MODEL: opencode-go/gpt-6-luna

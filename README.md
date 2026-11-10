@@ -266,7 +266,7 @@ For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file
 ├── e2e/                    # Opt-in live end-to-end tests (build tag: e2e)
 ├── internal/
 │   ├── agent/             # --config parsing + create/adopt workflow
-│   ├── comm/              # Envelope router, outbox sink, Telegram adapter
+│   ├── comm/              # Envelope router, outbox sink, Telegram adapter + test emulator
 │   ├── cron/              # Shared scheduler + execution
 │   ├── daemon/            # Per-agent adapter lifecycle + routing
 │   ├── envelope/          # The Communication ⇄ Orchestrator message type
@@ -299,6 +299,16 @@ go test ./...
 go test -race -count=1 ./...
 ```
 
+The Telegram communication layer has a hermetic regression suite backed by an
+in-process Bot API emulator (`internal/comm/telegram/telegramtest`). It drives
+the real adapter over HTTP — polling, dedup, authorization, media downloads,
+chunking, retries, replay and daemon routing — without a bot token or Telegram
+network access:
+
+```bash
+go test -race -count=1 -v -run EmulatedTelegram ./internal/comm/telegram/... ./internal/daemon/
+```
+
 Live end-to-end tests build the CLI and run real turns against the OpenCode
 service configured on the machine:
 
@@ -308,16 +318,18 @@ ACOLYTE_E2E_MODEL=opencode-go/gpt-6-luna \
 go test -tags=e2e ./e2e/... -v -count=1
 ```
 
-The live suite is deliberately small (two live turns plus one zero-cost failure
-case). CI runs the unit suite on every PR. The live job runs after merges to
-`dev` (and on manual dispatch), not on PRs, because the provider credential must
-not be exposed to PR-controlled code. It has a hard 15-minute timeout.
+The live suite is deliberately small (three live turns plus one zero-cost
+failure case, including one turn through the Telegram emulator and the real
+daemon). CI runs the unit and Telegram emulator suites on every PR. The live
+job runs after merges to `dev` (and on manual dispatch), not on PRs, because
+the provider credential must not be exposed to PR-controlled code. It has a
+hard 15-minute timeout.
 
 ### GitHub Workflow
 
 GitHub Actions runs the PR test suite and automatic review:
 
-- `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR. After merges to `dev` (and on manual dispatch), it starts the managed OpenCode service with `OPENCODE_GO_API_KEY` and runs the live E2E suite with a hard 15-minute timeout. PRs never receive the provider credential.
+- `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR, plus a dedicated hermetic `test / telegram` job for the Bot API emulator suite. After merges to `dev` (and on manual dispatch), it starts the managed OpenCode service with `OPENCODE_GO_API_KEY` and runs the live E2E suite with a hard 15-minute timeout. PRs never receive the provider credential.
 - `.github/workflows/opencode-review.yml` — reviews every non-draft PR opened by the repository owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs from any other author never trigger the agent.
 
 Each review posts exactly one PR review whose body starts with a `## Verdict` heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff. The workflow removes the action's automatic comment so the review is the only thing left on the PR.
@@ -326,7 +338,7 @@ The model is pinned in the workflow itself (`opencode-go/gpt-6-luna`); no projec
 
 Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner, and only the owner has merge rights. The gate (`.github/workflows/pr-guard.yml`) runs from the base branch definition via `pull_request_target` and posts a `pr-guard` commit status on the PR head SHA, so a PR cannot redefine its own gate.
 
-Mark `test / unit` as a required status check for PRs. The live E2E is a post-merge check on `dev` (and manual dispatch); it does not run on PRs because it needs the provider credential. A live run that exceeds the 15-minute cap fails the check.
+Mark `test / unit` and `test / telegram` as required status checks for PRs. The live E2E is a post-merge check on `dev` (and manual dispatch); it does not run on PRs because it needs the provider credential. A live run that exceeds the 15-minute cap fails the check.
 
 To enable it:
 
