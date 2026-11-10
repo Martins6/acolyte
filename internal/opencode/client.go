@@ -30,6 +30,22 @@ type SessionInfo struct {
 	Time        SessionTime      `json:"time,omitempty"`
 	Location    SessionLocation  `json:"location,omitempty"`
 	Permissions []PermissionRule `json:"permissions,omitempty"`
+
+	// Raw is the exact session projection returned by the service. It is kept
+	// for trace exports that must preserve fields this client does not model.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON retains the original projection alongside the typed fields.
+func (s *SessionInfo) UnmarshalJSON(data []byte) error {
+	type alias SessionInfo
+	var value alias
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*s = SessionInfo(value)
+	s.Raw = append(s.Raw[:0], data...)
+	return nil
 }
 
 // SessionTime holds session epoch-millisecond timestamps.
@@ -54,6 +70,23 @@ type Message struct {
 	Content []ContentPart `json:"content"`
 	Outcome string        `json:"outcome"`
 	Finish  string        `json:"finish"`
+
+	// Raw is the exact message returned by the service. Trace exports use it
+	// to render fields beyond the reply-oriented projection above (tool state,
+	// reasoning, metadata, attachments, cost, tokens, ...).
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON retains the original message alongside the typed fields.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type alias Message
+	var value alias
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*m = Message(value)
+	m.Raw = append(m.Raw[:0], data...)
+	return nil
 }
 
 // MessageTime holds epoch-millisecond timestamps of a message.
@@ -270,6 +303,23 @@ func (c *Client) Context(ctx context.Context, sessionID string) ([]Message, erro
 	}
 	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// ExportSession returns the OpenCode-native transfer payload for a session
+// (info + complete projected messages). It is the format accepted by
+// POST /api/experimental/session/import.
+func (c *Client) ExportSession(ctx context.Context, sessionID string) (json.RawMessage, error) {
+	path := "/api/experimental/session/" + url.PathEscape(sessionID) + "/export"
+	var resp struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Data) == 0 {
+		return nil, fmt.Errorf("opencode: empty session export for %s", sessionID)
 	}
 	return resp.Data, nil
 }

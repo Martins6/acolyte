@@ -48,6 +48,9 @@ means *both* instructions-in-context + the `skill` tool.
 | `memory-learn` | `{mode,args}` \| null | `simple-dreaming` | `days:int` | [`memory-learn/simple-dreaming.md`](memory/memory-learn/simple-dreaming.md) |
 | `memory-export` | `{mode,args}` \| null | `opencode-export` | — | [`memory-export/opencode-export.md`](memory/memory-export/opencode-export.md) |
 
+The `opencode-export` mode is run with `acolyte memory export --out <zip>`; it writes a
+portable Markdown + JSON trace bundle.
+
 ### Communication — [`communication/README.md`](communication/README.md)
 | Key | Type | Channels | Meaning | Doc |
 | --- | ---- | -------- | ------- | --- |

@@ -246,10 +246,14 @@ it produces**, documented in `docs/memory/…`.
   `consolidate`. See `docs/memory/memory-learn/simple-dreaming.md`.
 
 ### 6.4 `memory-export` — portability
-- **`opencode-export` (v0):** bundles the agent's memory (skills + persona + hub) into an
-  **OpenCode-native** portable format — a drop-in skills/instructions set another OpenCode workspace
-  or Acolyte agent can import. A future CLI entry (`acolyte memory export`) is planned but not
-  registered yet; the mode can still be run through its documented skill/artifacts.
+- **`opencode-export` (v0):** `acolyte memory export --out <zip>` writes a portable memory trace
+  bundle: every OpenCode session as a Markdown timeline (messages, reasoning, tool calls, idle
+  markers, and communication routing events), the persona + skills (`AGENTS.md`,
+  `opencode.jsonc`, `.acolyte/*.md`, `.agents/skills/**`), orchestrator logs/cron/session
+  mappings, communication state, and `mem_dreams` audit rows. Each session also gets the
+  OpenCode-native transfer JSON when the service supports the experimental export endpoint, so the
+  bundle can be imported into another OpenCode workspace. The zip is self-contained and readable
+  without Acolyte.
 - *Other modes (planned):* `portable-archive`, `remote-catalog`. See `docs/memory/memory-export/`.
 
 > Because Memory is contract-free, adding a mode = adding a documented recipe under `docs/memory/…`
@@ -445,6 +449,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte cron tick` | Drain currently due jobs (testing/debugging). |
 | `acolyte inbox "<text>"` | Deliver an external event to the agent on a session (§10.4). |
 | `acolyte run "<text>"` | Run one real user turn headlessly, print the reply, and map the session to `cli:<agent>`; `--continue` reuses it. Default is a new session, not the latest. |
+| `acolyte memory export --out <zip> [--agent-name\|--workspace-folder] [--session-id <id>] [--no-opencode] [--force]` | Write the portable memory trace bundle (§6.4): per-session Markdown timelines + persona/skills + orchestrator/communication state. |
 | `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
 | `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |
 | `acolyte attach [--session-id <id>]` | Attach the OpenCode TUI to the managed service and agent workspace/session. |

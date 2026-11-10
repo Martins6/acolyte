@@ -49,6 +49,41 @@ func (s *Store) RecordDream(dream Dream) error {
 	return nil
 }
 
+// ListDreams returns recorded memory-learn runs in chronological order.
+func (s *Store) ListDreams(limit int) ([]Dream, error) {
+	query := `SELECT id, ran_at, sessions_scanned, skills_created, dry_run, note
+		FROM mem_dreams ORDER BY ran_at, id`
+	args := []any{}
+	if limit > 0 {
+		query = `SELECT id, ran_at, sessions_scanned, skills_created, dry_run, note FROM (
+			SELECT id, ran_at, sessions_scanned, skills_created, dry_run, note
+			FROM mem_dreams ORDER BY ran_at DESC, id DESC LIMIT ?
+		) ORDER BY ran_at, id`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("mem: list dreams: %w", err)
+	}
+	defer rows.Close()
+
+	var dreams []Dream
+	for rows.Next() {
+		var dream Dream
+		var dryRun int
+		if err := rows.Scan(&dream.ID, &dream.RanAt, &dream.SessionsScanned,
+			&dream.SkillsCreated, &dryRun, &dream.Note); err != nil {
+			return nil, fmt.Errorf("mem: scan dream: %w", err)
+		}
+		dream.DryRun = dryRun != 0
+		dreams = append(dreams, dream)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("mem: list dreams: %w", err)
+	}
+	return dreams, nil
+}
+
 func newID() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {

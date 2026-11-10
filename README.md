@@ -158,6 +158,25 @@ that is already mapped to the agent. Use `acolyte inspect --session-id <id>` to
 read the transcript, or `acolyte attach --agent-name <agent>` to open the latest
 session in the TUI.
 
+### 7. Export a Memory Trace
+
+`acolyte memory export` writes one portable zip containing every OpenCode
+session as a Markdown timeline (messages, reasoning, tool calls, and
+communication routing events), plus the persona/skills, orchestrator logs,
+cron/session state, communication state, and memory-learn audit rows:
+
+```bash
+acolyte memory export --agent-name valet --out ~/valet-memory.zip
+acolyte memory export --agent-name valet --out one-session.zip --session-id ses_...
+acolyte memory export --agent-name valet --out store-only.zip --no-opencode
+```
+
+The unzipped folder is self-contained: another agent can read `README.md`,
+`manifest.json`, and `sessions/*.md` as external memory. Native
+`sessions/<id>.json` files are included when the OpenCode service supports the
+experimental session export endpoint. Existing zips are not overwritten unless
+`--force` is passed.
+
 ## Agent Workspace
 
 `acolyte new` creates the SPEC v0 layout:
@@ -220,6 +239,7 @@ sends back to the user is currently text-only; sender-side media is deferred.
 | `acolyte notify-user "<text>"`               | Notify the user only (never the agent)         |
 | `acolyte inbox "<text>"`                     | Deliver a synthetic external event to an agent |
 | `acolyte run "<text>"`                       | Run one headless agent turn (no Telegram/TUI)  |
+| `acolyte memory export --out <zip>`          | Export the full memory trace as a zip          |
 | `acolyte inspect --session-id <id>`          | Merge OpenCode history with routing events     |
 | `acolyte attach [--agent-name <n>]`          | Attach the OpenCode TUI to the agent session   |
 | `acolyte start`                              | Start the multi-agent daemon                   |

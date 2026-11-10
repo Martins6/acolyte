@@ -13,7 +13,7 @@ a mode must implement — a mode is defined by its behavior and the artifacts it
 | [`memory-load`](memory-load/default.md) | Surface initial memory into context. | `default` | — |
 | [`memory-access`](memory-access/native.md) | Read/query memory during a session. | `null` (= native **both**) | — |
 | [`memory-learn`](memory-learn/simple-dreaming.md) | Improve memory from sessions. | `simple-dreaming` | `days: 3` |
-| [`memory-export`](memory-export/opencode-export.md) | Export memory for portability. | `opencode-export` | — |
+| [`memory-export`](memory-export/opencode-export.md) | Export memory + full session trace for portability. | `opencode-export` | — |
 
 ## Value semantics
 
