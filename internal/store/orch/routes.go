@@ -88,6 +88,34 @@ func (s *Store) DueCronRoutes(now time.Time, limit int) ([]CronRoute, error) {
 	return routes, nil
 }
 
+// ListCronRoutes returns every durable delivery intent in chronological order.
+func (s *Store) ListCronRoutes() ([]CronRoute, error) {
+	rows, err := s.db.Query(`SELECT ` + cronRouteColumns + ` FROM orch_cron_routes
+		ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("orch: list cron routes: %w", err)
+	}
+	defer rows.Close()
+
+	var routes []CronRoute
+	for rows.Next() {
+		var route CronRoute
+		var nextAttempt, deliveredAt sql.NullTime
+		if err := rows.Scan(&route.ID, &route.AgentTarget, &route.ChatID, &route.Text,
+			&route.OpenCodeSessionID, &route.SourceMessageID, &route.Attempts,
+			&nextAttempt, &route.LastError, &route.CreatedAt, &deliveredAt); err != nil {
+			return nil, fmt.Errorf("orch: scan cron route: %w", err)
+		}
+		route.NextAttemptAt = timePtr(nextAttempt)
+		route.DeliveredAt = timePtr(deliveredAt)
+		routes = append(routes, route)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("orch: list cron routes: %w", err)
+	}
+	return routes, nil
+}
+
 // MarkCronRouteDelivered completes a route.
 func (s *Store) MarkCronRouteDelivered(id string, at time.Time) error {
 	if at.IsZero() {

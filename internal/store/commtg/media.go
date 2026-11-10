@@ -44,6 +44,29 @@ func (s *Store) RecordMedia(item MediaItem) error {
 	return nil
 }
 
+// ListMedia returns every downloaded Telegram file in save order.
+func (s *Store) ListMedia() ([]MediaItem, error) {
+	rows, err := s.db.Query(`SELECT tg_file_id, file_path, type, chat_id, saved_at
+		FROM comm_tg_media ORDER BY saved_at, tg_file_id`)
+	if err != nil {
+		return nil, fmt.Errorf("comm_tg: list media: %w", err)
+	}
+	defer rows.Close()
+
+	var items []MediaItem
+	for rows.Next() {
+		var item MediaItem
+		if err := rows.Scan(&item.TGFileID, &item.FilePath, &item.Type, &item.ChatID, &item.SavedAt); err != nil {
+			return nil, fmt.Errorf("comm_tg: scan media: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("comm_tg: list media: %w", err)
+	}
+	return items, nil
+}
+
 // GetMedia returns a downloaded file by Telegram file ID.
 func (s *Store) GetMedia(tgFileID string) (MediaItem, bool, error) {
 	var item MediaItem

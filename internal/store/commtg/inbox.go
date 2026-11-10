@@ -263,6 +263,17 @@ func (s *Store) ListInbox(chatID int64) ([]InboxItem, error) {
 	return scanInbox(rows)
 }
 
+// ListAllInbox returns every inbound row in chronological order.
+func (s *Store) ListAllInbox() ([]InboxItem, error) {
+	rows, err := s.db.Query(`SELECT ` + inboxColumns + ` FROM comm_tg_inbox
+		ORDER BY received_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("comm_tg: list all inbox: %w", err)
+	}
+	defer rows.Close()
+	return scanInbox(rows)
+}
+
 // GetInboxByEnvelope returns one inbound row.
 func (s *Store) GetInboxByEnvelope(envelopeID string) (InboxItem, bool, error) {
 	var item InboxItem
