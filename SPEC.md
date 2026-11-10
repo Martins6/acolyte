@@ -165,9 +165,11 @@ permission rules), `GET /api/session/stats`, `GET /api/agent`, `event.subscribe(
 **Caveats:**
 - The orchestrator must discover/start the OpenCode service (`opencode serve --service`); internal
   `opencode/server.go` already does this.
-- The V2 API is OpenCode's "only intentional breaking change" — pin it and **generate a Go client
-  from `/openapi.json`**, behind one thin internal client so breakage is contained. (Not an engine
-  abstraction — still OpenCode-only; just transport hygiene.)
+- The V2 API is OpenCode's "only intentional breaking change" — pin it and vendor the release's
+  `/openapi.json` under `internal/opencode/contract/`, with a contract test that guards every path,
+  method, schema, and schema property the thin client uses (`docs/opencode/v2-contract.md`). CI
+  installs the same pinned OpenCode version. (Not an engine abstraction — still OpenCode-only; just
+  transport hygiene.)
 - Existing `internal/opencode/client.go` uses V1-style paths (`/session/{id}/message`); retarget to
   V2 (`/api/...`) with `synthetic` + `inbox` for external events and `prompt` for real user turns, and
   retire the CLI `runner.go` turn path.
@@ -622,6 +624,9 @@ admit a synthetic event; output is routed via Communication.
     interesting (otherwise `NO_ACTION`), and the routine delivers it to the latest non-cron session
     through the communication sink. The turn is read-only and the routine returns empty so cron does
     not double-notify (§10.3).
+27. **The OpenCode V2 contract is pinned** to `2.2.7`: the release's `/openapi.json` is vendored
+    under `internal/opencode/contract/`, guarded by a hash + path/schema contract test, and CI
+    installs the same version (§5.1, `docs/opencode/v2-contract.md`).
 
 **[OPEN] forks:**
 None.
