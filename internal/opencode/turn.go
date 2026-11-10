@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/martins6/acolyte/internal/lock"
 )
 
 // turnTimeout matches the retired CLI runner's 5-minute cap.
@@ -25,6 +27,11 @@ type TurnConfig struct {
 	Agent     string
 	Provider  string
 	Model     string
+	// Permissions, when non-nil, temporarily replaces the session-scoped
+	// permission rules for this turn and restores the previous rules
+	// afterwards. Routine turns use it to confine untrusted model output to
+	// memory paths instead of relying on prompt instructions.
+	Permissions []PermissionRule
 }
 
 // SyntheticEvent is an external/background event admitted to a session
@@ -52,46 +59,120 @@ type TurnResult struct {
 // RunUserTurn drives one real user turn: ensure session, sync agent/model,
 // admit a prompt, wait for the agent loop to go idle, and collect the reply.
 // An empty sessionID creates a fresh session rooted at cfg.Workspace.
-func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg TurnConfig) (*TurnResult, error) {
+func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg TurnConfig) (result *TurnResult, err error) {
 	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
+	sessionID = strings.TrimSpace(sessionID)
 
-	sessionID, err := c.ensureSession(ctx, sessionID, cfg)
+	var held *lock.Lock
+	defer func() {
+		if held == nil {
+			return
+		}
+		if releaseErr := held.Release(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("opencode: release session lock: %w", releaseErr))
+		}
+	}()
+
+	// Existing sessions are locked before any session mutation so two
+	// callers cannot interleave prompts on the same conversation.
+	if sessionID != "" {
+		held, err = lock.AcquireSession(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("opencode: lock session %s: %w", sessionID, err)
+		}
+	}
+
+	info, err := c.ensureSession(ctx, sessionID, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	item, err := c.Prompt(ctx, sessionID, text)
-	if err != nil {
-		return &TurnResult{SessionID: sessionID, InputID: inboxID(item)}, err
+	// A new session id is unique to this call, so it only needs a lock once
+	// the server has assigned it.
+	if sessionID == "" {
+		held, err = lock.AcquireSession(ctx, info.ID)
+		if err != nil {
+			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: lock session %s: %w", info.ID, err)
+		}
 	}
-	result, err := c.collectTurn(ctx, sessionID, item.ID)
+
+	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
 	if err != nil {
-		return &TurnResult{SessionID: sessionID, InputID: inboxID(item)}, err
+		return &TurnResult{SessionID: info.ID}, err
 	}
-	return result, nil
+	defer func() {
+		if restoreErr := restore(); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
+	}()
+
+	item, err := c.Prompt(ctx, info.ID, text)
+	if err != nil {
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	turn, err := c.collectTurn(ctx, info.ID, item.ID)
+	if err != nil {
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	return turn, nil
 }
 
 // RunSyntheticTurn admits an external event and collects the agent's reaction.
 // An empty sessionID creates a fresh session rooted at cfg.Workspace.
-func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (*TurnResult, error) {
+func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (result *TurnResult, err error) {
 	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
+	sessionID = strings.TrimSpace(sessionID)
 
-	sessionID, err := c.ensureSession(ctx, sessionID, cfg)
+	var held *lock.Lock
+	defer func() {
+		if held == nil {
+			return
+		}
+		if releaseErr := held.Release(); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("opencode: release session lock: %w", releaseErr))
+		}
+	}()
+
+	if sessionID != "" {
+		held, err = lock.AcquireSession(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("opencode: lock session %s: %w", sessionID, err)
+		}
+	}
+
+	info, err := c.ensureSession(ctx, sessionID, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	item, err := c.Synthetic(ctx, sessionID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
-	if err != nil {
-		return &TurnResult{SessionID: sessionID, InputID: inboxID(item)}, err
+	if sessionID == "" {
+		held, err = lock.AcquireSession(ctx, info.ID)
+		if err != nil {
+			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: lock session %s: %w", info.ID, err)
+		}
 	}
-	result, err := c.collectTurn(ctx, sessionID, item.ID)
+
+	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
 	if err != nil {
-		return &TurnResult{SessionID: sessionID, InputID: inboxID(item)}, err
+		return &TurnResult{SessionID: info.ID}, err
 	}
-	return result, nil
+	defer func() {
+		if restoreErr := restore(); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
+	}()
+
+	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
+	if err != nil {
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	turn, err := c.collectTurn(ctx, info.ID, item.ID)
+	if err != nil {
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	return turn, nil
 }
 
 func inboxID(item *InboxItem) string {
@@ -103,32 +184,59 @@ func inboxID(item *InboxItem) string {
 
 // ensureSession creates the session when missing and brings its agent/model in
 // line with cfg on existing sessions.
-func (c *Client) ensureSession(ctx context.Context, sessionID string, cfg TurnConfig) (string, error) {
+func (c *Client) ensureSession(ctx context.Context, sessionID string, cfg TurnConfig) (*SessionInfo, error) {
 	model := modelRef(cfg)
 
 	if sessionID == "" {
 		info, err := c.CreateSession(ctx, cfg.Workspace, cfg.Agent, model)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return info.ID, nil
+		return info, nil
 	}
 
 	info, err := c.GetSession(ctx, sessionID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if cfg.Agent != "" && info.Agent != cfg.Agent {
 		if err := c.SwitchAgent(ctx, sessionID, cfg.Agent); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 	if model != nil && (info.Model == nil || info.Model.ID != model.ID || info.Model.ProviderID != model.ProviderID) {
 		if err := c.SwitchModel(ctx, sessionID, *model); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
-	return sessionID, nil
+	return info, nil
+}
+
+// permissionRestoreTimeout bounds the restore call after a turn; it must not
+// inherit the turn's canceled/deadline context.
+var permissionRestoreTimeout = 10 * time.Second
+
+// restrictSession applies a per-turn permission ruleset and returns a restore
+// function. It is a no-op when permissions is nil, so ordinary user turns do
+// not touch session state. A failed restriction aborts the turn (fail closed);
+// a failed restore is surfaced to the caller but leaves the safer rules in
+// place.
+func (c *Client) restrictSession(ctx context.Context, info *SessionInfo, permissions []PermissionRule) (func() error, error) {
+	if permissions == nil {
+		return func() error { return nil }, nil
+	}
+	previous := info.Permissions
+	if err := c.SetSessionPermissions(ctx, info.ID, permissions); err != nil {
+		return nil, fmt.Errorf("opencode: apply session permissions: %w", err)
+	}
+	return func() error {
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), permissionRestoreTimeout)
+		defer cancel()
+		if err := c.SetSessionPermissions(restoreCtx, info.ID, previous); err != nil {
+			return fmt.Errorf("opencode: restore session permissions: %w", err)
+		}
+		return nil
+	}, nil
 }
 
 // collectTurn waits for the agent loop to go idle and returns the assistant

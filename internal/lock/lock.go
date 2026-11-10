@@ -5,11 +5,14 @@
 package lock
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/martins6/acolyte/internal/paths"
 	"golang.org/x/sys/unix"
@@ -48,6 +51,43 @@ func Acquire(workspace string) (*Lock, error) {
 		return nil, fmt.Errorf("lock: acquire %s: %w", path, err)
 	}
 	return &Lock{file: file}, nil
+}
+
+// AcquireSession blocks until the per-session turn lock is held or ctx is
+// done. The advisory flock is shared by every process using the same
+// $ACOLYTE_HOME, so CLI turns and daemon turns cannot interleave on one
+// OpenCode session.
+func AcquireSession(ctx context.Context, sessionID string) (*Lock, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	path, err := SessionPath(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, fmt.Errorf("lock: create directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("lock: open %s: %w", path, err)
+	}
+	for {
+		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return &Lock{file: file}, nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			file.Close()
+			return nil, fmt.Errorf("lock: acquire %s: %w", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			file.Close()
+			return nil, fmt.Errorf("lock: acquire %s: %w", path, ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // Release unlocks and closes the lock file.

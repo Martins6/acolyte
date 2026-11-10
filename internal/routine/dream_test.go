@@ -24,6 +24,46 @@ func routineTestClient(t *testing.T, handler http.HandlerFunc) *opencode.Client 
 	return opencode.NewClient(server.URL, "pw")
 }
 
+// permissionRecorder captures the session-scoped rules the routine applies
+// before and after each model turn.
+type permissionRecorder []permissionUpdate
+
+type permissionUpdate struct {
+	sessionID string
+	rules     []opencode.PermissionRule
+}
+
+func (p *permissionRecorder) handle(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
+	t.Helper()
+	if r.Method != http.MethodPatch || !strings.HasPrefix(r.URL.Path, "/api/session/") {
+		return false
+	}
+	var body struct {
+		Permissions []opencode.PermissionRule `json:"permissions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		t.Fatalf("decode permissions: %v", err)
+	}
+	*p = append(*p, permissionUpdate{
+		sessionID: strings.TrimPrefix(r.URL.Path, "/api/session/"),
+		rules:     body.Permissions,
+	})
+	w.WriteHeader(http.StatusNoContent)
+	return true
+}
+
+// routineTestClientWithPermissions answers permission PATCHes and records them
+// so routine tests can assert the per-turn rules.
+func routineTestClientWithPermissions(t *testing.T, permissions *permissionRecorder, handler http.HandlerFunc) *opencode.Client {
+	t.Helper()
+	return routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if permissions.handle(t, w, r) {
+			return
+		}
+		handler(w, r)
+	})
+}
+
 func writeRoutineFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -45,7 +85,8 @@ func TestDreamRoutineTwoPhaseWritesAndAudit(t *testing.T) {
 
 	var analysisPrompt, writerPrompt string
 	now := time.Now().UTC()
-	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
 			fmt.Fprintf(w, `{"data":[
@@ -108,6 +149,31 @@ func TestDreamRoutineTwoPhaseWritesAndAudit(t *testing.T) {
 	if !strings.Contains(writerPrompt, "UNTRUSTED") || !strings.Contains(writerPrompt, "<untrusted_candidate_claims>") {
 		t.Errorf("writer prompt does not fence candidate claims:\n%s", writerPrompt)
 	}
+	if len(permissions) != 4 {
+		t.Fatalf("permission updates = %+v, want analysis/writer restrict+restore", permissions)
+	}
+	analysisRules := permissions[0].rules
+	if got := permissionEffect(analysisRules, "edit", filepath.Join(ws, ".acolyte", "SOUL.md")); got != opencode.PermissionDeny {
+		t.Errorf("analysis edit permission = %s, want deny", got)
+	}
+	if got := permissionEffect(analysisRules, "shell", "rm -rf "+ws); got != opencode.PermissionDeny {
+		t.Errorf("analysis shell permission = %s, want deny", got)
+	}
+	writerRules := permissions[2].rules
+	if got := permissionEffect(writerRules, "edit", filepath.Join(ws, ".acolyte", "SOUL.md")); got != opencode.PermissionAllow {
+		t.Errorf("writer SOUL.md permission = %s, want allow", got)
+	}
+	if got := permissionEffect(writerRules, "edit", filepath.Join(ws, ".acolyte", "HEARTBEAT.md")); got != opencode.PermissionDeny {
+		t.Errorf("writer HEARTBEAT.md permission = %s, want deny", got)
+	}
+	if got := permissionEffect(writerRules, "shell", "touch "+filepath.Join(ws, "pwned")); got != opencode.PermissionDeny {
+		t.Errorf("writer shell permission = %s, want deny", got)
+	}
+	for _, index := range []int{1, 3} {
+		if len(permissions[index].rules) != 0 {
+			t.Errorf("restored rules = %+v, want empty", permissions[index].rules)
+		}
+	}
 	if raw, err := os.ReadFile(filepath.Join(ws, ".acolyte", "SOUL.md")); err != nil || string(raw) != "new soul" {
 		t.Errorf("SOUL.md = %q, %v; want writer update", raw, err)
 	}
@@ -146,7 +212,8 @@ func TestDreamRoutineDryRunRevertsWrites(t *testing.T) {
 
 	now := time.Now().UTC()
 	var analysisPrompt string
-	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
 			fmt.Fprintf(w, `{"data":[{"id":"ses_user","time":{"updated":%d},"location":{"directory":%q}}]}`, now.UnixMilli(), ws)
@@ -211,7 +278,8 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 	defer st.Close()
 
 	now := time.Now().UTC()
-	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
 			fmt.Fprintf(w, `{"data":[{"id":"ses_user","time":{"updated":%d},"location":{"directory":%q}}]}`, now.UnixMilli(), ws)
@@ -309,7 +377,8 @@ func TestDreamRoutineRejectsSymlink(t *testing.T) {
 	defer st.Close()
 
 	now := time.Now().UTC()
-	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
 			fmt.Fprintf(w, `{"data":[{"id":"ses_user","time":{"updated":%d},"location":{"directory":%q}}]}`, now.UnixMilli(), ws)
@@ -344,7 +413,8 @@ func TestDreamRoutineAuditsOnTurnError(t *testing.T) {
 	defer st.Close()
 
 	now := time.Now().UTC()
-	client := routineTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
 			fmt.Fprintf(w, `{"data":[{"id":"ses_user","time":{"updated":%d},"location":{"directory":%q}}]}`, now.UnixMilli(), ws)
@@ -383,6 +453,69 @@ func TestDreamRoutineAuditsOnTurnError(t *testing.T) {
 	session, ok, err := st.Orch().GetSessionByThread("cron:dream")
 	if err != nil || !ok || session.OpenCodeSessionID != "ses_dream" {
 		t.Errorf("analysis session = %+v, %v, %v; want retained session", session, ok, err)
+	}
+}
+
+func TestDreamRoutineFailsClosedWhenMemoryRootBecomesSymlink(t *testing.T) {
+	ws := t.TempDir()
+	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "SOUL.md"), "old soul")
+	external := t.TempDir()
+	writeRoutineFile(t, filepath.Join(external, "SOUL.md"), "external content")
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Now().UTC()
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
+			fmt.Fprintf(w, `{"data":[{"id":"ses_user","time":{"updated":%d},"location":{"directory":%q}}]}`, now.UnixMilli(), ws)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_user/message":
+			fmt.Fprint(w, `{"data":[{"id":"m1","type":"user","text":"hello"}],"cursor":{"next":null}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_dream":
+			fmt.Fprint(w, `{"data":{"id":"ses_dream"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_dream/synthetic":
+			// Simulate a turn that replaces the memory root with a symlink to
+			// an external directory, bypassing the model-level restrictions.
+			if err := os.RemoveAll(filepath.Join(ws, ".acolyte")); err != nil {
+				t.Errorf("remove .acolyte: %v", err)
+			}
+			if err := os.Symlink(external, filepath.Join(ws, ".acolyte")); err != nil {
+				t.Errorf("symlink .acolyte: %v", err)
+			}
+			fmt.Fprint(w, `{"data":{"id":"msg_analysis","sessionID":"ses_dream","type":"synthetic"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_dream/wait":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_dream/message":
+			fmt.Fprint(w, `{"data":[{"id":"msg_analysis_reply","type":"assistant","content":[{"type":"text","text":"claim"}]},{"id":"msg_analysis","type":"synthetic","text":"prompt"}],"cursor":{"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	env := Env{
+		Agent: registry.Agent{Name: "valet", Workspace: ws}, Workspace: ws,
+		Thread: "cron:dream", SessionID: "ses_dream", Meta: map[string]any{},
+		Now: func() time.Time { return now }, Store: st, OpenCode: client,
+		Log: func(string, string, map[string]any) {},
+	}
+	_, err = (dreamRoutine{}).Run(context.Background(), env, map[string]any{"days": 3})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("dream Run() error = %v, want symlink audit failure", err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(external, "SOUL.md")); err != nil || string(raw) != "external content" {
+		t.Errorf("external SOUL.md = %q, %v; want unchanged", raw, err)
+	}
+	var note string
+	if err := st.DB().QueryRow(`SELECT note FROM mem_dreams`).Scan(&note); err != nil {
+		t.Fatalf("read dream: %v", err)
+	}
+	if !strings.Contains(note, "audit error") {
+		t.Errorf("note = %s, want audit error", note)
 	}
 }
 

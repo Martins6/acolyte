@@ -3,6 +3,8 @@
 package lock
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -30,6 +32,24 @@ func Acquire(workspace string) (*Lock, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
+	}
+	return &Lock{file: file}, nil
+}
+
+// AcquireSession mirrors AcquireSession on platforms without flock; it creates
+// the lock file so callers can use the same API.
+func AcquireSession(ctx context.Context, sessionID string) (*Lock, error) {
+	_ = ctx
+	path, err := SessionPath(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, fmt.Errorf("lock: create directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("lock: open %s: %w", path, err)
 	}
 	return &Lock{file: file}, nil
 }

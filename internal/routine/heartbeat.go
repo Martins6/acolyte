@@ -32,7 +32,10 @@ func (heartbeatRoutine) Run(ctx context.Context, env Env, args map[string]any) (
 		return "", err
 	}
 	interval, _ := args["interval"].(int)
-	notes := readHeartbeatNotes(env.Workspace)
+	notes, err := readHeartbeatNotes(env.Workspace)
+	if err != nil {
+		return "", err
+	}
 
 	targetSessionID := ""
 	digest := ""
@@ -59,13 +62,31 @@ func (heartbeatRoutine) Run(ctx context.Context, env Env, args map[string]any) (
 			"target":   targetSessionID,
 		},
 		Delivery: "queue",
-	}, opencode.TurnConfig{Workspace: env.Workspace})
+	}, opencode.TurnConfig{Workspace: env.Workspace, Permissions: heartbeatPermissions(env.Workspace)})
 	if err != nil {
 		return "", fmt.Errorf("routine: heartbeat turn: %w", err)
 	}
 	if err := persistSession(env, result.SessionID); err != nil {
 		return "", err
 	}
+
+	// Delivery is performed here, not by a model-controlled shell command:
+	// the heartbeat turn stays read-only and the target is always the latest
+	// user session resolved above.
+	if targetSessionID != "" {
+		if message, ok := heartbeatNotification(result.ResponseText); ok {
+			if env.InboxSession == nil {
+				return "", fmt.Errorf("routine: heartbeat notification delivery is unavailable")
+			}
+			if _, _, err := env.InboxSession(ctx, targetSessionID, message, map[string]any{
+				"routine":  "heartbeat",
+				"interval": interval,
+			}); err != nil {
+				return "", fmt.Errorf("routine: heartbeat deliver notification: %w", err)
+			}
+		}
+	}
+
 	env.Log("info", "heartbeat completed", map[string]any{
 		"target": targetSessionID, "interval": interval,
 		"reply": truncateNote(result.ResponseText, 500),
@@ -73,12 +94,52 @@ func (heartbeatRoutine) Run(ctx context.Context, env Env, args map[string]any) (
 	return "", nil
 }
 
-func readHeartbeatNotes(workspace string) string {
-	raw, err := os.ReadFile(filepath.Join(workspace, ".acolyte", "HEARTBEAT.md"))
-	if err != nil {
-		return ""
+const heartbeatNotifyPrefix = "NOTIFY:"
+
+// heartbeatNotification extracts the first `NOTIFY: <message>` line from a
+// heartbeat reply. The model never runs a shell command; the routine performs
+// the delivery itself.
+func heartbeatNotification(reply string) (string, bool) {
+	for _, line := range strings.Split(reply, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, heartbeatNotifyPrefix) {
+			continue
+		}
+		message := strings.TrimSpace(strings.TrimPrefix(line, heartbeatNotifyPrefix))
+		if message == "" {
+			return "", false
+		}
+		return message, true
 	}
-	return string(raw)
+	return "", false
+}
+
+// readHeartbeatNotes reads the persona notes without following symlinks. The
+// notes are injected into the model prompt, so a link to an external file
+// (for example .env) must fail closed instead of leaking its contents.
+func readHeartbeatNotes(workspace string) (string, error) {
+	if err := checkMemoryRoots(workspace); err != nil {
+		return "", err
+	}
+	path := filepath.Join(workspace, ".acolyte", "HEARTBEAT.md")
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("routine: inspect heartbeat notes: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("routine: heartbeat notes are a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("routine: heartbeat notes are not a regular file")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("routine: read heartbeat notes: %w", err)
+	}
+	return string(raw), nil
 }
 
 func buildHeartbeatPrompt(agent, targetSessionID, notes, digest string) string {
@@ -102,9 +163,8 @@ func buildHeartbeatPrompt(agent, targetSessionID, notes, digest string) string {
 		b.WriteString(escapeUntrusted(digest))
 		b.WriteString("\n</untrusted_session_digest>\n")
 	}
-	b.WriteString("\nReview this. If, and only if, something is genuinely interesting, use:\n")
-	fmt.Fprintf(&b, "  acolyte inbox --agent-name %s --session-id %s \"<message>\"\n", agent, targetSessionID)
-	b.WriteString("to surface it to the user.\n")
+	b.WriteString("\nReview this. If, and only if, something is genuinely interesting, reply with exactly:\n")
+	b.WriteString("  NOTIFY: <one concise message for the user>\n")
 	b.WriteString("Otherwise reply exactly `NO_ACTION` and do not notify anyone.\n")
 	b.WriteString("Never use the heartbeat session as the target.\n")
 	return b.String()

@@ -140,6 +140,24 @@ Running `opencode` directly in a folder starts its own server; use
 `acolyte attach` (or `opencode attach <url> --dir <workspace> --session <id>`)
 to share Acolyte's sessions.
 
+### 6. Run Headless (No Telegram, No TUI)
+
+`acolyte run` sends one real user turn through the agent's OpenCode session and
+prints the reply. It uses the same managed service as the daemon and never
+starts Telegram or queues a channel delivery.
+
+```bash
+acolyte run "Summarize today's notes" --agent-name valet
+acolyte run "And what did I ask before?" --agent-name valet --continue
+acolyte run "Reply with exactly: OK" --agent-name valet --json
+```
+
+The first run creates a session and maps it to the `cli:<agent>` thread.
+`--continue` reuses that session; `--session-id` selects an existing session
+that is already mapped to the agent. Use `acolyte inspect --session-id <id>` to
+read the transcript, or `acolyte attach --agent-name <agent>` to open the latest
+session in the TUI.
+
 ## Agent Workspace
 
 `acolyte new` creates the SPEC v0 layout:
@@ -201,13 +219,17 @@ sends back to the user is currently text-only; sender-side media is deferred.
 | `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service            |
 | `acolyte notify-user "<text>"`               | Notify the user only (never the agent)         |
 | `acolyte inbox "<text>"`                     | Deliver a synthetic external event to an agent |
+| `acolyte run "<text>"`                       | Run one headless agent turn (no Telegram/TUI)  |
 | `acolyte inspect --session-id <id>`          | Merge OpenCode history with routing events     |
 | `acolyte attach [--agent-name <n>]`          | Attach the OpenCode TUI to the agent session   |
 | `acolyte start`                              | Start the multi-agent daemon                   |
 | `acolyte update`                             | Check & apply updates                          |
 | `acolyte version`                            | Print binary version                           |
 
-> Routine jobs support `acolyte cron --dry-run` (dream proposal-only runs).
+> Routine jobs support `acolyte cron --dry-run` (dream proposal-only runs). Dream and heartbeat
+> turns run under a session-scoped OpenCode permission ruleset: dream analysis is read-only, the
+> dream writer is limited to memory paths, and heartbeat turns are read-only; the routine delivers
+> notifications itself.
 
 > Runtime capability edits are not exposed yet: `acolyte new` preserves existing
 > settings/jobs when adopting an agent. See `FUTURE-IDEAS.md`.
@@ -238,8 +260,10 @@ For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file
 │   ├── cron.go
 │   ├── notify_user.go
 │   ├── inbox.go
+│   ├── run.go
 │   ├── inspect.go
 │   └── attach.go
+├── e2e/                    # Opt-in live end-to-end tests (build tag: e2e)
 ├── internal/
 │   ├── agent/             # --config parsing + create/adopt workflow
 │   ├── comm/              # Envelope router, outbox sink, Telegram adapter
@@ -266,10 +290,34 @@ For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file
 - `github.com/robfig/cron/v3` - Cron schedule parsing
 - `github.com/mattn/go-sqlite3` - SQLite store
 
+### Tests
+
+Unit tests need no provider key or OpenCode service:
+
+```bash
+go test ./...
+go test -race -count=1 ./...
+```
+
+Live end-to-end tests build the CLI and run real turns against the OpenCode
+service configured on the machine:
+
+```bash
+ACOLYTE_E2E=1 \
+ACOLYTE_E2E_MODEL=opencode-go/gpt-6-luna \
+go test -tags=e2e ./e2e/... -v -count=1
+```
+
+The live suite is deliberately small (two live turns plus one zero-cost failure
+case). CI runs the unit suite on every PR. The live job runs after merges to
+`dev` (and on manual dispatch), not on PRs, because the provider credential must
+not be exposed to PR-controlled code. It has a hard 15-minute timeout.
+
 ### GitHub Workflow
 
-A single GitHub Actions workflow runs automatic PR review with the OpenCode `build` agent using the official [`anomalyco/opencode/github`](https://opencode.ai/docs/github/) action:
+GitHub Actions runs the PR test suite and automatic review:
 
+- `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR. After merges to `dev` (and on manual dispatch), it starts the managed OpenCode service with `OPENCODE_GO_API_KEY` and runs the live E2E suite with a hard 15-minute timeout. PRs never receive the provider credential.
 - `.github/workflows/opencode-review.yml` — reviews every non-draft PR opened by the repository owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs from any other author never trigger the agent.
 
 Each review posts exactly one PR review whose body starts with a `## Verdict` heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff. The workflow removes the action's automatic comment so the review is the only thing left on the PR.
@@ -278,9 +326,11 @@ The model is pinned in the workflow itself (`opencode-go/gpt-6-luna`); no projec
 
 Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner, and only the owner has merge rights. The gate (`.github/workflows/pr-guard.yml`) runs from the base branch definition via `pull_request_target` and posts a `pr-guard` commit status on the PR head SHA, so a PR cannot redefine its own gate.
 
+Mark `test / unit` as a required status check for PRs. The live E2E is a post-merge check on `dev` (and manual dispatch); it does not run on PRs because it needs the provider credential. A live run that exceeds the 15-minute cap fails the check.
+
 To enable it:
 
-1. Add the provider's API key under *Settings → Secrets and variables → Actions* as `OPENCODE_GO_API_KEY` (either as a repository secret, or as an environment secret on the `OPENCODE_GO_API_KEY` environment — the review job declares that environment). The workflow maps it to `OPENCODE_API_KEY`, the variable the `opencode-go` provider reads.
+1. Add the provider's API key under *Settings → Secrets and variables → Actions* as `OPENCODE_GO_API_KEY` (either as a repository secret, or as an environment secret on the `OPENCODE_GO_API_KEY` environment — the review and E2E jobs declare that environment). The workflows map it to `OPENCODE_API_KEY`, the variable the `opencode-go` provider reads.
 2. Create the `LGTM` and `NEEDS_REVIEW` labels — or skip this, the review creates them on first use.
 
 Usage:

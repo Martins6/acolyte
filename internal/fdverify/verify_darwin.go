@@ -32,8 +32,8 @@ func verifyFileOpen(canonical string, before os.FileInfo) error {
 		if filepath.Clean(string(buf[:nulIndex(buf)])) != canonical {
 			continue
 		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(fd, &stat); err != nil {
+		var stat syscall.Stat_t
+		if err := syscall.Fstat(fd, &stat); err != nil {
 			continue
 		}
 		if sameFile(&stat, before) {
@@ -62,7 +62,7 @@ func nulIndex(buf []byte) int {
 	return len(buf)
 }
 
-func sameFile(stat *unix.Stat_t, before os.FileInfo) bool {
+func sameFile(stat *syscall.Stat_t, before os.FileInfo) bool {
 	expected, ok := before.Sys().(*syscall.Stat_t)
 	if !ok {
 		return false
