@@ -104,6 +104,13 @@ func waitCondition(t *testing.T, what string, fn func() bool) {
 	}
 }
 
+func testContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func TestEmulatedTelegramInboundAndOutbound(t *testing.T) {
 	h := newEmulatedHarness(t, "@alice")
 	inbound := make(chan envelope.Envelope, 1)
@@ -131,7 +138,7 @@ func TestEmulatedTelegramInboundAndOutbound(t *testing.T) {
 		envelope.Content{Type: envelope.ContentText, Text: "reply over the emulator"})); err != nil {
 		t.Fatalf("Send() error: %v", err)
 	}
-	messages, err := h.server.WaitForChatMessages(context.Background(), 10, 1)
+	messages, err := h.server.WaitForChatMessages(testContext(t), 10, 1)
 	if err != nil {
 		t.Fatalf("wait messages: %v", err)
 	}
@@ -158,7 +165,7 @@ func TestEmulatedTelegramDeniesUnauthorizedUser(t *testing.T) {
 	})
 
 	h.server.SendText(11, 43, "bob", "let me in")
-	messages, err := h.server.WaitForChatMessages(context.Background(), 11, 1)
+	messages, err := h.server.WaitForChatMessages(testContext(t), 11, 1)
 	if err != nil {
 		t.Fatalf("wait messages: %v", err)
 	}
@@ -219,7 +226,7 @@ func TestEmulatedTelegramReplaysFailedMediaDownload(t *testing.T) {
 	data := []byte("retry-media")
 	h.server.SendPhoto(10, 42, "alice", "retry this", data)
 
-	if _, err := h.server.WaitForChatMessages(context.Background(), 10, 1); err != nil {
+	if _, err := h.server.WaitForChatMessages(testContext(t), 10, 1); err != nil {
 		t.Fatalf("wait for processing error reply: %v", err)
 	}
 	waitCondition(t, "the failed media download", func() bool {
@@ -253,7 +260,7 @@ func TestEmulatedTelegramSplitsLongOutbound(t *testing.T) {
 	if err := h.adapter.Send(env); err != nil {
 		t.Fatalf("Send() error: %v", err)
 	}
-	messages, err := h.server.WaitForMessages(context.Background(), 2)
+	messages, err := h.server.WaitForMessages(testContext(t), 2)
 	if err != nil {
 		t.Fatalf("wait messages: %v", err)
 	}
@@ -287,7 +294,7 @@ func TestEmulatedTelegramRetriesTransientFailure(t *testing.T) {
 	if err := h.adapter.deliverDue(context.Background()); err != nil {
 		t.Fatalf("deliverDue() error: %v", err)
 	}
-	messages, err := h.server.WaitForMessages(context.Background(), 1)
+	messages, err := h.server.WaitForMessages(testContext(t), 1)
 	if err != nil {
 		t.Fatalf("wait messages: %v", err)
 	}
@@ -314,7 +321,7 @@ func TestEmulatedTelegramResumesAfterChunkFailure(t *testing.T) {
 		t.Fatalf("Send() error: %v", err)
 	}
 
-	messages, err := h.server.WaitForMessages(context.Background(), 1)
+	messages, err := h.server.WaitForMessages(testContext(t), 1)
 	if err != nil {
 		t.Fatalf("wait for first chunk: %v", err)
 	}
@@ -330,7 +337,7 @@ func TestEmulatedTelegramResumesAfterChunkFailure(t *testing.T) {
 	if err := h.adapter.deliverDue(context.Background()); err != nil {
 		t.Fatalf("deliverDue() error: %v", err)
 	}
-	messages, err = h.server.WaitForMessages(context.Background(), 2)
+	messages, err = h.server.WaitForMessages(testContext(t), 2)
 	if err != nil {
 		t.Fatalf("wait for retried chunk: %v", err)
 	}
