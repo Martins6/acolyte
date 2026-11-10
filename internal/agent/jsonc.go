@@ -3,8 +3,14 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// topLevelKeyPattern matches a JSON string key followed by a colon. Comments
+// are already masked out and strings are preserved verbatim, so every match
+// at depth 1 is a real top-level key.
+var topLevelKeyPattern = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"\s*:`)
 
 // maskJSONC blanks out comments and trailing commas with spaces so the result
 // is plain JSON whose byte offsets are identical to the original text. String
@@ -160,6 +166,25 @@ func jsoncDepth(masked string, pos int) int {
 		}
 	}
 	return depth
+}
+
+// duplicateTopLevelKey returns the first key that appears more than once at
+// depth 1 of a masked document, or "" when every top-level key is unique.
+// JSON decoding silently keeps the last duplicate, so an ambiguous document
+// must be rejected before it is read or edited.
+func duplicateTopLevelKey(masked string) string {
+	seen := map[string]int{}
+	for _, loc := range topLevelKeyPattern.FindAllStringSubmatchIndex(masked, -1) {
+		if jsoncDepth(masked, loc[0]) != 1 {
+			continue
+		}
+		key := masked[loc[2]:loc[3]]
+		seen[key]++
+		if seen[key] > 1 {
+			return key
+		}
+	}
+	return ""
 }
 
 // trimJSONCIndent detects the indentation used by the first indented line of

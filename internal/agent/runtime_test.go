@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -745,3 +746,286 @@ func TestSetRefusesConflictingHeartbeatJob(t *testing.T) {
 }
 
 func ptrTime(value time.Time) *time.Time { return &value }
+
+// TestEditOpencodeRestoresOnFailurePaths covers every unsuccessful editor
+// path: the original config must be back on disk (regular file, original
+// bytes) no matter what the editor did.
+func TestEditOpencodeRestoresOnFailurePaths(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	path := filepath.Join(ws, "opencode.jsonc")
+	original := readOpencode(t, ws)
+
+	cases := []struct {
+		name    string
+		editor  func() error
+		wantErr string
+	}{
+		{
+			name:    "editor deletes the file",
+			editor:  func() error { return os.Remove(path) },
+			wantErr: "restored",
+		},
+		{
+			name: "editor replaces with a symlink",
+			editor: func() error {
+				elsewhere := filepath.Join(t.TempDir(), "elsewhere.jsonc")
+				if err := os.WriteFile(elsewhere, []byte("{}\n"), 0644); err != nil {
+					return err
+				}
+				if err := os.Remove(path); err != nil {
+					return err
+				}
+				return os.Symlink(elsewhere, path)
+			},
+			wantErr: "restored",
+		},
+		{
+			name: "editor writes invalid json and exits with an error",
+			editor: func() error {
+				if err := os.WriteFile(path, []byte("not json"), 0644); err != nil {
+					return err
+				}
+				return errors.New("editor exploded")
+			},
+			wantErr: "editor exploded",
+		},
+		{
+			name:    "editor writes invalid json and succeeds",
+			editor:  func() error { return os.WriteFile(path, []byte("not json"), 0644) },
+			wantErr: "not valid JSONC",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+				t.Fatalf("reset opencode.jsonc: %v", err)
+			}
+			changed, err := EditOpencode(ws, func(string) error { return tc.editor() })
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("EditOpencode() error = %v, want containing %q", err, tc.wantErr)
+			}
+			if changed {
+				t.Error("EditOpencode() changed = true, want false")
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatalf("opencode.jsonc missing after failed edit: %v", err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				t.Fatal("opencode.jsonc is still a symlink")
+			}
+			if !info.Mode().IsRegular() {
+				t.Fatal("opencode.jsonc is not a regular file")
+			}
+			if restored := readOpencode(t, ws); restored != original {
+				t.Errorf("original content not restored:\n%s", restored)
+			}
+		})
+	}
+}
+
+func TestEditOpencodeAcceptsValidChange(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	original := readOpencode(t, ws)
+	edited := "// edited\n" + original
+
+	changed, err := EditOpencode(ws, func(target string) error {
+		return os.WriteFile(target, []byte(edited), 0644)
+	})
+	if err != nil {
+		t.Fatalf("EditOpencode() error: %v", err)
+	}
+	if !changed {
+		t.Error("EditOpencode() changed = false, want true")
+	}
+	if got := readOpencode(t, ws); got != edited {
+		t.Errorf("edited content not kept:\n%s", got)
+	}
+}
+
+// TestApplyRefusesConcurrentUserJobOnUpsert: a user job that grabs the
+// capability title after planning must block the conditional upsert.
+func TestApplyRefusesConcurrentUserJobOnUpsert(t *testing.T) {
+	ws := createRuntimeAgent(t, `{"schedule": {"timezone": "UTC"}}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+
+	current, err := LoadConfig(st, target)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	res, err := planSet(st, target, "schedule.heartbeat_minutes", "30", current)
+	if err != nil {
+		t.Fatalf("planSet() error: %v", err)
+	}
+	if len(res.Jobs) != 1 || res.Jobs[0].Action != "upsert" || res.Jobs[0].Title != "heartbeat" {
+		t.Fatalf("staged jobs = %+v, want one heartbeat upsert", res.Jobs)
+	}
+
+	// Concurrent `acolyte cron` grabs the title between plan and apply.
+	userJob := addUserCronJob(t, st, orch.CronJob{
+		Title: "heartbeat", Owner: "user", Kind: "prompt", Prompt: "hi",
+		Spec: "@every 1h", AgentTarget: "valet", Timezone: "UTC",
+		Enabled: true, NextRunAt: ptrTime(time.Now().UTC().Add(time.Hour)),
+	})
+
+	err = res.apply(st, target)
+	if err == nil || !strings.Contains(err.Error(), `refusing to modify cron job "heartbeat"`) {
+		t.Fatalf("apply() error = %v, want heartbeat conflict error", err)
+	}
+	after, err := st.Orch().GetCronJobByTitle("heartbeat")
+	if err != nil {
+		t.Fatalf("get heartbeat: %v", err)
+	}
+	if !reflect.DeepEqual(userJob, after) {
+		t.Errorf("user heartbeat job changed:\nbefore %+v\nafter  %+v", userJob, after)
+	}
+}
+
+// TestApplyRefusesConcurrentUserJobOnDelete: replacing the capability job
+// with a user job after planning a removal must block the conditional delete.
+func TestApplyRefusesConcurrentUserJobOnDelete(t *testing.T) {
+	ws := createRuntimeAgent(t, `{"schedule": {"timezone": "UTC"}}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+
+	// Create the real capability job first.
+	if _, err := SetConfig(st, target, SetOptions{Key: "schedule.heartbeat_minutes", Value: "60"}); err != nil {
+		t.Fatalf("SetConfig(60) error: %v", err)
+	}
+	current, err := LoadConfig(st, target)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	res, err := planSet(st, target, "schedule.heartbeat_minutes", "0", current)
+	if err != nil {
+		t.Fatalf("planSet() error: %v", err)
+	}
+	if len(res.Jobs) != 1 || res.Jobs[0].Action != "delete" {
+		t.Fatalf("staged jobs = %+v, want one heartbeat delete", res.Jobs)
+	}
+
+	// Concurrent replacement of the capability job with a user job.
+	if err := st.Orch().DeleteCronJob("heartbeat"); err != nil {
+		t.Fatalf("remove capability job: %v", err)
+	}
+	userJob := addUserCronJob(t, st, orch.CronJob{
+		Title: "heartbeat", Owner: "user", Kind: "prompt", Prompt: "hi",
+		Spec: "@every 1h", AgentTarget: "valet", Timezone: "UTC",
+		Enabled: true, NextRunAt: ptrTime(time.Now().UTC().Add(time.Hour)),
+	})
+
+	err = res.apply(st, target)
+	if err == nil || !strings.Contains(err.Error(), `refusing to modify cron job "heartbeat"`) {
+		t.Fatalf("apply() error = %v, want heartbeat conflict error", err)
+	}
+	after, err := st.Orch().GetCronJobByTitle("heartbeat")
+	if err != nil {
+		t.Fatalf("get heartbeat: %v", err)
+	}
+	if !reflect.DeepEqual(userJob, after) {
+		t.Errorf("user heartbeat job changed:\nbefore %+v\nafter  %+v", userJob, after)
+	}
+}
+
+// TestApplyRefusesConcurrentDreamJobAndKeepsSetting: job mutations run
+// before settings, so a refused dream delete must also leave the
+// memory.learn setting untouched.
+func TestApplyRefusesConcurrentDreamJobAndKeepsSetting(t *testing.T) {
+	ws := createRuntimeAgent(t, `{"schedule": {"timezone": "UTC"}}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+
+	if _, err := SetConfig(st, target, SetOptions{Key: "memory-learn", Value: `{"args":{"days":3}}`}); err != nil {
+		t.Fatalf("SetConfig(memory-learn) error: %v", err)
+	}
+	settingBefore, ok, err := st.Orch().GetSetting("memory.learn")
+	if err != nil || !ok {
+		t.Fatalf("memory.learn = %q, %v, %v", settingBefore, ok, err)
+	}
+
+	current, err := LoadConfig(st, target)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	res, err := planSet(st, target, "memory-learn", "null", current)
+	if err != nil {
+		t.Fatalf("planSet() error: %v", err)
+	}
+	if len(res.Jobs) != 1 || res.Jobs[0].Action != "delete" || len(res.Settings) != 1 {
+		t.Fatalf("staged jobs = %+v settings = %+v, want dream delete + setting delete", res.Jobs, res.Settings)
+	}
+
+	if err := st.Orch().DeleteCronJob("dream"); err != nil {
+		t.Fatalf("remove capability job: %v", err)
+	}
+	userJob := addUserCronJob(t, st, orch.CronJob{
+		Title: "dream", Owner: "user", Kind: "prompt", Prompt: "hi",
+		Spec: "@every 1h", AgentTarget: "valet", Timezone: "UTC",
+		Enabled: true, NextRunAt: ptrTime(time.Now().UTC().Add(time.Hour)),
+	})
+
+	err = res.apply(st, target)
+	if err == nil || !strings.Contains(err.Error(), `refusing to modify cron job "dream"`) {
+		t.Fatalf("apply() error = %v, want dream conflict error", err)
+	}
+	after, err := st.Orch().GetCronJobByTitle("dream")
+	if err != nil {
+		t.Fatalf("get dream: %v", err)
+	}
+	if !reflect.DeepEqual(userJob, after) {
+		t.Errorf("user dream job changed:\nbefore %+v\nafter  %+v", userJob, after)
+	}
+	settingAfter, ok, err := st.Orch().GetSetting("memory.learn")
+	if err != nil || !ok || settingAfter != settingBefore {
+		t.Errorf("memory.learn = %q, %v, %v; want untouched %q", settingAfter, ok, err, settingBefore)
+	}
+}
+
+func TestSetOpencodeStringRejectsDuplicateTopLevelKey(t *testing.T) {
+	raw := `{
+  "model": "acme/first",
+  "instructions": [".acolyte/*.md"],
+  "model": "acme/second"
+}`
+	_, err := setOpencodeString(raw, "model", "acme/third")
+	if err == nil || !strings.Contains(err.Error(), `duplicate top-level key "model"`) {
+		t.Fatalf("setOpencodeString() error = %v, want duplicate-key error", err)
+	}
+}
+
+func TestSetEngineModelRejectsAmbiguousDocument(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	ambiguous := `{
+  "model": "acme/first",
+  "instructions": [".acolyte/*.md"],
+  "default_agent": "build",
+  "model": "acme/second"
+}`
+	path := filepath.Join(ws, "opencode.jsonc")
+	if err := os.WriteFile(path, []byte(ambiguous), 0644); err != nil {
+		t.Fatalf("write ambiguous config: %v", err)
+	}
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+
+	if _, err := LoadConfig(st, target); err == nil || !strings.Contains(err.Error(), `duplicate top-level key "model"`) {
+		t.Fatalf("LoadConfig() error = %v, want duplicate-key error", err)
+	}
+	if _, err := SetConfig(st, target, SetOptions{Key: "engine.model", Value: "acme/third"}); err == nil ||
+		!strings.Contains(err.Error(), "duplicate top-level key") {
+		t.Fatalf("SetConfig() error = %v, want duplicate-key error", err)
+	}
+	if got := readOpencode(t, ws); got != ambiguous {
+		t.Errorf("ambiguous file was modified:\n%s", got)
+	}
+}
+
+func TestValidateOpencodeDocumentRejectsDuplicateKeys(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	raw := "{\n  \"default_agent\": \"build\",\n  \"default_agent\": \"plan\"\n}\n"
+	err := validateOpencodeDocument(ws, raw)
+	if err == nil || !strings.Contains(err.Error(), `duplicate top-level key "default_agent"`) {
+		t.Fatalf("validateOpencodeDocument() error = %v, want duplicate-key error", err)
+	}
+}

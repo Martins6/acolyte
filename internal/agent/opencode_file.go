@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,8 +63,44 @@ func writeOpencodeConfig(workspace, content string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("workspace: %s is not a regular file", opencodeConfigName)
 	}
+	return atomicWriteFile(path, content, info.Mode().Perm())
+}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+opencodeConfigName+".tmp-*")
+// restoreOpencodeConfig recreates <workspace>/opencode.jsonc with the given
+// content after a failed edit. Unlike writeOpencodeConfig it tolerates the
+// editor having deleted the file or replaced it: symlinks and other
+// non-directory entries are removed (the mode of a regular file is kept),
+// directories are refused, and the file is recreated with a temp file +
+// fsync + rename. Mode 0644 is the fallback when no regular file existed.
+func restoreOpencodeConfig(workspace, content string) error {
+	path := filepath.Join(workspace, opencodeConfigName)
+	mode := os.FileMode(0644)
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		if info.IsDir() {
+			return fmt.Errorf("workspace: refusing to replace directory %s", opencodeConfigName)
+		}
+		if info.Mode().IsRegular() {
+			mode = info.Mode().Perm()
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("workspace: remove %s: %w", opencodeConfigName, err)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		// Recreate from scratch with the fallback mode.
+	default:
+		return fmt.Errorf("workspace: stat %s: %w", opencodeConfigName, err)
+	}
+	return atomicWriteFile(path, content, mode)
+}
+
+// atomicWriteFile writes content to path through a temp file in the same
+// directory: temp + fsync + close + chmod + rename, so readers never see a
+// partially written file.
+func atomicWriteFile(path, content string, mode os.FileMode) error {
+	name := filepath.Base(path)
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+name+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("workspace: create temp file: %w", err)
 	}
@@ -74,23 +111,23 @@ func writeOpencodeConfig(workspace, content string) error {
 	}
 	if _, err := tmp.WriteString(content); err != nil {
 		cleanup()
-		return fmt.Errorf("workspace: write %s: %w", opencodeConfigName, err)
+		return fmt.Errorf("workspace: write %s: %w", name, err)
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
-		return fmt.Errorf("workspace: sync %s: %w", opencodeConfigName, err)
+		return fmt.Errorf("workspace: sync %s: %w", name, err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("workspace: close temp file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, info.Mode().Perm()); err != nil {
+	if err := os.Chmod(tmpPath, mode); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("workspace: chmod temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("workspace: replace %s: %w", opencodeConfigName, err)
+		return fmt.Errorf("workspace: replace %s: %w", name, err)
 	}
 	return nil
 }
@@ -102,8 +139,8 @@ func readEngine(workspace string) (model, agentID string, defined []string, err 
 	if err != nil {
 		return "", "", nil, err
 	}
-	var doc opencodeEngineDoc
-	if err := parseJSONC(raw, &doc); err != nil {
+	doc, err := parseEngineDoc(raw)
+	if err != nil {
 		return "", "", nil, fmt.Errorf("workspace: %s: %w", opencodeConfigName, err)
 	}
 	defined, err = resolveDefinedAgents(workspace, doc)
@@ -153,8 +190,8 @@ func resolveDefinedAgents(workspace string, doc opencodeEngineDoc) ([]string, er
 // validateOpencodeDocument checks that a full opencode.jsonc body parses and
 // carries sane model/default_agent values.
 func validateOpencodeDocument(workspace, raw string) error {
-	var doc opencodeEngineDoc
-	if err := parseJSONC(raw, &doc); err != nil {
+	doc, err := parseEngineDoc(raw)
+	if err != nil {
 		return fmt.Errorf("%s is not valid JSONC: %w", opencodeConfigName, err)
 	}
 	if model := strings.TrimSpace(doc.Model); model != "" && !strings.Contains(model, "/") {
@@ -184,8 +221,8 @@ func validateEngineAgent(workspace, agentID string) error {
 	if err != nil {
 		return err
 	}
-	var doc opencodeEngineDoc
-	if err := parseJSONC(raw, &doc); err != nil {
+	doc, err := parseEngineDoc(raw)
+	if err != nil {
 		return fmt.Errorf("workspace: %s: %w", opencodeConfigName, err)
 	}
 	defined, err := resolveDefinedAgents(workspace, doc)
@@ -199,10 +236,32 @@ func validateEngineAgent(workspace, agentID string) error {
 	return nil
 }
 
+// parseEngineDoc masks raw JSONC, rejects duplicate top-level keys, and
+// decodes the engine fields. JSON decoding silently keeps the last duplicate,
+// so an ambiguous document must never be read or edited: a targeted edit of
+// the first occurrence would report a change while the parsed value stays the
+// other one.
+func parseEngineDoc(raw string) (opencodeEngineDoc, error) {
+	masked, err := maskJSONC(raw)
+	if err != nil {
+		return opencodeEngineDoc{}, err
+	}
+	if key := duplicateTopLevelKey(masked); key != "" {
+		return opencodeEngineDoc{}, fmt.Errorf("duplicate top-level key %q (ambiguous document)", key)
+	}
+	var doc opencodeEngineDoc
+	if err := json.Unmarshal([]byte(masked), &doc); err != nil {
+		return opencodeEngineDoc{}, err
+	}
+	return doc, nil
+}
+
 // EditOpencode opens <workspace>/opencode.jsonc with the provided editor and
 // validates the result: it must stay parseable JSONC with sane
-// model/default_agent values. An invalid edit is rolled back to the previous
-// content so a bad save can never leave the agent's engine config broken.
+// model/default_agent values. Every unsuccessful path — an editor that exits
+// with an error, deletes the file, replaces it with a symlink or directory,
+// saves invalid content, or leaves an unreadable path — restores the previous
+// content, so a bad edit can never leave the agent without a usable config.
 func EditOpencode(workspace string, editor func(path string) error) (bool, error) {
 	if editor == nil {
 		return false, fmt.Errorf("workspace: no editor configured")
@@ -211,21 +270,22 @@ func EditOpencode(workspace string, editor func(path string) error) (bool, error
 	if err != nil {
 		return false, err
 	}
+	rollback := func(cause error) (bool, error) {
+		if restoreErr := restoreOpencodeConfig(workspace, original); restoreErr != nil {
+			return false, fmt.Errorf("%w (restoring the previous %s failed: %v)", cause, opencodeConfigName, restoreErr)
+		}
+		return false, fmt.Errorf("%w (the previous %s was restored)", cause, opencodeConfigName)
+	}
+
 	if err := editor(filepath.Join(workspace, opencodeConfigName)); err != nil {
-		return false, fmt.Errorf("edit %s: %w", opencodeConfigName, err)
+		return rollback(fmt.Errorf("edit %s: %w", opencodeConfigName, err))
 	}
 	updated, err := readOpencodeConfig(workspace)
 	if err != nil {
-		return false, err
+		return rollback(fmt.Errorf("edit %s: %w", opencodeConfigName, err))
 	}
 	if err := validateOpencodeDocument(workspace, updated); err != nil {
-		if updated != original {
-			if restoreErr := writeOpencodeConfig(workspace, original); restoreErr != nil {
-				return false, fmt.Errorf("%w (restoring the previous file failed: %v)", err, restoreErr)
-			}
-			return false, fmt.Errorf("%w (the previous %s was restored)", err, opencodeConfigName)
-		}
-		return false, err
+		return rollback(err)
 	}
 	return updated != original, nil
 }
@@ -237,6 +297,12 @@ func setOpencodeString(raw, key, value string) (string, error) {
 	masked, err := maskJSONC(raw)
 	if err != nil {
 		return "", fmt.Errorf("workspace: %s: %w", opencodeConfigName, err)
+	}
+	// JSON decoding keeps the last duplicate, so editing the first one would
+	// not change the parsed value: reject the ambiguous document instead.
+	if count := countTopLevelKey(masked, key); count > 1 {
+		return "", fmt.Errorf("workspace: %s: duplicate top-level key %q (%d occurrences, ambiguous document)",
+			opencodeConfigName, key, count)
 	}
 	quoted, err := json.Marshal(value)
 	if err != nil {
@@ -266,6 +332,18 @@ func setOpencodeString(raw, key, value string) (string, error) {
 		}
 	}
 	return insertTopLevelString(raw, key, string(quoted))
+}
+
+// countTopLevelKey counts depth-1 occurrences of a key in a masked document.
+func countTopLevelKey(masked, key string) int {
+	pattern := regexp.MustCompile(`"` + regexp.QuoteMeta(key) + `"\s*:`)
+	count := 0
+	for _, loc := range pattern.FindAllStringIndex(masked, -1) {
+		if jsoncDepth(masked, loc[0]) == 1 {
+			count++
+		}
+	}
+	return count
 }
 
 // insertTopLevelString appends "<key>": <value> to the root object, adding a

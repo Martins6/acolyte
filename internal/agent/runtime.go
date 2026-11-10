@@ -2,7 +2,6 @@ package agent
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -39,13 +38,27 @@ func SupportedSetKeys() []string {
 type capabilityJob struct {
 	title   string
 	owner   string
+	kind    string
 	routine string
 }
 
 var (
-	dreamCapability     = capabilityJob{title: "dream", owner: "memory-learn", routine: "dream"}
-	heartbeatCapability = capabilityJob{title: "heartbeat", owner: "heartbeat", routine: "heartbeat"}
+	dreamCapability     = capabilityJob{title: "dream", owner: "memory-learn", kind: "routine", routine: "dream"}
+	heartbeatCapability = capabilityJob{title: "heartbeat", owner: "heartbeat", kind: "routine", routine: "heartbeat"}
 )
+
+// capabilityByTitle maps a staged JobChange title back to its capability
+// identity for the conditional store mutation.
+func capabilityByTitle(title string) (capabilityJob, bool) {
+	switch title {
+	case dreamCapability.title:
+		return dreamCapability, true
+	case heartbeatCapability.title:
+		return heartbeatCapability, true
+	default:
+		return capabilityJob{}, false
+	}
+}
 
 // jobState classifies what sits at a capability job's title.
 type jobState int
@@ -64,7 +77,7 @@ func fetchCapabilityJob(orchStore *orch.Store, cap capabilityJob) (orch.CronJob,
 	if err != nil || !exists {
 		return orch.CronJob{}, jobAbsent, err
 	}
-	if job.Owner != cap.owner || job.Kind != "routine" || job.Routine != cap.routine {
+	if job.Owner != cap.owner || job.Kind != cap.kind || job.Routine != cap.routine {
 		return job, jobConflicts, nil
 	}
 	return job, jobMatches, nil
@@ -75,7 +88,7 @@ func fetchCapabilityJob(orchStore *orch.Store, cap capabilityJob) (orch.CronJob,
 func (c capabilityJob) conflictError(job orch.CronJob) error {
 	return fmt.Errorf(
 		"config: refusing to modify cron job %q: found owner=%q kind=%q routine=%q, want owner=%q kind=%q routine=%q (a user job with this title is not the capability job)",
-		c.title, job.Owner, job.Kind, job.Routine, c.owner, "routine", c.routine)
+		c.title, job.Owner, job.Kind, job.Routine, c.owner, c.kind, c.routine)
 }
 
 // LoadConfig assembles the effective runtime config of a registered agent:
@@ -564,24 +577,55 @@ func (r *SetResult) apply(st *store.Store, a registry.Agent) error {
 			return err
 		}
 	}
-	for _, change := range r.Settings {
-		if err := applySetting(st, change); err != nil {
-			return err
-		}
-	}
+	// Job mutations run before settings and identity writes: if a user job
+	// grabbed the capability title between plan and apply, the conditional
+	// mutation refuses and nothing else has been written yet.
 	orchStore := st.Orch()
 	for _, change := range r.Jobs {
+		capability, ok := capabilityByTitle(change.Title)
+		if !ok {
+			return fmt.Errorf("config: unknown capability job %q", change.Title)
+		}
 		switch change.Action {
 		case "upsert":
-			if err := orchStore.UpsertCronJob(change.Job); err != nil {
+			matched, err := orchStore.UpsertCronJobIfMatch(change.Job,
+				capability.owner, capability.kind, capability.routine)
+			if err != nil {
 				return err
 			}
+			if !matched {
+				job, state, err := fetchCapabilityJob(orchStore, capability)
+				if err != nil {
+					return err
+				}
+				if state == jobConflicts {
+					return capability.conflictError(job)
+				}
+				return fmt.Errorf("config: cron job %q changed concurrently; refusing to modify it", capability.title)
+			}
 		case "delete":
-			if err := orchStore.DeleteCronJob(change.Title); err != nil && !errors.Is(err, orch.ErrJobNotFound) {
+			matched, err := orchStore.DeleteCronJobIfMatch(change.Title,
+				capability.owner, capability.kind, capability.routine)
+			if err != nil {
 				return err
+			}
+			if !matched {
+				job, state, err := fetchCapabilityJob(orchStore, capability)
+				if err != nil {
+					return err
+				}
+				if state == jobConflicts {
+					return capability.conflictError(job)
+				}
+				// The capability job is already gone: nothing to delete.
 			}
 		default:
 			return fmt.Errorf("config: unknown job action %q", change.Action)
+		}
+	}
+	for _, change := range r.Settings {
+		if err := applySetting(st, change); err != nil {
+			return err
 		}
 	}
 	if r.Description != nil {

@@ -61,8 +61,10 @@ Guarantees:
   `next_run_at`.
 - **Capability titles are not trusted.** Cron titles are not reserved: `set` verifies that an
   existing `dream`/`heartbeat` job has the expected owner, kind, and routine before touching it,
-  and refuses (naming the job) to delete or rewrite a user job that merely shares the title.
-  `get` ignores such a job instead of reporting it as the capability.
+  and refuses (naming the job) to delete or rewrite a user job that merely shares the title. The
+  identity check is repeated inside the same SQL statement as the write, so a job created
+  concurrently under the title is never overwritten or deleted either. `get` ignores such a job
+  instead of reporting it as the capability.
 - `--json` prints the result object (`key`, `before`, `after`, `changed`, `dry_run`,
   `opencode_diff`, `settings`, `jobs`).
 
