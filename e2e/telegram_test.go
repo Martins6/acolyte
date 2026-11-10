@@ -32,7 +32,7 @@ func TestTelegramDaemonEmulatorEndToEnd(t *testing.T) {
 		t.Fatalf("write .env: %v", err)
 	}
 
-	_, stdout, stderr, done, stop := startDaemon(t, f.home, server.URL)
+	stdout, stderr, done, stop := startDaemon(t, f.home, server.URL)
 	t.Cleanup(stop)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
@@ -127,7 +127,7 @@ func newTelegramFixture(t *testing.T) fixture {
 
 // startDaemon launches `acolyte start`. The returned stop function interrupts
 // the process and waits for a clean exit; it is safe to call more than once.
-func startDaemon(t *testing.T, home, serverURL string) (*exec.Cmd, func() string, func() string, <-chan struct{}, func()) {
+func startDaemon(t *testing.T, home, serverURL string) (func() string, func() string, <-chan struct{}, func()) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -167,7 +167,7 @@ func startDaemon(t *testing.T, home, serverURL string) (*exec.Cmd, func() string
 		_ = cmd.Wait()
 		close(done)
 	}()
-	return cmd, out.String, errOut.String, done, stop
+	return out.String, errOut.String, done, stop
 }
 
 type lockedBuffer struct {
