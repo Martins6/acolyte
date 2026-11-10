@@ -64,13 +64,27 @@ func TestTelegramDaemonEmulatorEndToEnd(t *testing.T) {
 		t.Errorf("reply_to = %v, want %d", reply.ReplyTo, update.Message.ID)
 	}
 
-	stop()
-
-	st, err := store.Open(f.ws)
+	st, err := store.OpenReadOnly(f.ws)
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("open store read-only: %v", err)
 	}
 	defer st.Close()
+
+	// The emulator records the message as soon as the handler accepts it, but
+	// the daemon still has to persist delivery progress. Wait for the durable
+	// row before stopping so shutdown cannot cancel the in-flight response.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		outbox, listErr := st.CommTG().ListOutbox(42)
+		if listErr == nil && len(outbox) == 1 && outbox[0].Delivery == "sent" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("outbox did not reach sent\nstdout:\n%s\nstderr:\n%s", stdout(), stderr())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	session, ok, err := st.Orch().GetSessionByThread("telegram:42")
 	if err != nil || !ok || session.OpenCodeSessionID == "" {
 		t.Fatalf("session = %+v, %v, %v; want a mapped OpenCode session", session, ok, err)
@@ -83,6 +97,8 @@ func TestTelegramDaemonEmulatorEndToEnd(t *testing.T) {
 	if err != nil || len(outbox) != 1 || outbox[0].Delivery != "sent" {
 		t.Fatalf("outbox = %+v, %v; want one sent row", outbox, err)
 	}
+
+	stop()
 }
 
 func newTelegramFixture(t *testing.T) fixture {
