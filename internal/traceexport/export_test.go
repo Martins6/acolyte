@@ -178,6 +178,305 @@ func TestExportWritesCompleteTrace(t *testing.T) {
 	}
 }
 
+// TestExportSingleSessionScope proves that --session-id cannot disclose
+// unrelated conversations: only the selected session file and its own
+// inbox/outbox/chat/media rows survive, global orchestrator and memory data
+// is omitted, and the manifest counts match the filtered bundle.
+func TestExportSingleSessionScope(t *testing.T) {
+	ws := t.TempDir()
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+
+	writeFile(t, ws, "AGENTS.md", "# Agent hub\n")
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// Two mapped sessions, each with its own chat and routing rows.
+	if _, err := st.Orch().UpsertSession(envelope.TelegramThread(10), "ses_x", now); err != nil {
+		t.Fatalf("upsert session x: %v", err)
+	}
+	if _, err := st.Orch().UpsertSession(envelope.TelegramThread(20), "ses_y", now.Add(time.Minute)); err != nil {
+		t.Fatalf("upsert session y: %v", err)
+	}
+	// Global orchestrator state that must not leak into a scoped bundle.
+	if err := st.Orch().AppendLog("info", "orchestrator", "global turn completed", `{"turn":"t1"}`, now); err != nil {
+		t.Fatalf("append log: %v", err)
+	}
+	if err := st.Orch().AddCronJob(orch.CronJob{
+		Title: "heartbeat", Kind: "routine", Spec: "@every 1h", Routine: "heartbeat",
+		AgentTarget: "valet", Enabled: true, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("add cron job: %v", err)
+	}
+	if err := st.Orch().AddCronRoute(orch.CronRoute{
+		AgentTarget: "valet", ChatID: 10, Text: "global cron route", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("add cron route: %v", err)
+	}
+	if err := st.Orch().SetSetting("notify", "on"); err != nil {
+		t.Fatalf("set orch setting: %v", err)
+	}
+	// Chats and rows: session x uses chat 10, session y uses chat 20.
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("upsert chat 10: %v", err)
+	}
+	if err := st.CommTG().UpsertChat(20, "bob", false, true, now); err != nil {
+		t.Fatalf("upsert chat 20: %v", err)
+	}
+	if err := st.CommTG().SetSetting("channel", "telegram"); err != nil {
+		t.Fatalf("set comm setting: %v", err)
+	}
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 1, ChatID: 10, EnvelopeID: "env_in_x", OpenCodeSessionID: "ses_x",
+		OpenCodeMessageID: "msg_x1", ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("record inbound x: %v", err)
+	}
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 2, ChatID: 20, EnvelopeID: "env_in_y", OpenCodeSessionID: "ses_y",
+		OpenCodeMessageID: "msg_y1", ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("record inbound y: %v", err)
+	}
+	if _, err := st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+		EnvelopeID: "env_out_x", ChatID: 10, Text: "selected reply", OpenCodeSessionID: "ses_x",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("enqueue outbound x: %v", err)
+	}
+	if _, err := st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+		EnvelopeID: "env_out_y", ChatID: 20, Text: "other chat reply", OpenCodeSessionID: "ses_y",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("enqueue outbound y: %v", err)
+	}
+	if err := st.CommTG().RecordMedia(commtg.MediaItem{
+		TGFileID: "file_x", FilePath: "downloads/media/selected.jpg", Type: "photo", ChatID: 10, SavedAt: now,
+	}); err != nil {
+		t.Fatalf("record media x: %v", err)
+	}
+	if err := st.CommTG().RecordMedia(commtg.MediaItem{
+		TGFileID: "file_y", FilePath: "downloads/media/other.jpg", Type: "photo", ChatID: 20, SavedAt: now,
+	}); err != nil {
+		t.Fatalf("record media y: %v", err)
+	}
+	// Global memory state.
+	if err := st.Mem().RecordDream(mem.Dream{
+		RanAt: now, SessionsScanned: 2, Note: "global dream note",
+	}); err != nil {
+		t.Fatalf("record dream: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	readOnly, err := store.OpenReadOnly(ws)
+	if err != nil {
+		t.Fatalf("open read-only store: %v", err)
+	}
+	defer readOnly.Close()
+
+	fake := &fakeOpenCode{
+		sessions: []opencode.SessionInfo{
+			{
+				ID: "ses_x", Agent: "build", Title: "Selected conversation",
+				Time:     opencode.SessionTime{Created: float64(now.UnixMilli())},
+				Location: opencode.SessionLocation{Directory: ws},
+			},
+			{
+				ID: "ses_y", Agent: "build", Title: "Other conversation",
+				Time:     opencode.SessionTime{Created: float64(now.Add(time.Minute).UnixMilli())},
+				Location: opencode.SessionLocation{Directory: ws},
+			},
+		},
+		messages: map[string][]opencode.Message{
+			"ses_x": {
+				mustMessage(t, `{"id":"msg_x1","type":"user","time":{"created":1},"text":"hello x"}`),
+				mustMessage(t, `{"id":"msg_x2","type":"assistant","time":{"created":2},"agent":"build","model":{"id":"gpt","providerID":"test"},"finish":"stop","content":[{"type":"text","text":"reply x"}]}`),
+			},
+			"ses_y": {
+				mustMessage(t, `{"id":"msg_y1","type":"user","time":{"created":1},"text":"hello y"}`),
+				mustMessage(t, `{"id":"msg_y2","type":"user","time":{"created":2},"text":"more y"}`),
+				mustMessage(t, `{"id":"msg_y3","type":"assistant","time":{"created":3},"agent":"build","model":{"id":"gpt","providerID":"test"},"finish":"stop","content":[{"type":"text","text":"reply y"}]}`),
+			},
+		},
+		exports: map[string]json.RawMessage{
+			"ses_x": json.RawMessage(`{"info":{"id":"ses_x"},"messages":[]}`),
+			"ses_y": json.RawMessage(`{"info":{"id":"ses_y"},"messages":[]}`),
+		},
+	}
+
+	outPath := filepath.Join(t.TempDir(), "one-session.zip")
+	result, err := Export(context.Background(), Request{
+		Agent:          registry.Agent{Name: "valet", Workspace: ws},
+		Store:          readOnly,
+		OpenCode:       fake,
+		OutPath:        outPath,
+		SessionID:      "ses_x",
+		MaxPages:       10,
+		AcolyteVersion: "test",
+		Now:            now,
+	})
+	if err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+	if result.Sessions != 1 || result.Messages != 2 || result.Logs != 0 {
+		t.Errorf("result = %+v, want 1 session / 2 messages / 0 logs", result)
+	}
+	warned := false
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "single-session export scoped to ses_x") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("warnings = %v, want single-session scope warning", result.Warnings)
+	}
+
+	files := readZip(t, outPath)
+
+	// The scoped bundle keeps only the selected session's files and the
+	// global orchestrator/memory files are omitted entirely.
+	for _, name := range []string{
+		"README.md", "manifest.json", "session-index.md",
+		"sessions/ses_x.md", "sessions/ses_x.json",
+		"persona/AGENTS.md",
+		"orchestrator/sessions.json",
+		"communication/chats.json", "communication/inbox.json",
+		"communication/outbox.json", "communication/media.json",
+	} {
+		if _, ok := files[name]; !ok {
+			t.Errorf("zip missing %s", name)
+		}
+	}
+	for _, name := range []string{
+		"sessions/ses_y.md", "sessions/ses_y.json",
+		"orchestrator/logs.md", "orchestrator/cron-jobs.json",
+		"orchestrator/cron-routes.json", "orchestrator/settings.json",
+		"communication/settings.json", "memory/dreams.json",
+	} {
+		if _, ok := files[name]; ok {
+			t.Errorf("zip must not contain %s", name)
+		}
+	}
+	for prefix := range files {
+		if strings.HasPrefix(prefix, "memory/") {
+			t.Errorf("zip must not contain global memory data: %s", prefix)
+		}
+	}
+
+	// Only the selected session's communication rows, chats, and media.
+	if !strings.Contains(files["communication/inbox.json"], "env_in_x") ||
+		strings.Contains(files["communication/inbox.json"], "env_in_y") {
+		t.Errorf("inbox not scoped to ses_x:\n%s", files["communication/inbox.json"])
+	}
+	if !strings.Contains(files["communication/outbox.json"], "selected reply") ||
+		strings.Contains(files["communication/outbox.json"], "other chat reply") {
+		t.Errorf("outbox not scoped to ses_x:\n%s", files["communication/outbox.json"])
+	}
+	if !strings.Contains(files["communication/chats.json"], "alice") ||
+		strings.Contains(files["communication/chats.json"], "bob") {
+		t.Errorf("chats not scoped to chat 10:\n%s", files["communication/chats.json"])
+	}
+	if !strings.Contains(files["communication/media.json"], "selected.jpg") ||
+		strings.Contains(files["communication/media.json"], "other.jpg") {
+		t.Errorf("media not scoped to chat 10:\n%s", files["communication/media.json"])
+	}
+	mapping := files["orchestrator/sessions.json"]
+	if !strings.Contains(mapping, "ses_x") || strings.Contains(mapping, "ses_y") {
+		t.Errorf("session mapping not filtered:\n%s", mapping)
+	}
+
+	// Nothing about the other session or global state may appear anywhere.
+	for name, content := range files {
+		for _, banned := range []string{
+			"ses_y", "hello y", "reply y", "env_in_y", "env_out_y",
+			"other chat reply", "bob", "other.jpg",
+			"global turn completed", "heartbeat", "global cron route",
+			"global dream note", `"notify"`, `"channel"`,
+		} {
+			if strings.Contains(content, banned) {
+				t.Errorf("file %s discloses %q", name, banned)
+			}
+		}
+	}
+	// The selected session's own content and routing survive.
+	if !strings.Contains(files["sessions/ses_x.md"], "hello x") ||
+		!strings.Contains(files["sessions/ses_x.md"], "selected reply") {
+		t.Errorf("session markdown lost its own content:\n%s", files["sessions/ses_x.md"])
+	}
+
+	// The manifest counts must match the filtered bundle exactly.
+	var parsed struct {
+		ScopedSession string `json:"scoped_session"`
+		Counts        struct {
+			Sessions     int `json:"sessions"`
+			Messages     int `json:"messages"`
+			Logs         int `json:"logs"`
+			PersonaFiles int `json:"persona_files"`
+			CommInbox    int `json:"comm_inbox"`
+			CommOutbox   int `json:"comm_outbox"`
+			CommMedia    int `json:"comm_media"`
+			MemoryDreams int `json:"memory_dreams"`
+		} `json:"counts"`
+	}
+	if err := json.Unmarshal([]byte(files["manifest.json"]), &parsed); err != nil {
+		t.Fatalf("manifest invalid: %v\n%s", err, files["manifest.json"])
+	}
+	if parsed.ScopedSession != "ses_x" {
+		t.Errorf("scoped_session = %q, want ses_x", parsed.ScopedSession)
+	}
+	counts := parsed.Counts
+	if counts.Sessions != 1 || counts.Messages != 2 || counts.Logs != 0 ||
+		counts.CommInbox != 1 || counts.CommOutbox != 1 || counts.CommMedia != 1 ||
+		counts.MemoryDreams != 0 {
+		t.Errorf("counts = %+v, want filtered values", counts)
+	}
+	personaFiles := 0
+	sessionFiles := 0
+	for name := range files {
+		switch {
+		case strings.HasPrefix(name, "persona/"):
+			personaFiles++
+		case strings.HasPrefix(name, "sessions/") && strings.HasSuffix(name, ".md"):
+			sessionFiles++
+		}
+	}
+	if counts.PersonaFiles != personaFiles || personaFiles == 0 {
+		t.Errorf("persona_files = %d, want %d (agent identity stays)", counts.PersonaFiles, personaFiles)
+	}
+	if counts.Sessions != sessionFiles {
+		t.Errorf("sessions count = %d, want %d exported session files", counts.Sessions, sessionFiles)
+	}
+	if got := countJSONRows(t, files["communication/inbox.json"]); got != counts.CommInbox {
+		t.Errorf("inbox rows = %d, manifest comm_inbox = %d", got, counts.CommInbox)
+	}
+	if got := countJSONRows(t, files["communication/outbox.json"]); got != counts.CommOutbox {
+		t.Errorf("outbox rows = %d, manifest comm_outbox = %d", got, counts.CommOutbox)
+	}
+	if got := countJSONRows(t, files["communication/media.json"]); got != counts.CommMedia {
+		t.Errorf("media rows = %d, manifest comm_media = %d", got, counts.CommMedia)
+	}
+	if got := countJSONRows(t, files["orchestrator/sessions.json"]); got != 1 {
+		t.Errorf("orchestrator mappings = %d, want 1", got)
+	}
+	if !strings.Contains(files["README.md"], "single-session export") ||
+		!strings.Contains(files["README.md"], "ses_x") {
+		t.Errorf("README missing the single-session scope note:\n%s", files["README.md"])
+	}
+}
+
+// countJSONRows decodes a JSON array and returns its length.
+func countJSONRows(t *testing.T, raw string) int {
+	t.Helper()
+	var rows []any
+	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+		t.Fatalf("decode rows: %v\n%s", err, raw)
+	}
+	return len(rows)
+}
+
 func TestExportSkipsSymlinks(t *testing.T) {
 	ws := t.TempDir()
 	now := time.Now().UTC()

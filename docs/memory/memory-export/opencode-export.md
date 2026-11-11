@@ -35,6 +35,25 @@ communication/            # chats.json, inbox.json, outbox.json,
 memory/dreams.json        # memory-learn audit rows
 ```
 
+### Single-session scope (`--session-id`)
+
+With `--session-id`, the bundle is scoped to that session so it cannot disclose unrelated
+conversations. Only the scoped subset of the files above is written:
+
+- `sessions/` — only the selected session's transcript (unchanged behavior).
+- `communication/` — only inbox/outbox rows with `opencode_session_id` equal to the selected
+  session, only the chats those rows reference, and only media saved for those chats.
+  `settings.json` (global channel settings) is omitted; `media.json` is omitted when no chat
+  can be attributed to the session.
+- `orchestrator/` — only `sessions.json`, filtered to the selected session's mapping. Audit
+  logs, cron jobs, cron routes, and settings are omitted.
+- `memory/dreams.json` — omitted (global memory, unrelated to one conversation).
+- `persona/` — kept: persona and skills are agent identity, not conversation content.
+
+Manifest counts reflect the filtered data, `manifest.json` records
+`"scoped_session": "<id>"`, and both the manifest warnings and the bundle README carry a note
+about the omitted data. The default export (no `--session-id`) is unchanged.
+
 The Markdown is the primary, self-contained trace. A model can read the unzipped folder without
 Acolyte or OpenCode. The JSON files preserve exact routing/orchestration data, and the native
 `sessions/<id>.json` files can be imported with OpenCode's

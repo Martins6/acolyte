@@ -178,6 +178,13 @@ The unzipped folder is self-contained: another agent can read `README.md`,
 experimental session export endpoint. Existing zips are not overwritten unless
 `--force` is passed.
 
+`--session-id` scopes the whole bundle to one session so it cannot disclose
+unrelated conversations: only that session's transcript and its own
+inbox/outbox/chat/media rows are included, the orchestrator section keeps only
+its session mapping (no logs, cron, or settings), and global memory data
+(dreams) is omitted. Persona and skills are still included — they are agent
+identity, not conversation content. Manifest counts reflect the scoped data.
+
 Raw traces may contain secrets from the source workspace; `--sanitize` redacts
 common secret patterns (env assignments, `authorization`/`bearer` values,
 `api_key=`, `sk-...`, Telegram tokens) on a best-effort basis — review before
