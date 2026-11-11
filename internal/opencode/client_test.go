@@ -620,6 +620,89 @@ func TestExportSession(t *testing.T) {
 	}
 }
 
+func TestImportSession(t *testing.T) {
+	t.Parallel()
+
+	payload := json.RawMessage(`{"info":{"id":"ses_src","title":"t"},"messages":[{"id":"msg_1","type":"user","time":{"created":1},"text":"hello"}]}`)
+
+	t.Run("request and response", func(t *testing.T) {
+		t.Parallel()
+
+		var gotBody map[string]any
+		client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/experimental/session/import" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			if user, pass, ok := r.BasicAuth(); !ok || user != "opencode" || pass != "pw" {
+				t.Errorf("missing/incorrect basic auth: %q %q %v", user, pass, ok)
+			}
+			gotBody = decodeBody(t, r)
+			fmt.Fprint(w, `{"data":{"id":"ses_new","agent":"build","location":{"directory":"/ws"}}}`)
+		})
+
+		info, err := client.ImportSession(context.Background(), payload, "/ws")
+		if err != nil {
+			t.Fatalf("ImportSession: %v", err)
+		}
+		if info.ID != "ses_new" {
+			t.Errorf("session id = %q, want ses_new", info.ID)
+		}
+
+		infoMap, ok := gotBody["info"].(map[string]any)
+		if !ok || infoMap["id"] != "ses_src" {
+			t.Errorf("body info = %v, want info.id ses_src", gotBody["info"])
+		}
+		messages, ok := gotBody["messages"].([]any)
+		if !ok || len(messages) != 1 {
+			t.Errorf("body messages = %v, want one message", gotBody["messages"])
+		}
+		loc, _ := gotBody["location"].(map[string]any)
+		if loc["directory"] != "/ws" {
+			t.Errorf("location = %v, want directory /ws", gotBody["location"])
+		}
+	})
+
+	t.Run("normalizes missing messages", func(t *testing.T) {
+		t.Parallel()
+
+		var gotBody map[string]any
+		client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			gotBody = decodeBody(t, r)
+			fmt.Fprint(w, `{"data":{"id":"ses_new"}}`)
+		})
+
+		if _, err := client.ImportSession(context.Background(), json.RawMessage(`{"info":{"id":"ses_src"}}`), "/ws"); err != nil {
+			t.Fatalf("ImportSession: %v", err)
+		}
+		messages, ok := gotBody["messages"].([]any)
+		if !ok || len(messages) != 0 {
+			t.Errorf("body messages = %v, want empty array", gotBody["messages"])
+		}
+	})
+
+	t.Run("rejects payload without info", func(t *testing.T) {
+		t.Parallel()
+
+		client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			t.Error("no request expected")
+		})
+		if _, err := client.ImportSession(context.Background(), json.RawMessage(`{"messages":[]}`), "/ws"); err == nil || !strings.Contains(err.Error(), "no info") {
+			t.Errorf("error = %v, want no info", err)
+		}
+	})
+
+	t.Run("requires workspace", func(t *testing.T) {
+		t.Parallel()
+
+		client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			t.Error("no request expected")
+		})
+		if _, err := client.ImportSession(context.Background(), payload, " "); err == nil || !strings.Contains(err.Error(), "workspace") {
+			t.Errorf("error = %v, want workspace required", err)
+		}
+	})
+}
+
 func TestAssistantText(t *testing.T) {
 	t.Parallel()
 

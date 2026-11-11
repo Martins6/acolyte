@@ -55,6 +55,9 @@ type Request struct {
 	SessionID string
 	MaxPages  int
 	Force     bool
+	// Sanitize redacts common secret patterns from every written entry.
+	// It is best-effort: raw traces may still contain secrets.
+	Sanitize bool
 
 	AcolyteVersion string
 	Now            time.Time
@@ -75,6 +78,7 @@ type manifest struct {
 	Agent          agentManifest     `json:"agent"`
 	ExportedAt     time.Time         `json:"exported_at"`
 	AcolyteVersion string            `json:"acolyte_version,omitempty"`
+	Sanitized      bool              `json:"sanitized"`
 	Sessions       []sessionManifest `json:"sessions"`
 	Counts         counts            `json:"counts"`
 	Warnings       []string          `json:"warnings,omitempty"`
@@ -239,6 +243,7 @@ func (b *bundle) writeBundle(ctx context.Context) error {
 		Agent:          agentManifestFrom(b.request.Agent),
 		ExportedAt:     b.now,
 		AcolyteVersion: b.request.AcolyteVersion,
+		Sanitized:      b.request.Sanitize,
 		Sessions:       b.sessions,
 		Counts: counts{
 			Sessions:     len(b.sessions),
@@ -270,6 +275,9 @@ func (b *bundle) write(name string, data []byte) error {
 	clean := path.Clean(strings.TrimPrefix(filepath.ToSlash(name), "/"))
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("traceexport: unsafe zip entry %q", name)
+	}
+	if b.request.Sanitize {
+		data = sanitizeEntry(clean, data)
 	}
 	header := &zip.FileHeader{Name: clean, Method: zip.Deflate, Modified: b.now}
 	header.SetMode(fs.FileMode(0644))
@@ -719,6 +727,13 @@ func (b *bundle) readme(m manifest) string {
 	builder.WriteString("The Markdown files are the primary, human- and model-readable trace; the JSON files preserve exact routing and OpenCode data.\n\n")
 	builder.WriteString("For an OpenCode agent, the native `sessions/<id>.json` files can be imported through the experimental session import API. ")
 	builder.WriteString("The persona and skills can be copied into another workspace under `.acolyte/` and `.agents/skills/`.\n\n")
+	builder.WriteString("## Secrets\n\n")
+	builder.WriteString("Raw traces may contain secrets from the source workspace (environment values, tokens, keys) embedded in conversation text and tool output. ")
+	if m.Sanitized {
+		builder.WriteString("This bundle was exported with `--sanitize`: common secret patterns were redacted on a best-effort basis, but sanitization cannot catch every secret — review before sharing.\n\n")
+	} else {
+		builder.WriteString("This bundle was exported without `--sanitize`, so nothing was redacted. Re-export with `--sanitize` to redact common secret patterns on a best-effort basis — it cannot catch every secret either.\n\n")
+	}
 	fmt.Fprintf(&builder, "## Counts\n\n- Sessions: %d\n- Messages: %d\n- Orchestrator log entries: %d\n- Persona/skill files: %d\n- Communication inbox/outbox: %d/%d\n- Memory dreams: %d\n",
 		m.Counts.Sessions, m.Counts.Messages, m.Counts.Logs, m.Counts.PersonaFiles,
 		m.Counts.CommInbox, m.Counts.CommOutbox, m.Counts.MemoryDreams)

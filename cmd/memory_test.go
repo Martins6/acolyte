@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,30 @@ import (
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/store"
 )
+
+// readZip reads every entry of a zip into a map keyed by entry name.
+func readZip(t *testing.T, filePath string) map[string]string {
+	t.Helper()
+	reader, err := zip.OpenReader(filePath)
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer reader.Close()
+	files := make(map[string]string, len(reader.File))
+	for _, file := range reader.File {
+		handle, err := file.Open()
+		if err != nil {
+			t.Fatalf("open %s: %v", file.Name, err)
+		}
+		raw, err := io.ReadAll(handle)
+		handle.Close()
+		if err != nil {
+			t.Fatalf("read %s: %v", file.Name, err)
+		}
+		files[file.Name] = string(raw)
+	}
+	return files
+}
 
 func TestRunMemoryExport(t *testing.T) {
 	ws := setupCronCLI(t)
@@ -129,5 +155,65 @@ func TestRunMemoryExportNoOpenCode(t *testing.T) {
 	}
 	if _, err := os.Stat(outPath); err != nil {
 		t.Errorf("zip not written: %v", err)
+	}
+}
+
+func TestRunMemoryExportSanitizeFlag(t *testing.T) {
+	ws := setupCronCLI(t)
+	now := time.Now().UTC()
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.Orch().UpsertSession("cli:valet", "ses_x", now); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+	st.Close()
+
+	fake := &fakeCLITurn{
+		sessions: []opencode.SessionInfo{
+			{ID: "ses_x", Location: opencode.SessionLocation{Directory: ws}, Time: opencode.SessionTime{Created: float64(now.UnixMilli())}},
+		},
+		bySession: map[string][]opencode.Message{
+			"ses_x": {{ID: "msg_x", Type: "user", Text: "leak OPENAI_API_KEY=sk-abc123def456 please"}},
+		},
+	}
+	withFakeTurn(t, fake)
+
+	// With --sanitize the fake token must be redacted...
+	sanitized := filepath.Join(t.TempDir(), "sanitized.zip")
+	if err := runMemoryExport(context.Background(), &bytes.Buffer{}, memoryExportOptions{
+		AgentName: "valet", OutPath: sanitized, MaxPages: 10, Sanitize: true,
+	}); err != nil {
+		t.Fatalf("runMemoryExport(sanitize) error: %v", err)
+	}
+	files := readZip(t, sanitized)
+	if strings.Contains(files["sessions/ses_x.md"], "sk-abc123def456") {
+		t.Errorf("token survived --sanitize:\n%s", files["sessions/ses_x.md"])
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal([]byte(files["manifest.json"]), &manifest); err != nil {
+		t.Fatalf("manifest invalid: %v", err)
+	}
+	if manifest["sanitized"] != true {
+		t.Errorf("manifest sanitized = %v, want true", manifest["sanitized"])
+	}
+
+	// ...and without it the trace must be preserved verbatim.
+	plain := filepath.Join(t.TempDir(), "plain.zip")
+	if err := runMemoryExport(context.Background(), &bytes.Buffer{}, memoryExportOptions{
+		AgentName: "valet", OutPath: plain, MaxPages: 10,
+	}); err != nil {
+		t.Fatalf("runMemoryExport() error: %v", err)
+	}
+	files = readZip(t, plain)
+	if !strings.Contains(files["sessions/ses_x.md"], "sk-abc123def456") {
+		t.Errorf("token missing without --sanitize:\n%s", files["sessions/ses_x.md"])
+	}
+	if err := json.Unmarshal([]byte(files["manifest.json"]), &manifest); err != nil {
+		t.Fatalf("manifest invalid: %v", err)
+	}
+	if manifest["sanitized"] != false {
+		t.Errorf("manifest sanitized = %v, want false", manifest["sanitized"])
 	}
 }
