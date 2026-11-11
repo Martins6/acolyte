@@ -309,7 +309,7 @@ func (c *Client) Context(ctx context.Context, sessionID string) ([]Message, erro
 
 // ExportSession returns the OpenCode-native transfer payload for a session
 // (info + complete projected messages). It is the format accepted by
-// POST /api/experimental/session/import.
+// ImportSession.
 func (c *Client) ExportSession(ctx context.Context, sessionID string) (json.RawMessage, error) {
 	path := "/api/experimental/session/" + url.PathEscape(sessionID) + "/export"
 	var resp struct {
@@ -322,6 +322,51 @@ func (c *Client) ExportSession(ctx context.Context, sessionID string) (json.RawM
 		return nil, fmt.Errorf("opencode: empty session export for %s", sessionID)
 	}
 	return resp.Data, nil
+}
+
+// ImportSession imports an OpenCode-native transfer payload (the {info,
+// messages} shape produced by ExportSession) into workspace and returns the
+// session projection the service created. The workspace is sent as the
+// top-level location, which is what the service applies to the imported
+// session. An empty messages array is normalized to [] because the endpoint
+// requires the key but accepts no messages.
+func (c *Client) ImportSession(ctx context.Context, raw json.RawMessage, workspace string) (*SessionInfo, error) {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return nil, fmt.Errorf("opencode: import workspace is required")
+	}
+	var payload struct {
+		Info     json.RawMessage `json:"info"`
+		Messages json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("opencode: decode session payload: %w", err)
+	}
+	if len(payload.Info) == 0 || string(payload.Info) == "null" {
+		return nil, fmt.Errorf("opencode: session payload has no info")
+	}
+	if len(payload.Messages) == 0 || string(payload.Messages) == "null" {
+		payload.Messages = json.RawMessage("[]")
+	}
+	body := struct {
+		Info     json.RawMessage   `json:"info"`
+		Messages json.RawMessage   `json:"messages"`
+		Location map[string]string `json:"location"`
+	}{
+		Info:     payload.Info,
+		Messages: payload.Messages,
+		Location: map[string]string{"directory": workspace},
+	}
+	var resp struct {
+		Data SessionInfo `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/experimental/session/import", body, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Data.ID == "" {
+		return nil, fmt.Errorf("opencode: import returned no session id")
+	}
+	return &resp.Data, nil
 }
 
 // Message pagination bounds, vars so tests can shrink them.
