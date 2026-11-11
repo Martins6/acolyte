@@ -20,6 +20,7 @@ var (
 	memoryExportMaxPages  int
 	memoryExportNoOpen    bool
 	memoryExportForce     bool
+	memoryExportSanitize  bool
 	memoryExportJSON      bool
 )
 
@@ -31,6 +32,7 @@ type memoryExportOptions struct {
 	MaxPages   int
 	NoOpenCode bool
 	Force      bool
+	Sanitize   bool
 	JSON       bool
 }
 
@@ -62,6 +64,7 @@ external memory without Acolyte.`,
 			MaxPages:   memoryExportMaxPages,
 			NoOpenCode: memoryExportNoOpen,
 			Force:      memoryExportForce,
+			Sanitize:   memoryExportSanitize,
 			JSON:       memoryExportJSON,
 		})
 	},
@@ -78,6 +81,7 @@ func init() {
 	memoryExportCmd.Flags().IntVar(&memoryExportMaxPages, "max-pages", 1000, "maximum OpenCode message pages per session")
 	memoryExportCmd.Flags().BoolVar(&memoryExportNoOpen, "no-opencode", false, "skip OpenCode session transcripts (store/persona only)")
 	memoryExportCmd.Flags().BoolVar(&memoryExportForce, "force", false, "overwrite an existing zip")
+	memoryExportCmd.Flags().BoolVar(&memoryExportSanitize, "sanitize", false, "redact common secret patterns from the exported trace (best-effort)")
 	memoryExportCmd.Flags().BoolVar(&memoryExportJSON, "json", false, "print one JSON summary object")
 	_ = memoryExportCmd.MarkFlagRequired("out")
 }
@@ -125,6 +129,7 @@ func runMemoryExport(ctx context.Context, w io.Writer, opts memoryExportOptions)
 		SessionID:      opts.SessionID,
 		MaxPages:       opts.MaxPages,
 		Force:          opts.Force,
+		Sanitize:       opts.Sanitize,
 		AcolyteVersion: versionValue,
 	})
 	if err != nil {
