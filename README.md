@@ -262,6 +262,7 @@ sends back to the user is currently text-only; sender-side media is deferred.
 | Command                                      | Description                                    |
 | -------------------------------------------- | ---------------------------------------------- |
 | `acolyte new --name <n> --workspace-folder <p> --config '<json>'` | Scaffold, validate, and register an agent |
+| `acolyte config <agent> get\|set\|edit`       | Read or update an agent's runtime capabilities |
 | `acolyte status [name\|workspace]`           | List agents or show one agent's jobs/activity  |
 | `acolyte delete <name\|workspace>`           | Remove an agent from the registry (folder kept) |
 | `acolyte cron ...`                           | Manage scheduled prompt/shell/routine jobs     |
@@ -282,8 +283,32 @@ sends back to the user is currently text-only; sender-side media is deferred.
 > dream writer is limited to memory paths, and heartbeat turns are read-only; the routine delivers
 > notifications itself.
 
-> Runtime capability edits are not exposed yet: `acolyte new` preserves existing
-> settings/jobs when adopting an agent. See `FUTURE-IDEAS.md`.
+## Runtime config
+
+`acolyte config <agent> get|set|edit` changes an agent's capabilities in place — no re-running
+`acolyte new`. `<agent>` is an agent name or a workspace path.
+
+```bash
+acolyte config valet get                       # effective config as JSON (same shape as --config)
+acolyte config valet get --json                # one-line JSON for scripts
+acolyte config valet set engine.model minimax-coding-plan/MiniMax-M3
+acolyte config valet set schedule.heartbeat_minutes 60
+acolyte config valet set memory-learn '{"mode":"simple-dreaming","args":{"days":3}}'
+acolyte config valet set communication.telegram.allowed_users '@alice,@bob'
+acolyte config valet set schedule.timezone America/Sao_Paulo --dry-run   # diff only, no writes
+acolyte config valet edit                      # open opencode.jsonc in $EDITOR, then re-validate
+```
+
+Supported `set` keys: `description`, `engine.model`, `engine.agent`,
+`communication.channels`, `communication.telegram.allowed_users`, `schedule.timezone`,
+`schedule.heartbeat_minutes`, `memory-learn`, `memory-load`, `memory-access`,
+`memory-export` (full reference in [`docs/README.md`](docs/README.md) and
+[`docs/orchestrator/config.md`](docs/orchestrator/config.md)).
+
+Everything is validated before anything is written: `--dry-run` prints a unified diff for
+`opencode.jsonc` plus the before/after values for store/cron changes and leaves state untouched,
+and `--json` makes `get`/`set` machine-readable. `opencode.jsonc` edits are targeted (comments and
+unrelated keys are preserved, writes are temp+rename, symlinks are refused).
 
 ## Updating
 
