@@ -77,6 +77,28 @@ func (b *traceBundle) entry(name string) (string, error) {
 	return safeEntryName(name)
 }
 
+// measureEntry streams one regular entry, enforcing the per-file cap on the
+// bytes actually decompressed (headers can lie) and surfacing read/CRC
+// errors. It returns the measured byte count.
+func measureEntry(f *zip.File) (int64, error) {
+	if declared := int64(f.UncompressedSize64); declared > maxFileBytes {
+		return 0, fmt.Errorf("traceimport: zip entry %q declares %d bytes (limit %d)", f.Name, declared, maxFileBytes)
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return 0, fmt.Errorf("traceimport: open zip entry %q: %w", f.Name, err)
+	}
+	n, copyErr := io.Copy(io.Discard, io.LimitReader(rc, maxFileBytes+1))
+	rc.Close()
+	if copyErr != nil {
+		return 0, fmt.Errorf("traceimport: measure zip entry %q: %w", f.Name, copyErr)
+	}
+	if n > maxFileBytes {
+		return 0, fmt.Errorf("traceimport: zip entry %q exceeds %d bytes", f.Name, maxFileBytes)
+	}
+	return n, nil
+}
+
 // requirePayloadBudget streams every named entry to count its real
 // decompressed size, enforcing the per-file cap on actual bytes (headers can
 // lie) and the aggregate cap across the set. It runs before any import
@@ -96,20 +118,9 @@ func (b *traceBundle) requirePayloadBudget(names []string) error {
 		if f.Mode()&fs.ModeSymlink != 0 {
 			return fmt.Errorf("traceimport: refusing symlink zip entry %q", clean)
 		}
-		if declared := int64(f.UncompressedSize64); declared > maxFileBytes {
-			return fmt.Errorf("traceimport: zip entry %q declares %d bytes (limit %d)", clean, declared, maxFileBytes)
-		}
-		rc, err := f.Open()
+		n, err := measureEntry(f)
 		if err != nil {
-			return fmt.Errorf("traceimport: open zip entry %q: %w", clean, err)
-		}
-		n, copyErr := io.Copy(io.Discard, io.LimitReader(rc, maxFileBytes+1))
-		rc.Close()
-		if copyErr != nil {
-			return fmt.Errorf("traceimport: measure zip entry %q: %w", clean, copyErr)
-		}
-		if n > maxFileBytes {
-			return fmt.Errorf("traceimport: zip entry %q exceeds %d bytes", clean, maxFileBytes)
+			return err
 		}
 		total += n
 		if total > maxTotalBytes {
@@ -151,8 +162,11 @@ func (b *traceBundle) readEntry(name string) ([]byte, error) {
 	return raw, nil
 }
 
-// validate walks every entry and enforces the structural and declared-size
-// limits without writing anything. It returns the number of file entries.
+// validate walks every entry and enforces the structural and size limits
+// without writing anything. Every regular entry is streamed so the per-file
+// and aggregate caps apply to the bytes actually decompressed (headers can
+// lie) and read/CRC errors surface here instead of during extraction. It
+// returns the number of file entries.
 func (b *traceBundle) validate() (int, error) {
 	var total int64
 	files := 0
@@ -163,11 +177,11 @@ func (b *traceBundle) validate() (int, error) {
 		if entryIsDir(f) {
 			continue
 		}
-		declared := int64(f.UncompressedSize64)
-		if declared > maxFileBytes {
-			return 0, fmt.Errorf("traceimport: zip entry %q declares %d bytes (limit %d)", f.Name, declared, maxFileBytes)
+		n, err := measureEntry(f)
+		if err != nil {
+			return 0, err
 		}
-		total += declared
+		total += n
 		if total > maxTotalBytes {
 			return 0, fmt.Errorf("traceimport: trace exceeds %d bytes uncompressed (limit %d)", total, maxTotalBytes)
 		}

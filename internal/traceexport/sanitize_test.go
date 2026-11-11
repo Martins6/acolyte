@@ -211,6 +211,77 @@ func TestSanitizeJSONPreservesNumbersExactly(t *testing.T) {
 	}
 }
 
+// TestSanitizeJSONTrailingContent guards the dec.More() gap: trailing text
+// after the first JSON value must be redacted instead of being returned
+// verbatim alongside a clean prefix. dec.More() reports false when the next
+// byte is ']' or '}', which let `{"a":1}] TOKEN=x` pass as plain JSON.
+func TestSanitizeJSONTrailingContent(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		in       string
+		contains []string
+		excludes []string
+	}{
+		"trailing env assignment": {
+			in:       `{"a":1} API_KEY=secret`,
+			contains: []string{`{"a":1}`, `API_KEY=[REDACTED]`},
+			excludes: []string{"secret"},
+		},
+		"trailing after close bracket": {
+			in:       `{"a":1}] TOKEN=x`,
+			contains: []string{`{"a":1}`, `TOKEN=[REDACTED]`},
+			excludes: []string{"TOKEN=x"},
+		},
+	}
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			out := string(sanitizeEntry("x.json", []byte(tt.in)))
+			for _, want := range tt.contains {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\ninput:  %s\noutput: %s", want, tt.in, out)
+				}
+			}
+			for _, banned := range tt.excludes {
+				if strings.Contains(out, banned) {
+					t.Errorf("output still contains %q:\ninput:  %s\noutput: %s", banned, tt.in, out)
+				}
+			}
+		})
+	}
+
+	t.Run("plain json with trailing whitespace untouched", func(t *testing.T) {
+		t.Parallel()
+
+		in := "{\n  \"a\": 1\n}\n"
+		if out := string(sanitizeEntry("x.json", []byte(in))); out != in {
+			t.Errorf("output changed:\nin:  %q\nout: %q", in, out)
+		}
+	})
+
+	t.Run("json with comments still uses the jsonc scanner", func(t *testing.T) {
+		t.Parallel()
+
+		// The first value is not decodable JSON, so sanitizeEntry must fall
+		// back to the JSONC scanner: the comment survives and the bare
+		// number under a secret key stays intact (the text fallback would
+		// replace 12345 with an unquoted [REDACTED]).
+		in := "{\n  // note\n  \"password\": 12345\n}"
+		out := string(sanitizeEntry("x.json", []byte(in)))
+		if !strings.Contains(out, "// note") {
+			t.Errorf("comment lost (jsonc scanner not used):\n%s", out)
+		}
+		if !strings.Contains(out, `"password": 12345`) {
+			t.Errorf("bare number altered (jsonc scanner not used):\n%s", out)
+		}
+		if strings.Contains(out, "[REDACTED]") {
+			t.Errorf("unexpected redaction:\n%s", out)
+		}
+	})
+}
+
 func TestSanitizeTextPatterns(t *testing.T) {
 	t.Parallel()
 

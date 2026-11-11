@@ -3,6 +3,7 @@ package traceexport
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"regexp"
 	"strings"
 )
@@ -54,8 +55,9 @@ func sanitizeEntry(name string, data []byte) []byte {
 		if clean, ok := sanitizeJSON(data); ok {
 			return clean
 		}
-		// Not a plain JSON document (comments, trailing commas, ...): fall
-		// through to the JSONC scanner, which only rewrites string tokens.
+		// The first value is not decodable JSON (comments, trailing
+		// commas, ...): fall through to the JSONC scanner, which only
+		// rewrites string tokens.
 	}
 	if strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".jsonc") {
 		if clean, ok := sanitizeJSONC(data); ok {
@@ -68,7 +70,9 @@ func sanitizeEntry(name string, data []byte) []byte {
 
 // sanitizeJSON walks a JSON document redacting string values. It returns the
 // original bytes when nothing changed, so untouched files keep their exact
-// formatting, and ok=false when the data is not a plain JSON document.
+// formatting, and ok=false when the data is not JSON at all. Bytes after the
+// first value (trailing text, a second value, ...) are sanitized as text and
+// appended, so a clean JSON prefix can never smuggle a secret past redaction.
 func sanitizeJSON(data []byte) ([]byte, bool) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber() // preserve numeric literals exactly (timestamps, costs)
@@ -76,17 +80,33 @@ func sanitizeJSON(data []byte) ([]byte, bool) {
 	if err := dec.Decode(&root); err != nil {
 		return nil, false
 	}
-	if dec.More() {
-		return nil, false // trailing content: not a plain JSON document
-	}
+	// dec.More() is not a reliable end-of-document check: it reports false
+	// when the next byte is ']' or '}', so a clean prefix followed by
+	// "] TOKEN=x" would be returned unchanged. Decode a second value
+	// instead: only io.EOF proves the document ends after the first value.
+	end := dec.InputOffset()
+	var extra any
+	plain := dec.Decode(&extra) == io.EOF
+
+	changed := false
 	if s, ok := root.(string); ok {
-		if clean, changed := redactString("", s); changed {
+		if clean, did := redactString("", s); did {
 			root = clean
-		} else {
+			changed = true
+		}
+	} else {
+		changed = walkSanitize(root, "")
+	}
+
+	if !changed {
+		if plain {
+			return data, true // untouched: keep the original bytes
+		}
+		cleanTrailing := sanitizeText(data[end:])
+		if bytes.Equal(cleanTrailing, data[end:]) {
 			return data, true
 		}
-	} else if !walkSanitize(root, "") {
-		return data, true // nothing redacted: keep the original bytes
+		return append(append([]byte{}, data[:end]...), cleanTrailing...), true
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -94,7 +114,12 @@ func sanitizeJSON(data []byte) ([]byte, bool) {
 	if err := enc.Encode(root); err != nil {
 		return nil, false
 	}
-	return buf.Bytes(), true
+	if plain {
+		return buf.Bytes(), true
+	}
+	// Not a plain JSON document: re-encode the redacted first value and
+	// append the trailing bytes with the text patterns applied.
+	return append(buf.Bytes(), sanitizeText(data[end:])...), true
 }
 
 // walkSanitize redacts string values under node, using key as the owning
