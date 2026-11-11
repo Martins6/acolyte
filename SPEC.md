@@ -255,7 +255,21 @@ it produces**, documented in `docs/memory/…`.
   mappings, communication state, and `mem_dreams` audit rows. Each session also gets the
   OpenCode-native transfer JSON when the service supports the experimental export endpoint, so the
   bundle can be imported into another OpenCode workspace. The zip is self-contained and readable
-  without Acolyte.
+  without Acolyte. `--sanitize` redacts common secret patterns (env assignments,
+  `authorization`/`bearer`, `api_key=`, `sk-...`, Telegram tokens) on a best-effort basis;
+  `manifest.json` records `sanitized`.
+- **Import (v0):** `acolyte memory import <zip> [--mode trace|sessions|all] [--dry-run] [--force]`
+  moves a bundle into another agent. `trace` (default) safely extracts into
+  `<workspace>/downloads/memory-traces/<trace-id>/` (rejecting absolute paths, `..` traversal,
+  symlink entries, and entries escaping the temp root; 512 MiB total / 64 MiB per file caps;
+  atomic rename, `--force` to replace) and upserts a managed block in `.acolyte/MEMORY-TRACES.md`
+  (auto-loaded, so the agent sees the index; user content outside the block is preserved and a
+  symlinked index is refused). `sessions` replays each `sessions/<id>.json` through
+  `POST /api/experimental/session/import` in manifest order and maps the imported session to
+  thread `memory:<trace-id>:<source-session-id>`, skipping already-mapped sessions unless
+  `--force`; id conflicts from a same-service export are resolved by rewriting session/message
+  ids and retrying, and missing parent/fork references are dropped on 404. `--dry-run` validates
+  and prints planned actions without writing; `--json` prints one result object.
 - *Other modes (planned):* `portable-archive`, `remote-catalog`. See `docs/memory/memory-export/`.
 
 > Because Memory is contract-free, adding a mode = adding a documented recipe under `docs/memory/…`
@@ -451,7 +465,8 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte cron tick` | Drain currently due jobs (testing/debugging). |
 | `acolyte inbox "<text>"` | Deliver an external event to the agent on a session (§10.4). |
 | `acolyte run "<text>"` | Run one real user turn headlessly, print the reply, and map the session to `cli:<agent>`; `--continue` reuses it. Default is a new session, not the latest. |
-| `acolyte memory export --out <zip> [--agent-name\|--workspace-folder] [--session-id <id>] [--no-opencode] [--force]` | Write the portable memory trace bundle (§6.4): per-session Markdown timelines + persona/skills + orchestrator/communication state. |
+| `acolyte memory export --out <zip> [--agent-name\|--workspace-folder] [--session-id <id>] [--no-opencode] [--sanitize] [--force]` | Write the portable memory trace bundle (§6.4): per-session Markdown timelines + persona/skills + orchestrator/communication state; `--sanitize` redacts common secret patterns (best-effort). |
+| `acolyte memory import <zip> [--agent-name\|--workspace-folder] [--mode trace\|sessions\|all] [--dry-run] [--force] [--json]` | Import a trace bundle (§6.4): extract into `downloads/memory-traces/<id>` + update `.acolyte/MEMORY-TRACES.md`, and/or replay native sessions into `memory:<trace>:<source-session>` threads. |
 | `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
 | `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |
 | `acolyte attach [--session-id <id>]` | Attach the OpenCode TUI to the managed service and agent workspace/session. |
