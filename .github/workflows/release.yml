@@ -9,50 +9,67 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - os: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - os: macos-15-intel
+            goos: darwin
+            goarch: amd64
+          - os: macos-15
+            goos: darwin
+            goarch: arm64
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
+          cache: true
 
-      - name: Build binaries
+      - name: Build binary
         env:
+          # mattn/go-sqlite3 is a cgo package. Build each target on a native
+          # runner (including arm64) instead of cross-compiling with cgo off.
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ github.ref_name }}
         run: |
           mkdir -p dist
-
-          OS_ARCH=( "linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64" )
-
-          for pair in "${OS_ARCH[@]}"; do
-            OS="${pair%/*}"
-            ARCH="${pair#*/}"
-
-            OUTPUT_NAME="acolyte_${OS}_${ARCH}"
-
-            echo "Building for ${OS}/${ARCH}..."
-
-            if [ "$OS" = "windows" ]; then
-              OUTPUT_NAME="${OUTPUT_NAME}.exe"
-            fi
-
-            GOOS=$OS GOARCH=$ARCH go build -ldflags="-s -w -X main.Version=${VERSION}" -o "dist/${OUTPUT_NAME}" .
-          done
-
-      - name: Create archives
-        run: |
+          go build -ldflags="-s -w -X main.Version=${VERSION}" -o dist/acolyte .
           cd dist
-          for f in acolyte_*; do
-            archive="${f}.tar.gz"
-            mv "$f" "acolyte"
-            tar -czf "$archive" "acolyte"
-            mv "acolyte" "$f"
-          done
-          ls -la
+          tar -czf "acolyte_${GOOS}_${GOARCH}.tar.gz" acolyte
+          rm acolyte
+
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: acolyte-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/acolyte_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: acolyte-*
+          merge-multiple: true
+          path: dist
 
       - name: Generate checksums
         run: |
