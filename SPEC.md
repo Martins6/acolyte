@@ -255,7 +255,13 @@ it produces**, documented in `docs/memory/…`.
   mappings, communication state, and `mem_dreams` audit rows. Each session also gets the
   OpenCode-native transfer JSON when the service supports the experimental export endpoint, so the
   bundle can be imported into another OpenCode workspace. The zip is self-contained and readable
-  without Acolyte. `--sanitize` redacts common secret patterns (env assignments,
+  without Acolyte. `--session-id <id>` scopes the whole bundle to that session so it cannot
+  disclose unrelated conversations: `sessions/` holds only its transcript, `communication/` keeps
+  only its inbox/outbox rows, the chats they reference, and the media for those chats (channel
+  settings omitted), `orchestrator/` keeps only its session mapping (no logs, cron jobs/routes,
+  or settings), and `mem_dreams` rows are omitted; manifest counts reflect the filtered data and
+  persona/skills remain because they are agent identity, not conversation content. The default
+  export is unchanged. `--sanitize` redacts common secret patterns (env assignments,
   `authorization`/`bearer`, `api_key=`, `sk-...`, Telegram tokens) on a best-effort basis;
   `manifest.json` records `sanitized`.
 - **Import (v0):** `acolyte memory import <zip> [--mode trace|sessions|all] [--dry-run] [--force]`
@@ -465,7 +471,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte cron tick` | Drain currently due jobs (testing/debugging). |
 | `acolyte inbox "<text>"` | Deliver an external event to the agent on a session (§10.4). |
 | `acolyte run "<text>"` | Run one real user turn headlessly, print the reply, and map the session to `cli:<agent>`; `--continue` reuses it. Default is a new session, not the latest. |
-| `acolyte memory export --out <zip> [--agent-name\|--workspace-folder] [--session-id <id>] [--no-opencode] [--sanitize] [--force]` | Write the portable memory trace bundle (§6.4): per-session Markdown timelines + persona/skills + orchestrator/communication state; `--sanitize` redacts common secret patterns (best-effort). |
+| `acolyte memory export --out <zip> [--agent-name\|--workspace-folder] [--session-id <id>] [--no-opencode] [--sanitize] [--force]` | Write the portable memory trace bundle (§6.4): per-session Markdown timelines + persona/skills + orchestrator/communication state; `--session-id` scopes the bundle to that session's transcript, communication rows, and session mapping only (no unrelated conversations or global orchestrator/memory data); `--sanitize` redacts common secret patterns (best-effort). |
 | `acolyte memory import <zip> [--agent-name\|--workspace-folder] [--mode trace\|sessions\|all] [--dry-run] [--force] [--json]` | Import a trace bundle (§6.4): extract into `downloads/memory-traces/<id>` + update `.acolyte/MEMORY-TRACES.md`, and/or replay native sessions into `memory:<trace>:<source-session>` threads. |
 | `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
 | `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |

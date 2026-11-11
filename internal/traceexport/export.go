@@ -79,6 +79,7 @@ type manifest struct {
 	ExportedAt     time.Time         `json:"exported_at"`
 	AcolyteVersion string            `json:"acolyte_version,omitempty"`
 	Sanitized      bool              `json:"sanitized"`
+	ScopedSession  string            `json:"scoped_session,omitempty"`
 	Sessions       []sessionManifest `json:"sessions"`
 	Counts         counts            `json:"counts"`
 	Warnings       []string          `json:"warnings,omitempty"`
@@ -215,10 +216,16 @@ func Export(ctx context.Context, req Request) (*Result, error) {
 }
 
 func reqWarnings(req Request) []string {
-	if req.OpenCode != nil {
-		return nil
+	var warnings []string
+	if req.OpenCode == nil {
+		warnings = append(warnings, "OpenCode service was not read; session transcripts are omitted")
 	}
-	return []string{"OpenCode service was not read; session transcripts are omitted"}
+	if sessionID := strings.TrimSpace(req.SessionID); sessionID != "" {
+		warnings = append(warnings, fmt.Sprintf(
+			"single-session export scoped to %s: unrelated communication rows and global orchestrator/memory data are omitted; persona and skills are included as agent identity",
+			sessionID))
+	}
+	return warnings
 }
 
 func (b *bundle) writeBundle(ctx context.Context) error {
@@ -244,6 +251,7 @@ func (b *bundle) writeBundle(ctx context.Context) error {
 		ExportedAt:     b.now,
 		AcolyteVersion: b.request.AcolyteVersion,
 		Sanitized:      b.request.Sanitize,
+		ScopedSession:  strings.TrimSpace(b.request.SessionID),
 		Sessions:       b.sessions,
 		Counts: counts{
 			Sessions:     len(b.sessions),
@@ -294,6 +302,13 @@ func (b *bundle) write(name string, data []byte) error {
 
 func (b *bundle) warn(format string, args ...any) {
 	b.warnings = append(b.warnings, fmt.Sprintf(format, args...))
+}
+
+// singleSession reports whether this export is scoped to one session. A
+// scoped bundle must not disclose anything beyond that session: no unrelated
+// conversations, no global orchestrator state, no global memory rows.
+func (b *bundle) singleSession() bool {
+	return strings.TrimSpace(b.request.SessionID) != ""
 }
 
 func (b *bundle) exportPersona() error {
@@ -577,8 +592,8 @@ func (b *bundle) communicationBySession() (map[string][]commtg.InboxItem, map[st
 		}
 		outboxBySession[item.OpenCodeSessionID] = append(outboxBySession[item.OpenCodeSessionID], item)
 	}
-	b.commIn = len(inbox)
-	b.commOut = len(outbox)
+	// Counts are owned by exportCommunication, which is the single writer of
+	// the communication/ files and therefore of the manifest counts.
 	return inboxBySession, outboxBySession, nil
 }
 
@@ -587,8 +602,17 @@ func (b *bundle) exportOrchestrator() error {
 	if err != nil {
 		return err
 	}
+	if b.singleSession() {
+		// Keep only the selected session's mapping. Logs, cron jobs/routes,
+		// and settings are global to the agent and would disclose unrelated
+		// activity, so a scoped bundle omits them entirely.
+		sessions = filterSessionsForMapping(sessions, b.request.SessionID)
+	}
 	if err := b.writeJSON("orchestrator/sessions.json", sessions); err != nil {
 		return err
+	}
+	if b.singleSession() {
+		return nil
 	}
 
 	logs, err := b.request.Store.Orch().ListLogs(0)
@@ -627,36 +651,65 @@ func (b *bundle) exportOrchestrator() error {
 }
 
 func (b *bundle) exportCommunication() error {
-	chats, err := b.request.Store.CommTG().ListChats()
-	if err != nil {
-		return err
-	}
-	if err := b.writeJSON("communication/chats.json", chats); err != nil {
-		return err
-	}
 	inbox, err := b.request.Store.CommTG().ListAllInbox()
 	if err != nil {
-		return err
-	}
-	b.commIn = len(inbox)
-	if err := b.writeJSON("communication/inbox.json", inbox); err != nil {
 		return err
 	}
 	outbox, err := b.request.Store.CommTG().ListAllOutbox()
 	if err != nil {
 		return err
 	}
-	b.commOut = len(outbox)
-	if err := b.writeJSON("communication/outbox.json", outbox); err != nil {
+	chats, err := b.request.Store.CommTG().ListChats()
+	if err != nil {
 		return err
 	}
 	media, err := b.request.Store.CommTG().ListMedia()
 	if err != nil {
 		return err
 	}
+
+	single := b.singleSession()
+	var chatIDs map[int64]bool
+	if single {
+		// Scope every communication slice to the selected session: its rows,
+		// the chats those rows reference, and the media for those chats.
+		inbox = filterInboxForSession(inbox, b.request.SessionID)
+		outbox = filterOutboxForSession(outbox, b.request.SessionID)
+		chatIDs = make(map[int64]bool)
+		for _, item := range inbox {
+			chatIDs[item.ChatID] = true
+		}
+		for _, item := range outbox {
+			chatIDs[item.ChatID] = true
+		}
+		chats = filterChatsByIDs(chats, chatIDs)
+		if len(chatIDs) == 0 {
+			media = nil // no chat is known for this session: omit the index
+		} else {
+			media = filterMediaByIDs(media, chatIDs)
+		}
+	}
+	b.commIn = len(inbox)
+	b.commOut = len(outbox)
 	b.commMedia = len(media)
-	if err := b.writeJSON("communication/media.json", media); err != nil {
+
+	if err := b.writeJSON("communication/chats.json", chats); err != nil {
 		return err
+	}
+	if err := b.writeJSON("communication/inbox.json", inbox); err != nil {
+		return err
+	}
+	if err := b.writeJSON("communication/outbox.json", outbox); err != nil {
+		return err
+	}
+	if !single || len(chatIDs) > 0 {
+		if err := b.writeJSON("communication/media.json", media); err != nil {
+			return err
+		}
+	}
+	if single {
+		// Channel settings are global to the agent, not to one conversation.
+		return nil
 	}
 	settings, err := b.request.Store.CommTG().ListSettings()
 	if err != nil {
@@ -665,7 +718,66 @@ func (b *bundle) exportCommunication() error {
 	return b.writeJSON("communication/settings.json", settings)
 }
 
+// filterInboxForSession keeps only inbound rows produced by sessionID.
+func filterInboxForSession(items []commtg.InboxItem, sessionID string) []commtg.InboxItem {
+	filtered := make([]commtg.InboxItem, 0, len(items))
+	for _, item := range items {
+		if item.OpenCodeSessionID == sessionID {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+// filterOutboxForSession keeps only outbound rows produced by sessionID.
+func filterOutboxForSession(items []commtg.OutboxItem, sessionID string) []commtg.OutboxItem {
+	filtered := make([]commtg.OutboxItem, 0, len(items))
+	for _, item := range items {
+		if item.OpenCodeSessionID == sessionID {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+// filterChatsByIDs keeps only chats referenced by the exported rows.
+func filterChatsByIDs(chats []commtg.Chat, chatIDs map[int64]bool) []commtg.Chat {
+	filtered := make([]commtg.Chat, 0, len(chats))
+	for _, chat := range chats {
+		if chatIDs[chat.ChatID] {
+			filtered = append(filtered, chat)
+		}
+	}
+	return filtered
+}
+
+// filterMediaByIDs keeps only media rows saved for the referenced chats.
+func filterMediaByIDs(media []commtg.MediaItem, chatIDs map[int64]bool) []commtg.MediaItem {
+	filtered := make([]commtg.MediaItem, 0, len(media))
+	for _, item := range media {
+		if chatIDs[item.ChatID] {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+// filterSessionsForMapping keeps only the selected session's thread mapping.
+func filterSessionsForMapping(sessions []orch.Session, sessionID string) []orch.Session {
+	filtered := make([]orch.Session, 0, len(sessions))
+	for _, mapping := range sessions {
+		if mapping.OpenCodeSessionID == sessionID {
+			filtered = append(filtered, mapping)
+		}
+	}
+	return filtered
+}
+
 func (b *bundle) exportMemory() error {
+	if b.singleSession() {
+		// Dream audit rows are global memory, unrelated to one conversation.
+		return nil
+	}
 	dreams, err := b.request.Store.Mem().ListDreams(0)
 	if err != nil {
 		return err
@@ -713,6 +825,9 @@ func (b *bundle) readme(m manifest) string {
 	builder.WriteString(".\n\n")
 	builder.WriteString("This bundle is a portable trace of the agent. It is intentionally self-contained: ")
 	builder.WriteString("a model can read the Markdown directly, without Acolyte or OpenCode.\n\n")
+	if m.ScopedSession != "" {
+		fmt.Fprintf(&builder, "This is a **single-session export** scoped to `%s`: `communication/` holds only that session's inbox/outbox rows, the chats they reference, and the media for those chats (channel settings are omitted); `orchestrator/` keeps only its session mapping (no logs, cron jobs, routes, or settings); and `memory/dreams.json` is omitted. Persona and skills are still included because they are agent identity, not conversation content.\n\n", m.ScopedSession)
+	}
 	builder.WriteString("## Contents\n\n")
 	builder.WriteString("- `session-index.md` — every exported session, with links.\n")
 	builder.WriteString("- `sessions/<id>.md` — one full timeline per session: messages, reasoning, tool calls, and communication routing events.\n")
