@@ -6,6 +6,7 @@ import (
 	"os/exec"
 
 	"github.com/martins6/acolyte/internal/opencode"
+	"github.com/martins6/acolyte/internal/traceimport"
 )
 
 // turnClient is the OpenCode surface used by the CLI primitives. It is an
@@ -23,6 +24,13 @@ var openCodeEnsure = func(ctx context.Context) (turnClient, error) {
 		return nil, err
 	}
 	return client, nil
+}
+
+// openCodeImportEnsure is the OpenCode surface used by `acolyte memory
+// import` for replaying native session payloads. It is a separate seam from
+// openCodeEnsure because the import path needs ImportSession, not turns.
+var openCodeImportEnsure = func(ctx context.Context) (traceimport.OpenCode, error) {
+	return opencode.Ensure(ctx)
 }
 
 var openCodeServiceURL = opencode.ServiceURL
