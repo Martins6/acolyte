@@ -225,8 +225,9 @@ func runSessions(ctx context.Context, bundle *traceBundle, req Request, workspac
 	res.Warnings = append(res.Warnings, warnings...)
 
 	// Preflight: stream every payload that would be imported to enforce the
-	// per-file and aggregate size caps on actual decompressed bytes before
-	// promising (dry-run) or issuing any import request.
+	// per-file and aggregate size caps on actual decompressed bytes, then
+	// decode them to verify ids — all before promising (dry-run) or issuing
+	// any import request.
 	var payloads []string
 	for _, plan := range plans {
 		if plan.skip {
@@ -235,6 +236,9 @@ func runSessions(ctx context.Context, bundle *traceBundle, req Request, workspac
 		payloads = append(payloads, plan.nativeJSON)
 	}
 	if err := bundle.requirePayloadBudget(payloads); err != nil {
+		return err
+	}
+	if err := bundle.validatePayloads(plans); err != nil {
 		return err
 	}
 

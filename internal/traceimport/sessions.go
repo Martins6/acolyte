@@ -28,10 +28,13 @@ type sessionPlan struct {
 
 // planSessions turns the manifest into per-session import decisions. Sessions
 // are processed in manifest order; a session whose thread is already mapped
-// is skipped unless force is set.
+// is skipped unless force is set. Duplicate source ids are rejected up front:
+// both entries would import and the second would overwrite the first's thread
+// mapping, orphaning the session it imported.
 func planSessions(m *manifest, traceID string, st *store.Store, force bool) ([]sessionPlan, []string, error) {
 	var plans []sessionPlan
 	var warnings []string
+	seen := map[string]string{} // source id -> payload of its first manifest entry
 	noPayload := 0
 	for _, entry := range m.Sessions {
 		sourceID := strings.TrimSpace(entry.ID)
@@ -39,7 +42,12 @@ func planSessions(m *manifest, traceID string, st *store.Store, force bool) ([]s
 			warnings = append(warnings, "manifest session entry has no id; skipped")
 			continue
 		}
-		if strings.TrimSpace(entry.NativeJSON) == "" {
+		payload := strings.TrimSpace(entry.NativeJSON)
+		if first, dup := seen[sourceID]; dup {
+			return nil, nil, fmt.Errorf("traceimport: duplicate session id %q in manifest (payloads %q and %q)", sourceID, first, payload)
+		}
+		seen[sourceID] = payload
+		if payload == "" {
 			noPayload++
 			continue
 		}
@@ -68,6 +76,57 @@ func planSessions(m *manifest, traceID string, st *store.Store, force bool) ([]s
 		warnings = append(warnings, "manifest lists no importable sessions")
 	}
 	return plans, warnings, nil
+}
+
+// validatePayloads decodes every payload that would be imported and checks
+// its structure before any import request is issued — dry-run included. It
+// runs alongside the size-budget preflight and skips the same plans:
+// info.id must match the manifest source id (so the thread mapping points at
+// the session that was actually imported), and message ids must be unique
+// within and across payloads so one import cannot collide with or orphan
+// another.
+func (b *traceBundle) validatePayloads(plans []sessionPlan) error {
+	seenMessageIDs := map[string]string{} // message id -> session that claimed it
+	for _, plan := range plans {
+		if plan.skip {
+			continue
+		}
+		raw, err := b.readEntry(plan.nativeJSON)
+		if err != nil {
+			return err
+		}
+		payload, err := decodeTransfer(raw)
+		if err != nil {
+			return fmt.Errorf("traceimport: decode session %s payload: %w", plan.sourceID, err)
+		}
+		infoID, _ := payload.info["id"].(string)
+		if strings.TrimSpace(infoID) == "" {
+			return fmt.Errorf("traceimport: session %s payload has no info.id", plan.sourceID)
+		}
+		if infoID != plan.sourceID {
+			return fmt.Errorf("traceimport: session %s payload has info.id %q, which does not match the manifest session id", plan.sourceID, infoID)
+		}
+		seenInPayload := map[string]bool{}
+		for _, entry := range payload.messages {
+			message, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			messageID, _ := message["id"].(string)
+			if messageID == "" {
+				continue
+			}
+			if seenInPayload[messageID] {
+				return fmt.Errorf("traceimport: session %s payload has duplicate message id %q", plan.sourceID, messageID)
+			}
+			seenInPayload[messageID] = true
+			if other, ok := seenMessageIDs[messageID]; ok {
+				return fmt.Errorf("traceimport: duplicate message id %q across payloads (sessions %s and %s)", messageID, other, plan.sourceID)
+			}
+			seenMessageIDs[messageID] = plan.sourceID
+		}
+	}
+	return nil
 }
 
 // sessionImporter imports session payloads, rewriting identifiers when the
@@ -200,8 +259,10 @@ func (t *transfer) remapRefs(imported map[string]string) {
 }
 
 // rewriteIDs regenerates the session id and every message id in the payload,
-// then rewrites any nested references to the old ids (revert targets, tool
-// metadata, ...).
+// then rewrites the identifier fields that reference them: info.id,
+// info.parentID, info.fork.sessionID, message ids, and message revert targets.
+// Content fields (text, summary, metadata, tool input/output, ...) are never
+// touched — a value that happens to equal an old id must stay byte-identical.
 func (t *transfer) rewriteIDs() {
 	idMap := map[string]string{}
 	if old, ok := t.info["id"].(string); ok && old != "" {
@@ -221,7 +282,21 @@ func (t *transfer) rewriteIDs() {
 		}
 		idMap[old] = randomID("msg_")
 	}
-	replaceStrings(t.root, idMap)
+	replaceIdentifier(t.info, "id", idMap)
+	replaceIdentifier(t.info, "parentID", idMap)
+	if fork, ok := t.info["fork"].(map[string]any); ok {
+		replaceIdentifier(fork, "sessionID", idMap)
+	}
+	for _, entry := range t.messages {
+		message, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		replaceIdentifier(message, "id", idMap)
+		if revert, ok := message["revert"].(map[string]any); ok {
+			replaceIdentifier(revert, "messageID", idMap)
+		}
+	}
 }
 
 // dropSessionRefs removes references to sessions that do not exist in the
@@ -231,30 +306,16 @@ func (t *transfer) dropSessionRefs() {
 	delete(t.info, "fork")
 }
 
-// replaceStrings walks the decoded payload and swaps every string value that
-// exactly matches a key of idMap.
-func replaceStrings(node any, idMap map[string]string) {
-	switch value := node.(type) {
-	case map[string]any:
-		for key, child := range value {
-			if s, ok := child.(string); ok {
-				if replaced, ok := idMap[s]; ok {
-					value[key] = replaced
-					continue
-				}
-			}
-			replaceStrings(child, idMap)
-		}
-	case []any:
-		for index, child := range value {
-			if s, ok := child.(string); ok {
-				if replaced, ok := idMap[s]; ok {
-					value[index] = replaced
-					continue
-				}
-			}
-			replaceStrings(child, idMap)
-		}
+// replaceIdentifier swaps object[key] when its value is a key of idMap. Only
+// identifier fields are routed through here, so content that happens to equal
+// an id (message text, metadata, ...) stays byte-identical.
+func replaceIdentifier(object map[string]any, key string, idMap map[string]string) {
+	current, ok := object[key].(string)
+	if !ok {
+		return
+	}
+	if replaced, ok := idMap[current]; ok {
+		object[key] = replaced
 	}
 }
 
