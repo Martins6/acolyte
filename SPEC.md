@@ -165,9 +165,11 @@ permission rules), `GET /api/session/stats`, `GET /api/agent`, `event.subscribe(
 **Caveats:**
 - The orchestrator must discover/start the OpenCode service (`opencode serve --service`); internal
   `opencode/server.go` already does this.
-- The V2 API is OpenCode's "only intentional breaking change" — pin it and **generate a Go client
-  from `/openapi.json`**, behind one thin internal client so breakage is contained. (Not an engine
-  abstraction — still OpenCode-only; just transport hygiene.)
+- The V2 API is OpenCode's "only intentional breaking change" — pin it and vendor the release's
+  `/openapi.json` under `internal/opencode/contract/`, with a contract test that guards every path,
+  method, schema, and schema property the thin client uses (`docs/opencode/v2-contract.md`). CI
+  installs the same pinned OpenCode version. (Not an engine abstraction — still OpenCode-only; just
+  transport hygiene.)
 - Existing `internal/opencode/client.go` uses V1-style paths (`/session/{id}/message`); retarget to
   V2 (`/api/...`) with `synthetic` + `inbox` for external events and `prompt` for real user turns, and
   retire the CLI `runner.go` turn path.
@@ -246,10 +248,34 @@ it produces**, documented in `docs/memory/…`.
   `consolidate`. See `docs/memory/memory-learn/simple-dreaming.md`.
 
 ### 6.4 `memory-export` — portability
-- **`opencode-export` (v0):** bundles the agent's memory (skills + persona + hub) into an
-  **OpenCode-native** portable format — a drop-in skills/instructions set another OpenCode workspace
-  or Acolyte agent can import. A future CLI entry (`acolyte memory export`) is planned but not
-  registered yet; the mode can still be run through its documented skill/artifacts.
+- **`opencode-export` (v0):** `acolyte memory export --out <zip>` writes a portable memory trace
+  bundle: every OpenCode session as a Markdown timeline (messages, reasoning, tool calls, idle
+  markers, and communication routing events), the persona + skills (`AGENTS.md`,
+  `opencode.jsonc`, `.acolyte/*.md`, `.agents/skills/**`), orchestrator logs/cron/session
+  mappings, communication state, and `mem_dreams` audit rows. Each session also gets the
+  OpenCode-native transfer JSON when the service supports the experimental export endpoint, so the
+  bundle can be imported into another OpenCode workspace. The zip is self-contained and readable
+  without Acolyte. `--session-id <id>` scopes the whole bundle to that session so it cannot
+  disclose unrelated conversations: `sessions/` holds only its transcript, `communication/` keeps
+  only its inbox/outbox rows, the chats they reference, and the media for those chats (channel
+  settings omitted), `orchestrator/` keeps only its session mapping (no logs, cron jobs/routes,
+  or settings), and `mem_dreams` rows are omitted; manifest counts reflect the filtered data and
+  persona/skills remain because they are agent identity, not conversation content. The default
+  export is unchanged. `--sanitize` redacts common secret patterns (env assignments,
+  `authorization`/`bearer`, `api_key=`, `sk-...`, Telegram tokens) on a best-effort basis;
+  `manifest.json` records `sanitized`.
+- **Import (v0):** `acolyte memory import <zip> [--mode trace|sessions|all] [--dry-run] [--force]`
+  moves a bundle into another agent. `trace` (default) safely extracts into
+  `<workspace>/downloads/memory-traces/<trace-id>/` (rejecting absolute paths, `..` traversal,
+  symlink entries, and entries escaping the temp root; 512 MiB total / 64 MiB per file caps;
+  atomic rename, `--force` to replace) and upserts a managed block in `.acolyte/MEMORY-TRACES.md`
+  (auto-loaded, so the agent sees the index; user content outside the block is preserved and a
+  symlinked index is refused). `sessions` replays each `sessions/<id>.json` through
+  `POST /api/experimental/session/import` in manifest order and maps the imported session to
+  thread `memory:<trace-id>:<source-session-id>`, skipping already-mapped sessions unless
+  `--force`; id conflicts from a same-service export are resolved by rewriting session/message
+  ids and retrying, and missing parent/fork references are dropped on 404. `--dry-run` validates
+  and prints planned actions without writing; `--json` prints one result object.
 - *Other modes (planned):* `portable-archive`, `remote-catalog`. See `docs/memory/memory-export/`.
 
 > Because Memory is contract-free, adding a mode = adding a documented recipe under `docs/memory/…`
@@ -445,6 +471,8 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte cron tick` | Drain currently due jobs (testing/debugging). |
 | `acolyte inbox "<text>"` | Deliver an external event to the agent on a session (§10.4). |
 | `acolyte run "<text>"` | Run one real user turn headlessly, print the reply, and map the session to `cli:<agent>`; `--continue` reuses it. Default is a new session, not the latest. |
+| `acolyte memory export --out <zip> [--agent-name\|--workspace-folder] [--session-id <id>] [--no-opencode] [--sanitize] [--force]` | Write the portable memory trace bundle (§6.4): per-session Markdown timelines + persona/skills + orchestrator/communication state; `--session-id` scopes the bundle to that session's transcript, communication rows, and session mapping only (no unrelated conversations or global orchestrator/memory data); `--sanitize` redacts common secret patterns (best-effort). |
+| `acolyte memory import <zip> [--agent-name\|--workspace-folder] [--mode trace\|sessions\|all] [--dry-run] [--force] [--json]` | Import a trace bundle (§6.4): extract into `downloads/memory-traces/<id>` + update `.acolyte/MEMORY-TRACES.md`, and/or replay native sessions into `memory:<trace>:<source-session>` threads. |
 | `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
 | `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |
 | `acolyte attach [--session-id <id>]` | Attach the OpenCode TUI to the managed service and agent workspace/session. |
@@ -622,6 +650,9 @@ admit a synthetic event; output is routed via Communication.
     interesting (otherwise `NO_ACTION`), and the routine delivers it to the latest non-cron session
     through the communication sink. The turn is read-only and the routine returns empty so cron does
     not double-notify (§10.3).
+27. **The OpenCode V2 contract is pinned** to `2.2.7`: the release's `/openapi.json` is vendored
+    under `internal/opencode/contract/`, guarded by a hash + path/schema contract test, and CI
+    installs the same version (§5.1, `docs/opencode/v2-contract.md`).
 
 **[OPEN] forks:**
 None.

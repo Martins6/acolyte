@@ -158,6 +158,55 @@ that is already mapped to the agent. Use `acolyte inspect --session-id <id>` to
 read the transcript, or `acolyte attach --agent-name <agent>` to open the latest
 session in the TUI.
 
+### 7. Export a Memory Trace
+
+`acolyte memory export` writes one portable zip containing every OpenCode
+session as a Markdown timeline (messages, reasoning, tool calls, and
+communication routing events), plus the persona/skills, orchestrator logs,
+cron/session state, communication state, and memory-learn audit rows:
+
+```bash
+acolyte memory export --agent-name valet --out ~/valet-memory.zip
+acolyte memory export --agent-name valet --out one-session.zip --session-id ses_...
+acolyte memory export --agent-name valet --out store-only.zip --no-opencode
+acolyte memory export --agent-name valet --out safe.zip --sanitize
+```
+
+The unzipped folder is self-contained: another agent can read `README.md`,
+`manifest.json`, and `sessions/*.md` as external memory. Native
+`sessions/<id>.json` files are included when the OpenCode service supports the
+experimental session export endpoint. Existing zips are not overwritten unless
+`--force` is passed.
+
+`--session-id` scopes the whole bundle to one session so it cannot disclose
+unrelated conversations: only that session's transcript and its own
+inbox/outbox/chat/media rows are included, the orchestrator section keeps only
+its session mapping (no logs, cron, or settings), and global memory data
+(dreams) is omitted. Persona and skills are still included — they are agent
+identity, not conversation content. Manifest counts reflect the scoped data.
+
+Raw traces may contain secrets from the source workspace; `--sanitize` redacts
+common secret patterns (env assignments, `authorization`/`bearer` values,
+`api_key=`, `sk-...`, Telegram tokens) on a best-effort basis — review before
+sharing. `manifest.json` records whether sanitization ran.
+
+`acolyte memory import` moves a trace into another agent:
+
+```bash
+acolyte memory import ~/valet-memory.zip --agent-name butler            # extract + index
+acolyte memory import ~/valet-memory.zip --agent-name butler --mode sessions  # replay sessions
+acolyte memory import ~/valet-memory.zip --agent-name butler --mode all --dry-run
+```
+
+The default `trace` mode safely extracts the bundle into
+`downloads/memory-traces/<trace-id>/` and updates the managed block in
+`.acolyte/MEMORY-TRACES.md` (auto-loaded, so the agent sees the index and can
+read the trace on demand). `sessions` mode replays the native session payloads
+through OpenCode's import API and maps them to
+`memory:<trace-id>:<source-session-id>` threads; already-mapped sessions are
+skipped unless `--force`. Extraction rejects absolute paths, `..` traversal,
+and symlink entries, and caps sizes at 512 MiB total / 64 MiB per file.
+
 ## Agent Workspace
 
 `acolyte new` creates the SPEC v0 layout:
@@ -220,6 +269,8 @@ sends back to the user is currently text-only; sender-side media is deferred.
 | `acolyte notify-user "<text>"`               | Notify the user only (never the agent)         |
 | `acolyte inbox "<text>"`                     | Deliver a synthetic external event to an agent |
 | `acolyte run "<text>"`                       | Run one headless agent turn (no Telegram/TUI)  |
+| `acolyte memory export --out <zip>`          | Export the full memory trace as a zip          |
+| `acolyte memory import <zip>`                | Import a trace zip (extract/index or sessions) |
 | `acolyte inspect --session-id <id>`          | Merge OpenCode history with routing events     |
 | `acolyte attach [--agent-name <n>]`          | Attach the OpenCode TUI to the agent session   |
 | `acolyte start`                              | Start the multi-agent daemon                   |

@@ -41,3 +41,25 @@ func (s *Store) GetSetting(key string) (string, bool, error) {
 	}
 	return value, true, nil
 }
+
+// ListSettings returns every non-secret channel setting.
+func (s *Store) ListSettings() (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM comm_tg_settings ORDER BY key`)
+	if err != nil {
+		return nil, fmt.Errorf("comm_tg: list settings: %w", err)
+	}
+	defer rows.Close()
+
+	settings := make(map[string]string)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, fmt.Errorf("comm_tg: scan setting: %w", err)
+		}
+		settings[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("comm_tg: list settings: %w", err)
+	}
+	return settings, nil
+}

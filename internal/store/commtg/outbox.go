@@ -130,6 +130,17 @@ func (s *Store) ListOutbox(chatID int64) ([]OutboxItem, error) {
 	return scanOutbox(rows)
 }
 
+// ListAllOutbox returns every outbound row in chronological order.
+func (s *Store) ListAllOutbox() ([]OutboxItem, error) {
+	rows, err := s.db.Query(`SELECT ` + outboxColumns + ` FROM comm_tg_outbox
+		ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("comm_tg: list all outbox: %w", err)
+	}
+	defer rows.Close()
+	return scanOutbox(rows)
+}
+
 // MarkOutboundProgress records successfully sent chunks without completing the
 // row.
 func (s *Store) MarkOutboundProgress(id string, chunksSent int, tgMessageID int64) error {

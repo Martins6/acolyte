@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,9 @@ type fakeCLITurn struct {
 	result     *opencode.TurnResult
 	messages   []opencode.Message
 	messageErr error
+	sessions   []opencode.SessionInfo
+	bySession  map[string][]opencode.Message
+	exports    map[string]json.RawMessage
 
 	userSessionID string
 	userText      string
@@ -42,8 +46,22 @@ func (f *fakeCLITurn) RunSyntheticTurn(context.Context, string, opencode.Synthet
 	return f.turnResult(), nil
 }
 
-func (f *fakeCLITurn) SessionMessages(context.Context, string, int) ([]opencode.Message, bool, error) {
+func (f *fakeCLITurn) SessionMessages(_ context.Context, sessionID string, _ int) ([]opencode.Message, bool, error) {
+	if f.bySession != nil {
+		return f.bySession[sessionID], false, f.messageErr
+	}
 	return f.messages, false, f.messageErr
+}
+
+func (f *fakeCLITurn) ListSessions(context.Context) ([]opencode.SessionInfo, error) {
+	return f.sessions, nil
+}
+
+func (f *fakeCLITurn) ExportSession(_ context.Context, sessionID string) (json.RawMessage, error) {
+	if raw, ok := f.exports[sessionID]; ok {
+		return raw, nil
+	}
+	return nil, nil
 }
 
 func (f *fakeCLITurn) turnResult() *opencode.TurnResult {

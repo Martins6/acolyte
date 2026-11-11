@@ -48,6 +48,10 @@ means *both* instructions-in-context + the `skill` tool.
 | `memory-learn` | `{mode,args}` \| null | `simple-dreaming` | `days:int` | [`memory-learn/simple-dreaming.md`](memory/memory-learn/simple-dreaming.md) |
 | `memory-export` | `{mode,args}` \| null | `opencode-export` | — | [`memory-export/opencode-export.md`](memory/memory-export/opencode-export.md) |
 
+The `opencode-export` mode is run with `acolyte memory export --out <zip>`; it writes a
+portable Markdown + JSON trace bundle. `acolyte memory import <zip>` moves a bundle into
+another agent (extract + index, and/or replay its sessions).
+
 ### Communication — [`communication/README.md`](communication/README.md)
 | Key | Type | Channels | Meaning | Doc |
 | --- | ---- | -------- | ------- | --- |
@@ -138,6 +142,8 @@ docs/
 ├── communication/
 │   ├── README.md
 │   └── <channel>.md                ← telegram.md
+├── opencode/
+│   └── v2-contract.md              ← pinned V2 API version + update procedure
 └── orchestrator/
     ├── README.md
     ├── daemon.md                   ← per-agent adapters, routing, inspect/attach
@@ -157,4 +163,5 @@ file** covers intent, arguments, how it works, and the OpenCode/cron artifacts i
 | **Orchestrator** | [`orchestrator/`](orchestrator/README.md) | `acolyte` daemon: turn loop, envelope bus, cron, store, registry. |
 
 The **Engine** (OpenCode) is the platform, not a module — see the
-[OpenCode V2 docs](https://opencode.ai/v2/docs/) and `SPEC.md` §5.
+[OpenCode V2 docs](https://opencode.ai/v2/docs/), the pinned
+[V2 contract](opencode/v2-contract.md), and `SPEC.md` §5.

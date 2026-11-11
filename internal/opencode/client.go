@@ -30,6 +30,22 @@ type SessionInfo struct {
 	Time        SessionTime      `json:"time,omitempty"`
 	Location    SessionLocation  `json:"location,omitempty"`
 	Permissions []PermissionRule `json:"permissions,omitempty"`
+
+	// Raw is the exact session projection returned by the service. It is kept
+	// for trace exports that must preserve fields this client does not model.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON retains the original projection alongside the typed fields.
+func (s *SessionInfo) UnmarshalJSON(data []byte) error {
+	type alias SessionInfo
+	var value alias
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*s = SessionInfo(value)
+	s.Raw = append(s.Raw[:0], data...)
+	return nil
 }
 
 // SessionTime holds session epoch-millisecond timestamps.
@@ -54,6 +70,23 @@ type Message struct {
 	Content []ContentPart `json:"content"`
 	Outcome string        `json:"outcome"`
 	Finish  string        `json:"finish"`
+
+	// Raw is the exact message returned by the service. Trace exports use it
+	// to render fields beyond the reply-oriented projection above (tool state,
+	// reasoning, metadata, attachments, cost, tokens, ...).
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON retains the original message alongside the typed fields.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type alias Message
+	var value alias
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*m = Message(value)
+	m.Raw = append(m.Raw[:0], data...)
+	return nil
 }
 
 // MessageTime holds epoch-millisecond timestamps of a message.
@@ -272,6 +305,68 @@ func (c *Client) Context(ctx context.Context, sessionID string) ([]Message, erro
 		return nil, err
 	}
 	return resp.Data, nil
+}
+
+// ExportSession returns the OpenCode-native transfer payload for a session
+// (info + complete projected messages). It is the format accepted by
+// ImportSession.
+func (c *Client) ExportSession(ctx context.Context, sessionID string) (json.RawMessage, error) {
+	path := "/api/experimental/session/" + url.PathEscape(sessionID) + "/export"
+	var resp struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Data) == 0 {
+		return nil, fmt.Errorf("opencode: empty session export for %s", sessionID)
+	}
+	return resp.Data, nil
+}
+
+// ImportSession imports an OpenCode-native transfer payload (the {info,
+// messages} shape produced by ExportSession) into workspace and returns the
+// session projection the service created. The workspace is sent as the
+// top-level location, which is what the service applies to the imported
+// session. An empty messages array is normalized to [] because the endpoint
+// requires the key but accepts no messages.
+func (c *Client) ImportSession(ctx context.Context, raw json.RawMessage, workspace string) (*SessionInfo, error) {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return nil, fmt.Errorf("opencode: import workspace is required")
+	}
+	var payload struct {
+		Info     json.RawMessage `json:"info"`
+		Messages json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("opencode: decode session payload: %w", err)
+	}
+	if len(payload.Info) == 0 || string(payload.Info) == "null" {
+		return nil, fmt.Errorf("opencode: session payload has no info")
+	}
+	if len(payload.Messages) == 0 || string(payload.Messages) == "null" {
+		payload.Messages = json.RawMessage("[]")
+	}
+	body := struct {
+		Info     json.RawMessage   `json:"info"`
+		Messages json.RawMessage   `json:"messages"`
+		Location map[string]string `json:"location"`
+	}{
+		Info:     payload.Info,
+		Messages: payload.Messages,
+		Location: map[string]string{"directory": workspace},
+	}
+	var resp struct {
+		Data SessionInfo `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/experimental/session/import", body, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Data.ID == "" {
+		return nil, fmt.Errorf("opencode: import returned no session id")
+	}
+	return &resp.Data, nil
 }
 
 // Message pagination bounds, vars so tests can shrink them.

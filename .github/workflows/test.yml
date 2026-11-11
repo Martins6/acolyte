@@ -79,6 +79,10 @@ jobs:
     environment: OPENCODE_GO_API_KEY
     permissions:
       contents: read
+    env:
+      # Keep this in sync with opencode.PinnedOpenCodeVersion and the vendored
+      # OpenAPI spec in internal/opencode/contract/.
+      OPENCODE_VERSION: "2.2.7"
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -100,8 +104,9 @@ jobs:
       - name: Install OpenCode CLI
         # Pin the CLI to the version the V2 client contract is tested against.
         run: |
-          npm install --global @opencode/cli@2.2.6
+          npm install --global "@opencode/cli@${OPENCODE_VERSION}"
           opencode --version
+          test "$(opencode --version | awk '{print $2}')" = "v${OPENCODE_VERSION}"
 
       # The key is scoped to this step only: the background service inherits
       # it when it starts from this shell, and the test step below never sees
