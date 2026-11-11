@@ -193,7 +193,7 @@ func runTrace(ctx context.Context, bundle *traceBundle, req Request, workspace, 
 		return nil
 	}
 
-	files, err := extractTrace(bundle.reader, dest, req.Force)
+	files, err := extractTrace(workspace, bundle.reader, dest, req.Force)
 	if err != nil {
 		return err
 	}
@@ -224,15 +224,26 @@ func runSessions(ctx context.Context, bundle *traceBundle, req Request, workspac
 	}
 	res.Warnings = append(res.Warnings, warnings...)
 
+	// Preflight: stream every payload that would be imported to enforce the
+	// per-file and aggregate size caps on actual decompressed bytes before
+	// promising (dry-run) or issuing any import request.
+	var payloads []string
+	for _, plan := range plans {
+		if plan.skip {
+			continue
+		}
+		payloads = append(payloads, plan.nativeJSON)
+	}
+	if err := bundle.requirePayloadBudget(payloads); err != nil {
+		return err
+	}
+
 	if req.DryRun {
 		for _, plan := range plans {
 			if plan.skip {
 				res.Skipped = append(res.Skipped, plan.sourceID)
 				res.Actions = append(res.Actions, fmt.Sprintf("skip session %s (already mapped to %s)", plan.sourceID, plan.mappedTo))
 				continue
-			}
-			if err := bundle.requireEntry(plan.nativeJSON); err != nil {
-				return err
 			}
 			res.Actions = append(res.Actions, fmt.Sprintf("import session %s -> thread %s", plan.sourceID, plan.thread))
 		}

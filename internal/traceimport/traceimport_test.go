@@ -210,6 +210,71 @@ func TestImportRejectsSymlinkEntries(t *testing.T) {
 	}
 }
 
+// TestImportRejectsSymlinkedPathComponents covers a pre-existing symlink
+// beneath the workspace: extraction and index updates must refuse to follow
+// it and must write nothing outside the workspace.
+func TestImportRejectsSymlinkedPathComponents(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]func(t *testing.T) (ws, outside string){
+		"downloads symlink": func(t *testing.T) (string, string) {
+			t.Helper()
+			ws := t.TempDir()
+			outside := t.TempDir()
+			if err := os.Symlink(outside, filepath.Join(ws, "downloads")); err != nil {
+				t.Fatalf("symlink downloads: %v", err)
+			}
+			return ws, outside
+		},
+		"downloads/memory-traces symlink": func(t *testing.T) (string, string) {
+			t.Helper()
+			ws := t.TempDir()
+			outside := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(ws, "downloads"), 0o755); err != nil {
+				t.Fatalf("mkdir downloads: %v", err)
+			}
+			if err := os.Symlink(outside, filepath.Join(ws, "downloads", "memory-traces")); err != nil {
+				t.Fatalf("symlink memory-traces: %v", err)
+			}
+			return ws, outside
+		},
+		".acolyte symlink": func(t *testing.T) (string, string) {
+			t.Helper()
+			ws := t.TempDir()
+			outside := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(ws, "downloads"), 0o755); err != nil {
+				t.Fatalf("mkdir downloads: %v", err)
+			}
+			if err := os.Symlink(outside, filepath.Join(ws, ".acolyte")); err != nil {
+				t.Fatalf("symlink .acolyte: %v", err)
+			}
+			return ws, outside
+		},
+	}
+
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ws, outside := setup(t)
+			zipPath := filepath.Join(t.TempDir(), "trace.zip")
+			buildTraceZip(t, zipPath)
+
+			_, err := Import(context.Background(), Request{Agent: agentFor(ws), ZipPath: zipPath, Mode: ModeTrace})
+			if err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("Import() error = %v, want symlink rejection", err)
+			}
+			entries, readErr := os.ReadDir(outside)
+			if readErr != nil {
+				t.Fatalf("read outside dir: %v", readErr)
+			}
+			if len(entries) != 0 {
+				t.Errorf("wrote outside the workspace: %v", entries)
+			}
+		})
+	}
+}
+
 func TestImportEnforcesSizeCaps(t *testing.T) {
 	// Not parallel: this test mutates the package-level caps.
 	origFile, origTotal := maxFileBytes, maxTotalBytes
@@ -261,6 +326,66 @@ func TestImportEnforcesSizeCaps(t *testing.T) {
 		_ = ws
 		if _, err := bundle.readEntry("sessions/ses_src.json"); err == nil || !strings.Contains(err.Error(), "bytes") {
 			t.Fatalf("readEntry() error = %v, want size error", err)
+		}
+	})
+}
+
+// TestImportEnforcesAggregateSessionPayloadCap lowers the bundle cap so the
+// first session payload fits but the two together do not. Both dry-run and
+// the real import must reject the bundle before issuing any import request.
+func TestImportEnforcesAggregateSessionPayloadCap(t *testing.T) {
+	// Not parallel: this test mutates the package-level caps.
+	origFile, origTotal := maxFileBytes, maxTotalBytes
+	t.Cleanup(func() { maxFileBytes, maxTotalBytes = origFile, origTotal })
+
+	// Each payload is ~1.1 KB: the first fits under the 1.5 KB total, the
+	// second pushes the sum over it.
+	maxFileBytes, maxTotalBytes = 1<<20, 1500
+
+	ws := tempWorkspace(t)
+	st := openStore(t, ws)
+	zipPath := filepath.Join(t.TempDir(), "trace.zip")
+	pad := strings.Repeat("x", 1100)
+	buildZip(t, zipPath, map[string]string{
+		"manifest.json": `{
+  "format": "acolyte-memory-trace/v1",
+  "agent": {"name": "valet", "workspace": "/source/ws"},
+  "exported_at": "2026-11-10T12:00:00Z",
+  "sessions": [
+    {"id": "ses_a", "title": "a", "messages": 1, "markdown": "sessions/ses_a.md", "native_json": "sessions/ses_a.json"},
+    {"id": "ses_b", "title": "b", "messages": 1, "markdown": "sessions/ses_b.md", "native_json": "sessions/ses_b.json"}
+  ],
+  "counts": {"sessions": 2, "messages": 2}
+}`,
+		"sessions/ses_a.json": `{"pad":"` + pad + `"}`,
+		"sessions/ses_b.json": `{"pad":"` + pad + `"}`,
+	}, nil)
+
+	t.Run("dry-run", func(t *testing.T) {
+		fake := &fakeImportClient{}
+		_, err := Import(context.Background(), Request{
+			Agent: agentFor(ws), Store: st, OpenCode: fake, ZipPath: zipPath,
+			Mode: ModeSessions, DryRun: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "uncompressed") {
+			t.Fatalf("Import(dry-run) error = %v, want aggregate size error", err)
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("issued %d import calls in dry-run, want 0", len(fake.calls))
+		}
+	})
+
+	t.Run("real import", func(t *testing.T) {
+		fake := &fakeImportClient{}
+		_, err := Import(context.Background(), Request{
+			Agent: agentFor(ws), Store: st, OpenCode: fake, ZipPath: zipPath,
+			Mode: ModeSessions,
+		})
+		if err == nil || !strings.Contains(err.Error(), "uncompressed") {
+			t.Fatalf("Import() error = %v, want aggregate size error", err)
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("issued %d import calls, want 0", len(fake.calls))
 		}
 	})
 }

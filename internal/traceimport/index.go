@@ -39,6 +39,9 @@ func indexPath(workspace string) string {
 // the file changed.
 func updateIndex(workspace string, row indexRow) (bool, error) {
 	path := indexPath(workspace)
+	if err := rejectSymlinkAncestors(workspace, filepath.Dir(path)); err != nil {
+		return false, err
+	}
 	existing, err := readIndexFile(path)
 	if err != nil {
 		return false, err
@@ -53,7 +56,7 @@ func updateIndex(workspace string, row indexRow) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return false, fmt.Errorf("traceimport: create .acolyte directory: %w", err)
 	}
-	if err := writeFileAtomic(path, []byte(merged), 0o644); err != nil {
+	if err := writeFileAtomic(workspace, path, []byte(merged), 0o644); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -177,9 +180,13 @@ func escapeCell(value string) string {
 }
 
 // writeFileAtomic writes data to path via a temporary file in the same
-// directory followed by a rename.
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+// directory followed by a rename. workspace anchors the ancestor check so the
+// temp file can never be created through a symlinked parent.
+func writeFileAtomic(workspace, path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
+	if err := rejectSymlinkAncestors(workspace, dir); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("traceimport: create temporary file: %w", err)

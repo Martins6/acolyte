@@ -77,19 +77,44 @@ func (b *traceBundle) entry(name string) (string, error) {
 	return safeEntryName(name)
 }
 
-// requireEntry validates that a manifest-provided entry exists in the zip
-// without reading it; used by dry-run to catch broken manifests early.
-func (b *traceBundle) requireEntry(name string) error {
-	clean, err := safeEntryName(name)
-	if err != nil {
-		return err
-	}
-	f := b.locate(clean)
-	if f == nil {
-		return fmt.Errorf("traceimport: zip entry %q not found", name)
-	}
-	if f.Mode()&fs.ModeSymlink != 0 {
-		return fmt.Errorf("traceimport: refusing symlink zip entry %q", clean)
+// requirePayloadBudget streams every named entry to count its real
+// decompressed size, enforcing the per-file cap on actual bytes (headers can
+// lie) and the aggregate cap across the set. It runs before any import
+// request — dry-run included — so an over-limit bundle is rejected without
+// promising or issuing imports.
+func (b *traceBundle) requirePayloadBudget(names []string) error {
+	var total int64
+	for _, name := range names {
+		clean, err := safeEntryName(name)
+		if err != nil {
+			return err
+		}
+		f := b.locate(clean)
+		if f == nil {
+			return fmt.Errorf("traceimport: zip entry %q not found", name)
+		}
+		if f.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("traceimport: refusing symlink zip entry %q", clean)
+		}
+		if declared := int64(f.UncompressedSize64); declared > maxFileBytes {
+			return fmt.Errorf("traceimport: zip entry %q declares %d bytes (limit %d)", clean, declared, maxFileBytes)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return fmt.Errorf("traceimport: open zip entry %q: %w", clean, err)
+		}
+		n, copyErr := io.Copy(io.Discard, io.LimitReader(rc, maxFileBytes+1))
+		rc.Close()
+		if copyErr != nil {
+			return fmt.Errorf("traceimport: measure zip entry %q: %w", clean, copyErr)
+		}
+		if n > maxFileBytes {
+			return fmt.Errorf("traceimport: zip entry %q exceeds %d bytes", clean, maxFileBytes)
+		}
+		total += n
+		if total > maxTotalBytes {
+			return fmt.Errorf("traceimport: session payloads exceed %d bytes uncompressed (limit %d)", total, maxTotalBytes)
+		}
 	}
 	return nil
 }
@@ -225,14 +250,54 @@ func checkDestination(dest string, force bool) error {
 	return nil
 }
 
+// rejectSymlinkAncestors walks each path component from root down to target
+// with Lstat and rejects symlinked or non-directory components. Missing
+// components are allowed: they are created later. It also rejects a target
+// that escapes root. This is what keeps MkdirAll/MkdirTemp from following a
+// pre-existing symlink (e.g. a planted downloads/ link) out of the workspace.
+func rejectSymlinkAncestors(root, target string) error {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return fmt.Errorf("traceimport: resolve %s relative to %s: %w", target, root, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("traceimport: %s is outside %s", target, root)
+	}
+	current := root
+	for _, segment := range strings.Split(rel, string(filepath.Separator)) {
+		if segment == "" || segment == "." {
+			continue
+		}
+		current = filepath.Join(current, segment)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil // remaining components do not exist yet; they will be created
+		}
+		if err != nil {
+			return fmt.Errorf("traceimport: stat %s: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("traceimport: refusing symlinked path component %s", current)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("traceimport: %s is not a directory", current)
+		}
+	}
+	return nil
+}
+
 // extractTrace safely extracts reader into dest. Files are written into a
 // temporary directory next to dest and atomically renamed into place, so a
-// failed extraction never leaves a partial trace folder behind.
-func extractTrace(reader *zip.Reader, dest string, force bool) (int, error) {
+// failed extraction never leaves a partial trace folder behind. workspace is
+// the root the destination must stay beneath.
+func extractTrace(workspace string, reader *zip.Reader, dest string, force bool) (int, error) {
+	parent := filepath.Dir(dest)
+	if err := rejectSymlinkAncestors(workspace, parent); err != nil {
+		return 0, err
+	}
 	if err := checkDestination(dest, force); err != nil {
 		return 0, err
 	}
-	parent := filepath.Dir(dest)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return 0, fmt.Errorf("traceimport: create trace directory: %w", err)
 	}
@@ -282,7 +347,7 @@ func extractTrace(reader *zip.Reader, dest string, force bool) (int, error) {
 		files++
 	}
 
-	if err := publishTrace(tmp, dest, force); err != nil {
+	if err := publishTrace(workspace, tmp, dest, force); err != nil {
 		return 0, err
 	}
 	published = true
@@ -320,12 +385,18 @@ func writeEntry(f *zip.File, target string) (int64, error) {
 // publishTrace atomically moves the extracted tree at tmp to dest. An existing
 // destination (only reachable with force) is moved aside first and removed
 // after the swap succeeds, so a failure restores the previous folder.
-func publishTrace(tmp, dest string, force bool) error {
+// workspace anchors the ancestor check so neither the backup temp name nor
+// the final rename can operate through a symlinked parent.
+func publishTrace(workspace, tmp, dest string, force bool) error {
+	parent := filepath.Dir(dest)
+	if err := rejectSymlinkAncestors(workspace, parent); err != nil {
+		return err
+	}
 	if _, err := os.Lstat(dest); err == nil {
 		if !force {
 			return fmt.Errorf("traceimport: %s already exists (use --force to replace)", dest)
 		}
-		backup, err := reserveTempName(filepath.Dir(dest), ".old-")
+		backup, err := reserveTempName(parent, ".old-")
 		if err != nil {
 			return err
 		}

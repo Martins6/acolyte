@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -329,6 +330,72 @@ func TestSanitizeJSONCIsIdempotent(t *testing.T) {
 	if string(once) != string(twice) {
 		t.Errorf("jsonc sanitize not idempotent:\nonce: %s\ntwice: %s", once, twice)
 	}
+}
+
+// TestSanitizeJSONCRedactsBlockComments guards the block-comment gap: a
+// secret inside /* ... */ must be redacted while the comment delimiters
+// survive and the document stays parseable JSONC.
+func TestSanitizeJSONCRedactsBlockComments(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		in       string
+		contains []string
+		excludes []string
+	}{
+		"env assignment in block comment": {
+			in:       `{"n":1, "m":2 /* API_KEY=sk-abcdef123456 */}`,
+			contains: []string{"/* API_KEY=[REDACTED] */"},
+			excludes: []string{"sk-abcdef123456"},
+		},
+		"authorization in multi-line block comment": {
+			in:       "{\n  /*\n   * authorization: Bearer secret.token.value\n   */\n  \"a\": 1\n}",
+			contains: []string{"/*", "*/", "authorization: [REDACTED]"},
+			excludes: []string{"secret.token.value"},
+		},
+		"unrelated comment untouched": {
+			in:       `{"n":1, "m":2 /* just a note */}`,
+			contains: []string{"/* just a note */"},
+		},
+	}
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			out := string(sanitizeEntry("opencode.jsonc", []byte(tt.in)))
+			for _, want := range tt.contains {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\ninput:  %s\noutput: %s", want, tt.in, out)
+				}
+			}
+			for _, banned := range tt.excludes {
+				if strings.Contains(out, banned) {
+					t.Errorf("output still contains %q:\ninput:  %s\noutput: %s", banned, tt.in, out)
+				}
+			}
+			// The comment delimiters must be intact: exactly one /* and one */
+			// in these inputs, and the JSONC must still parse once comments
+			// are stripped.
+			if strings.Count(out, "/*") != strings.Count(tt.in, "/*") ||
+				strings.Count(out, "*/") != strings.Count(tt.in, "*/") {
+				t.Errorf("comment delimiters changed:\ninput:  %s\noutput: %s", tt.in, out)
+			}
+			stripped := stripJSONCComments(out)
+			if err := json.Unmarshal([]byte(stripped), new(any)); err != nil {
+				t.Errorf("output is not valid JSONC (after stripping comments): %v\n%s", err, stripped)
+			}
+		})
+	}
+}
+
+// stripJSONCComments removes // and /* */ comments so a test can hand the
+// remainder to json.Unmarshal. Test inputs never contain comment-like
+// sequences inside strings.
+func stripJSONCComments(s string) string {
+	block := regexp.MustCompile(`(?s)/\*.*?\*/`)
+	s = block.ReplaceAllString(s, "")
+	line := regexp.MustCompile(`(?m)//.*$`)
+	return line.ReplaceAllString(s, "")
 }
 
 // TestSanitizeSkipsBinaryEntries ensures binary persona/skill assets are

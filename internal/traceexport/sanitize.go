@@ -168,15 +168,20 @@ func sanitizeJSONC(data []byte) ([]byte, bool) {
 			out = append(out, sanitizeTextString(comment)...)
 			i = end
 		case c == '/' && i+1 < len(data) && data[i+1] == '*':
-			// Block comment: copy verbatim — a pattern could eat the "*/"
-			// terminator and comment out the rest of the file.
+			// Block comment: redact secrets in the body while keeping the
+			// /* and */ delimiters. The body cannot contain the terminator
+			// (we stop at the first "*/"), and the patterns only ever insert
+			// "[REDACTED]" or substrings of the body, so no replacement can
+			// form a "*/" and end the comment early.
 			rel := bytes.Index(data[i+2:], []byte("*/"))
 			if rel < 0 {
 				return nil, false // unterminated block comment
 			}
-			end := i + 2 + rel + 2
-			out = append(out, data[i:end]...)
-			i = end
+			body := data[i+2 : i+2+rel]
+			out = append(out, '/', '*')
+			out = append(out, sanitizeTextString(string(body))...)
+			out = append(out, '*', '/')
+			i += 2 + rel + 2
 		case c == '"':
 			// A string token: either an object key (followed by ':') or a
 			// value. Keys are kept verbatim; values are decoded, redacted,
