@@ -9,6 +9,11 @@ A runtime for a folder of agents, powered by OpenCode. Each agent is a self-cont
 **Both the OpenCode CLI and this binary are required to run the daemon.**
 
 - [OpenCode CLI](https://github.com/anomalyco/opencode) installed (`opencode` command available)
+- Model-provider credentials stored with OpenCode:
+
+  ```bash
+  opencode auth login
+  ```
 
 ### Quick Install (Linux/macOS)
 
@@ -62,7 +67,20 @@ This script builds the binary from local source code instead of downloading from
 2. Send `/newbot` to create a new bot
 3. Follow the instructions and get your bot token
 
-### 2. Create an Agent
+### 2. Authenticate with OpenCode
+
+Acolyte does not store model-provider credentials. It uses OpenCode's auth
+store, so connect your provider once with the OpenCode CLI:
+
+```bash
+opencode auth login
+```
+
+The managed OpenCode service, and every agent it serves, reuses those
+credentials. Prefer this over putting provider keys in Acolyte `.env` files:
+those files are for Acolyte's own secrets, such as `TELEGRAM_BOT_TOKEN`.
+
+### 3. Create an Agent
 
 ```bash
 acolyte new --name valet --workspace-folder ~/agents/valet --config '{
@@ -79,7 +97,7 @@ agent in `$ACOLYTE_HOME/registry.sqlite.db` (`~/.acolyte` by default). Use
 `acolyte status` to inspect registered agents and `acolyte delete` to remove one from
 the registry (the folder is left untouched).
 
-### 3. Configure Secrets
+### 4. Configure Secrets
 
 Acolyte loads secrets from two optional `.env` files:
 
@@ -88,6 +106,9 @@ Acolyte loads secrets from two optional `.env` files:
 
 Precedence is **process environment > workspace `.env` > global `.env`**. Both files
 are gitignored and are never created by `acolyte new`.
+
+These files are not passed to OpenCode. Model-provider credentials belong in
+OpenCode's auth store (`opencode auth login`, step 2).
 
 ```bash
 # Global (shared) secrets
@@ -101,7 +122,7 @@ TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
 EOF
 ```
 
-### 4. Start the Daemon
+### 5. Start the Daemon
 
 ```bash
 acolyte start
@@ -122,7 +143,7 @@ To keep the daemon running after a crash and start it automatically, install it
 as a service: `acolyte install-service` (see
 [Running as a Service](#running-as-a-service)).
 
-### 5. Inspect a Session
+### 6. Inspect a Session
 
 `acolyte inspect` merges the OpenCode conversation with the communication
 routing/delivery rows for one session:
@@ -144,7 +165,7 @@ Running `opencode` directly in a folder starts its own server; use
 `acolyte attach` (or `opencode attach <url> --dir <workspace> --session <id>`)
 to share Acolyte's sessions.
 
-### 6. Run Headless (No Telegram, No TUI)
+### 7. Run Headless (No Telegram, No TUI)
 
 `acolyte run` sends one real user turn through the agent's OpenCode session and
 prints the reply. It uses the same managed service as the daemon and never
@@ -162,7 +183,7 @@ that is already mapped to the agent. Use `acolyte inspect --session-id <id>` to
 read the transcript, or `acolyte attach --agent-name <agent>` to open the latest
 session in the TUI.
 
-### 7. Export a Memory Trace
+### 8. Export a Memory Trace
 
 `acolyte memory export` writes one portable zip containing every OpenCode
 session as a Markdown timeline (messages, reasoning, tool calls, and
