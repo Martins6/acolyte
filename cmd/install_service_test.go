@@ -91,6 +91,30 @@ func TestInstallServicePrintSystemWithoutRoot(t *testing.T) {
 	}
 }
 
+func TestValidateInstallScope(t *testing.T) {
+	tests := []struct {
+		name      string
+		scope     service.Scope
+		euid      int
+		printOnly bool
+		wantErr   bool
+	}{
+		{"user as user", service.ScopeUser, 501, false, false},
+		{"user as root", service.ScopeUser, 0, false, true},
+		{"user as root print", service.ScopeUser, 0, true, false},
+		{"system as root", service.ScopeSystem, 0, false, false},
+		{"system as user", service.ScopeSystem, 501, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateInstallScope(tt.scope, tt.euid, tt.printOnly)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateInstallScope() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestSystemScopeRerunCommandQuotesBinary(t *testing.T) {
 	tests := []struct {
 		binary string

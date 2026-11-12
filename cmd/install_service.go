@@ -49,6 +49,9 @@ and the generated unit instead of writing anything.`,
 		if err != nil {
 			return err
 		}
+		if err := validateInstallScope(scope, os.Geteuid(), installServicePrint); err != nil {
+			return err
+		}
 		out := cmd.OutOrStdout()
 
 		if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
@@ -114,6 +117,17 @@ func init() {
 
 func systemScopeRerunCommand(binary string) string {
 	return service.ShellJoin([]string{"sudo", binary, "install-service", "--system"})
+}
+
+// validateInstallScope rejects a real user-scope install run as root. Writing
+// the unit as root would leave a root-owned file in the user's config
+// directory and `systemctl --user` would target root's manager, not the
+// selected user's. --print is read-only, so it is allowed.
+func validateInstallScope(scope service.Scope, euid int, printOnly bool) error {
+	if scope == service.ScopeUser && euid == 0 && !printOnly {
+		return fmt.Errorf("user scope cannot be installed as root; run without sudo, or use --system")
+	}
+	return nil
 }
 
 func resolveInstallScope() (service.Scope, error) {

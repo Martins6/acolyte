@@ -95,6 +95,8 @@ func (p Plan) Manual() string {
 	fmt.Fprintf(&b, "# %s, %s scope\n", p.Platform, p.Scope)
 	if p.Scope == ScopeSystem {
 		b.WriteString("# Run the write and the commands below as root (sudo).\n")
+	} else {
+		b.WriteString("# Run the write and the commands below as the target user (not with sudo).\n")
 	}
 	for _, note := range p.Notes {
 		fmt.Fprintf(&b, "# Note: %s\n", note)
