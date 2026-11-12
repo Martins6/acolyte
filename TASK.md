@@ -331,7 +331,8 @@ instructions, each PR was merged after the two checks completed.
 | 4 — event.subscribe client | #83 | unit/telegram pass |
 | 5 — media/inbound + media/outbound | #84 | unit/telegram pass |
 | 6 — single-image outbound | #85 | unit/telegram pass; review failed with no body |
-| 7 — SPEC/docs | this PR | — |
+| 7 — SPEC/docs | #86 | unit/telegram pass; review requested changes (fixed below) |
+| Final notes + review fixes | this PR | — |
 
 ## Follow-ups and observations
 
@@ -360,3 +361,37 @@ instructions, each PR was merged after the two checks completed.
   `opencode.json` / `MAIN-PROMPTS/` layout) are gone.
 - **Spec endpoint list now follows pinned OpenCode 2.2.7**, including the experimental stats path,
   the real inbox shape, and the SSE event endpoint.
+
+## Autopilot run addendum (parallel session)
+
+A second autopilot session ran the same plan concurrently. It added the clarifications in #79 and
+the media-layout task in #84, then collided with the other session on tasks 3 and 7.
+
+| PR | Outcome |
+| -- | ------- |
+| #79 — clarify autopilot instructions | merged; unit/telegram pass; review `NEEDS_REVIEW` for the intentional "merge even if red" policy |
+| #84 — task 5 media layout | merged; unit/telegram pass |
+| #82 — task 3 duplicate | closed; superseded by #81 |
+| #87 — task 7 duplicate | closed; superseded by #86 |
+| final notes + review fixes | this PR; unit/telegram result recorded in the PR |
+
+### Review findings and follow-ups from the final pass
+
+- **#79 review:** the reviewer objects to merging when `unit`/`telegram` are red and to the
+  `--admin` fallback. This is intentional per the run instructions, but it is a real branch-safety
+  risk. If the project later enables required checks, change the policy to "stop on red" before
+  requiring approvals. All deterministic checks happened to pass in this run.
+- **#83 review (task 4):** the event observer starts asynchronously and `RunUserTurn` admits the
+  prompt without waiting for the SSE connection. A fast turn can emit events before the stream is
+  ready, so `OnEvent` may miss them. Follow-up: add a bounded stream-ready handshake (or explicitly
+  accept best-effort loss).
+- **#85 (task 6):** the `review` check failed with no review body. `unit` and `telegram` passed; the
+  code was merged under the run policy. Investigate the review workflow/model failure separately.
+- **#86 review (task 7):** two documentation findings were fixed in this final PR:
+  - SPEC §5.1 no longer claims a production event-stream consumer; the hook has no v0 call site.
+  - `docs/communication/telegram.md` now points at `acolyte config` instead of claiming runtime
+    config is unavailable.
+- **Parallel sessions duplicate work.** Tasks 3 and 7 were implemented twice. Future autopilot runs
+  should claim a task by creating its branch/PR first, or use a shared sbeads DB, before editing.
+- **Local deterministic evidence:** `go vet ./...` and `go test -race -count=1 ./...` passed on the
+  branches used for this session; every merged code PR also passed CI `unit` and `telegram`.
