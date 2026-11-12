@@ -133,7 +133,8 @@ Acolyte loads two optional `.env` files:
 
 Precedence is **process environment > `<workspace>/.env` > `$ACOLYTE_HOME/.env`**. Both files are
 gitignored and are never scaffolded by `acolyte new`; secrets belong there, never in
-`opencode.jsonc` or any tracked file. Provider credentials may also live in OpenCode's own auth store.
+`opencode.jsonc` or any tracked file. Model-provider credentials are managed by OpenCode, not
+these files: run `opencode auth login` to store them in OpenCode's auth store.
 
 ---
 
