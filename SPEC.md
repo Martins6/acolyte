@@ -539,7 +539,10 @@ CREATE TABLE agent_status (              -- optional snapshot for fast `acolyte 
 
 ## 13. Auto-start (Orchestrator always-on)
 
-The orchestrator should start at boot and stay up. Per-OS mechanism (`docs/orchestrator/autostart.md`):
+The orchestrator should start at boot and stay up. `acolyte install-service
+[--user|--system]` writes, loads, and starts the definition automatically;
+`--print` renders it without changing anything. Per-OS mechanism
+(`docs/orchestrator/autostart.md`):
 
 **macOS — `launchd`:**
 - Per-user at login: `~/Library/LaunchAgents/ai.acolyte.daemon.plist`.
@@ -551,12 +554,12 @@ The orchestrator should start at boot and stay up. Per-OS mechanism (`docs/orche
 <plist version="1.0"><dict>
   <key>Label</key><string>ai.acolyte.daemon</string>
   <key>ProgramArguments</key>
-  <array><string>/Users/YOU/.local/bin/acolyte</string><string>start</string></array>
+  <array><string>/Users/YOU/.local/bin/acolyte</string><string>start</string><string>--log-file</string><string>/Users/YOU/.acolyte/logs/daemon.log</string></array>
   <key>WorkingDirectory</key><string>/Users/YOU/.acolyte</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/YOU/.acolyte/.logs/daemon.out.log</string>
-  <key>StandardErrorPath</key><string>/Users/YOU/.acolyte/.logs/daemon.err.log</string>
+  <key>StandardOutPath</key><string>/Users/YOU/.acolyte/logs/daemon.err.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/.acolyte/logs/daemon.err.log</string>
 </dict></plist>
 ```
 
@@ -567,20 +570,22 @@ The orchestrator should start at boot and stay up. Per-OS mechanism (`docs/orche
 ```ini
 [Unit]
 Description=Acolyte orchestrator
+StartLimitIntervalSec=0
 After=network-online.target
 Wants=network-online.target
 [Service]
+Type=simple
 ExecStart=/home/you/.local/bin/acolyte start
 WorkingDirectory=/home/you/.acolyte
 Restart=always
 RestartSec=5
 Environment=ACOLYTE_HOME=/home/you/.acolyte
-EnvironmentFile=-/home/you/.acolyte/.env
+SyslogIdentifier=acolyte
+StandardOutput=journal
+StandardError=journal
 [Install]
 WantedBy=multi-user.target        # use default.target for a --user unit
 ```
-
-> Nice-to-have: `acolyte install-service [--user|--system]` writes the right unit/plist.
 
 ---
 

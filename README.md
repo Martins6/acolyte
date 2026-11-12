@@ -118,6 +118,10 @@ The daemon serves every registered agent:
 
 Press `Ctrl+C` to stop gracefully.
 
+To keep the daemon running after a crash and start it automatically, install it
+as a service: `acolyte install-service` (see
+[Running as a Service](#running-as-a-service)).
+
 ### 5. Inspect a Session
 
 `acolyte inspect` merges the OpenCode conversation with the communication
@@ -207,6 +211,54 @@ through OpenCode's import API and maps them to
 skipped unless `--force`. Extraction rejects absolute paths, `..` traversal,
 and symlink entries, and caps sizes at 512 MiB total / 64 MiB per file.
 
+## Running as a Service
+
+`acolyte start` is a foreground process. `acolyte install-service` writes the
+native service definition, starts it, and keeps it alive:
+
+```bash
+acolyte install-service                 # current user, starts at login
+sudo acolyte install-service --system   # whole machine, starts at boot
+acolyte install-service --print         # show the unit and commands, no writes
+```
+
+The service runs the binary that invoked `install-service`. Re-run the command
+after moving or reinstalling the binary. Stop any foreground `acolyte start`
+first: Telegram allows only one long-poller per bot token.
+
+- **Linux (systemd):** user units run at login and log to journald
+  (`journalctl --user -u acolyte -f`). The installer also enables linger so a
+  user service starts at boot without a login; if that fails, run
+  `sudo loginctl enable-linger $USER`. `--system` writes
+  `/etc/systemd/system/acolyte.service`.
+- **macOS (launchd):** a user LaunchAgent starts at login; `--system` writes
+  `/Library/LaunchDaemons/ai.acolyte.daemon.plist` and starts at boot. Normal
+  logs go to `$ACOLYTE_HOME/logs/daemon.log` (rotated at 10 MiB, three
+  backups) and crash output to `daemon.err.log`.
+- **Crash recovery:** launchd uses `KeepAlive`; systemd uses `Restart=always`
+  with `RestartSec=5` and rate limiting disabled.
+
+Remove a user service with:
+
+```bash
+# macOS
+launchctl bootout gui/$(id -u)/ai.acolyte.daemon && rm ~/Library/LaunchAgents/ai.acolyte.daemon.plist
+
+# Linux
+systemctl --user disable --now acolyte.service && rm ~/.config/systemd/user/acolyte.service
+```
+
+Use `sudo launchctl bootout system/ai.acolyte.daemon` and
+`sudo rm /Library/LaunchDaemons/ai.acolyte.daemon.plist` on macOS, or
+`sudo systemctl disable --now acolyte.service` and
+`sudo rm /etc/systemd/system/acolyte.service` on Linux, for `--system`
+installs. Run `systemctl daemon-reload` (or `systemctl --user daemon-reload`)
+after removing a systemd unit.
+
+If `--system` is requested without root, the command prints the exact `sudo`
+command and the generated unit. On an unsupported platform it prints manual
+instructions for both macOS and Linux.
+
 ## Agent Workspace
 
 `acolyte new` creates the SPEC v0 layout:
@@ -234,9 +286,13 @@ used; `acolyte new` still rejects a legacy `opencode.json` when adopting a folde
 
 ## Logging
 
-The daemon logs to standard output/error; under launchd or systemd those streams
-go to the service log (`journalctl -u acolyte`, or the `StandardOutPath` /
-`StandardErrorPath` in the launchd plist).
+The daemon logs to standard output/error. Under systemd those streams go to
+journald (`journalctl --user -u acolyte -f` for a user unit, or
+`journalctl -u acolyte -f` for a system unit). Under launchd,
+`acolyte install-service` passes `--log-file $ACOLYTE_HOME/logs/daemon.log`,
+which rotates at 10 MiB and keeps three backups; crash output is written to
+`daemon.err.log` in the same directory. Pass `--log-file <path>` to
+`acolyte start` to use the same rotating file without a service manager.
 
 Per-agent audit events (cron runs, delivery failures, no-channel inbox replies)
 are stored in the `orch_logs` table in `<workspace>/.acolyte.sqlite.db`. Use
@@ -275,6 +331,7 @@ sends back to the user is currently text-only; sender-side media is deferred.
 | `acolyte inspect --session-id <id>`          | Merge OpenCode history with routing events     |
 | `acolyte attach [--agent-name <n>]`          | Attach the OpenCode TUI to the agent session   |
 | `acolyte start`                              | Start the multi-agent daemon                   |
+| `acolyte install-service [--user\|--system]` | Install the daemon as a crash-restarting service |
 | `acolyte update`                             | Check & apply updates                          |
 | `acolyte version`                            | Print binary version                           |
 
