@@ -115,9 +115,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: communication channel %q is not available in v0 (supported: telegram)", channel)
 		}
 	}
-	for i, user := range c.Communication.Telegram.AllowedUsers {
-		c.Communication.Telegram.AllowedUsers[i] = strings.TrimSpace(user)
-	}
+	c.Communication.Telegram.AllowedUsers = normalizeUsers(c.Communication.Telegram.AllowedUsers)
 
 	if c.Schedule.HeartbeatMinutes < 0 {
 		return fmt.Errorf("config: schedule.heartbeat_minutes must be >= 0")

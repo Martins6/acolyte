@@ -179,6 +179,33 @@ func TestCreatePersistsExplicitEmptyChannels(t *testing.T) {
 	}
 }
 
+func TestCreateDropsEmptyAllowedUsers(t *testing.T) {
+	_, ws := setup(t)
+	cfg := createTestConfig(t, `{
+		"communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["", "   "] } }
+	}`)
+	result, err := Create(context.Background(), CreateOptions{Name: "valet", Workspace: ws, Config: cfg})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+	defer st.Close()
+	if _, ok, err := st.CommTG().GetSetting("telegram.allowed_users"); err != nil || ok {
+		t.Errorf("allowed users setting = ok:%v err:%v, want absent", ok, err)
+	}
+	effective, err := LoadConfig(st, result.Agent)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if len(effective.Communication.Telegram.AllowedUsers) != 0 {
+		t.Errorf("effective allowed users = %v, want empty", effective.Communication.Telegram.AllowedUsers)
+	}
+}
+
 func TestCreateDreamJobArgs(t *testing.T) {
 	_, ws := setup(t)
 	cfg := createTestConfig(t, `{

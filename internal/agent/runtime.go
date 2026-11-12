@@ -732,6 +732,12 @@ func parseUserList(value string) ([]string, error) {
 	default:
 		entries = strings.Split(value, ",")
 	}
+	return normalizeUsers(entries), nil
+}
+
+// normalizeUsers trims, drops empty entries, and deduplicates a user list
+// while preserving order. Both `acolyte new` and `acolyte config set` use it.
+func normalizeUsers(entries []string) []string {
 	seen := map[string]bool{}
 	users := []string{}
 	for _, entry := range entries {
@@ -742,7 +748,7 @@ func parseUserList(value string) ([]string, error) {
 		seen[entry] = true
 		users = append(users, entry)
 	}
-	return users, nil
+	return users
 }
 
 func readMemorySetting(orchStore *orch.Store, key string) (*MemoryConfig, error) {
