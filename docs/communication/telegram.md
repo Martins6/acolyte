@@ -22,7 +22,6 @@ workspace.
   the Telegram `file_id` was seen before. If a download fails, the pending row keeps the raw update
   and media is retried by replay. The Envelope carries the absolute path and a prompt of the form
   `File located at: <path>\n\nUser message: <caption>`.
-- Hands each Envelope to the Orchestrator's inbound sink.
 
 ## Outbound
 
@@ -36,7 +35,13 @@ workspace.
   UTF-16 units).
 - Chunk progress is persisted, so a retry resumes after the last delivered chunk.
 - Transient failures back off (5s, 15s, 1m, … up to 15m) for at most 5 attempts, then the row is
-  marked `failed`. Successful/failed rows clear their text; only routing/delivery metadata remains.
+  marked `failed`. Successful rows clear their text/media path; only routing/delivery metadata
+  remains.
+- **Photo outbound (v0):** a row with `media_path` sends one photo with `sendPhoto`; `text` is the
+  optional caption. The CLI validates a regular, non-symlink JPEG/PNG/WebP inside the workspace,
+  ≤10 MiB, ≤1024 caption characters, and canonicalizes it under `media/outbound/images/`.
+  `acolyte notify-user --media <path>` and the generated OpenCode `send_image` tool both use this
+  path. A deleted/unsupported file fails permanently; transient Telegram errors retry.
 - Bot tokens are redacted from logged/persisted errors.
 
 ## State (`.acolyte.sqlite.db`, prefix `comm_tg_`)
@@ -45,15 +50,15 @@ workspace.
 | ----- | ----- |
 | `comm_tg_chats` | chat_id, username, allowed, first/last seen |
 | `comm_tg_inbox` | unique tg_update_id, chat_id, envelope_id, media_path, pending replay payload/reply, processed_at, attempts, OpenCode session/message IDs |
-| `comm_tg_outbox` | envelope_id, chat_id, text/caption (pending only), media_path, reply_to, chunk progress, attempts, delivery, tg_message_id, source message |
+| `comm_tg_outbox` | envelope_id, chat_id, text (body or caption), media_path (v0 photo), reply_to, chunk progress, attempts, delivery, tg_message_id, source message |
 | `comm_tg_media` | tg_file_id, file_path, type, chat_id, saved_at |
 | `comm_tg_settings` | non-secret channel settings (`channels`, `telegram.allowed_users`) |
 
 ## Testing
 
 `internal/comm/telegram/telegramtest` is an in-process Telegram Bot API
-emulator. It serves `getMe`, `getUpdates`, `sendMessage`, `getFile` and file
-downloads over a real HTTP listener and exposes helpers to queue updates,
+emulator. It serves `getMe`, `getUpdates`, `sendMessage`, `sendPhoto`, `getFile`
+and file downloads over a real HTTP listener and exposes helpers to queue updates,
 inspect sent messages, register files and inject API failures. Tests point the
 adapter at it with `telegram.Options.ServerURL`; the emulator is never used by
 production code.
@@ -82,5 +87,11 @@ The bot **token** is a secret read from the layered `.env` files:
 `<workspace>/.env` overrides `$ACOLYTE_HOME/.env`; the process environment overrides both. Neither
 file is ever committed or scaffolded. See `SPEC.md` §4.
 
-Runtime config mutation (changing allowed users/channels without re-running `acolyte new`) is not
-exposed yet; see `FUTURE-IDEAS.md`.
+Runtime config mutation is available without re-running `acolyte new`:
+
+```bash
+acolyte config valet set communication.channels '["telegram"]'
+acolyte config valet set communication.telegram.allowed_users '@alice,@bob'
+```
+
+See `docs/orchestrator/config.md` for validation, `--dry-run`, and the full key list.

@@ -16,8 +16,9 @@
 
 - **`$SHELL`** — shell jobs run the script with the user's `$SHELL` (e.g. zsh), never hardcoded `sh`.
 - **Target** — `--agent-name <name>` **xor** `--workspace-folder <path>` (if neither, use
-  `$ACOLYTE_WORKSPACE_PATH`, then infer from a valid pwd); optional `--session-id <id>` (default =
-  latest session).
+  `$ACOLYTE_WORKSPACE_PATH`, then infer from a valid pwd).
+- **Session** — `prompt` and `shell` jobs accept an optional `--session-id <id>` and default to the
+  latest session. `routine` jobs run in their own `cron:<job ID>` session and reject `--session-id`.
 - **Actions are mutually exclusive**: `--prompt` | `--shell` | `--routine`.
 
 ## Routines (`routine` kind)

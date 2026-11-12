@@ -17,11 +17,11 @@ native instruction/skill assembly — no custom plumbing.
 ```jsonc
 // opencode.jsonc (seeded at acolyte new)
 {
-  "instructions": [".acolyte/*.md"],
-  "skills": ["./.agents/skills"]
+  "instructions": [".acolyte/*.md"]
 }
 ```
-plus an `AGENTS.md` hub at the workspace root.
+plus an `AGENTS.md` hub at the workspace root. OpenCode auto-discovers the project
+`.agents/skills/`; no `skills` entry is seeded.
 
 ## Notes
 This is the baseline loader. Other planned modes (`compact`, `rolling`, `role-sliced`) change *what*

@@ -147,7 +147,8 @@ acolyte cron --title "backup" --datetime "0 0 * * *" \
 - Test scripts manually before scheduling.
 - Job output and errors are visible in `orch_logs` and through
   `acolyte inspect --session-id <id>`.
-- Runtime capability edits are not exposed yet; `acolyte new` preserves existing jobs/settings.
+- Runtime capability edits are available through `acolyte config <agent> get|set|edit`; `acolyte new`
+  preserves existing jobs/settings on adoption.
 
 ## Skill Usage
 

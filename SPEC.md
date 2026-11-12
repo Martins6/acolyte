@@ -70,7 +70,10 @@ The folder *is* the contract. It is an **OpenCode project** (left) + an **Acolyt
 │   └── <skill-id>/SKILL.md           #   one dir per skill (+ scripts/references)
 │
 ├── .opencode/agents/                 # OPENCODE agent definitions (optional overrides)
-└── downloads/ …                      # media, transcripts, artifacts
+├── media/                            # ACOLYTE media tree
+│   ├── inbound/<type>/               #   files received from channels
+│   └── outbound/images/              #   files the agent sends back (v0: one image)
+└── downloads/ …                      # legacy media + memory-trace artifacts
 ```
 
 **Required for validity** (checked by `acolyte new`, §10): `AGENTS.md`, `opencode.jsonc`,
@@ -133,7 +136,7 @@ No engine interface/adapter. Acolyte builds directly on OpenCode V2 primitives
 | **Skills**      | `.agents/skills/` (project source); dir with `SKILL.md` (frontmatter `name`, `description`, `metadata.opencode/autoinvoke`) or flat `.md`. ID = path-derived. Loaded on demand via the `skill` tool. Extra sources via `skills: []`. | Learned skills in `.agents/skills/` (memory-access). |
 | **Instructions**| `AGENTS.md` (global + workspace-up) plus `instructions: [files, globs, URLs]`. Combined. Live-edited. | Persona (`.acolyte/*.md`) surfaced here (memory-load). |
 | **Sessions**    | Client–server service owns sessions; driven via API / `@opencode/client` / SDK / `opencode run`. **Sessions keep the full conversation + tool activity.** | Orchestrator maps threads → OpenCode session IDs (§9). |
-| **Tools**       | Built-in + `skill` + `subagent` + MCP + plugin tools.                               | Acolyte adds CLI tools (`notify-user`, `inbox`, `cron`, `inspect`, `attach`). |
+| **Tools**       | Built-in + `skill` + `subagent` + MCP + plugin + custom `.opencode/tools/` tools.    | Acolyte adds CLI tools (`notify-user`, `inbox`, `cron`, `inspect`, `attach`) and a generated `send_image` custom tool. |
 | **Plugins**     | Hooks/transforms/tools via `plugins` + JS/Effect.                                   | Candidate host for `memory-learn` / `memory-export`. |
 
 **How a turn runs:** the Orchestrator drives one turn through the **OpenCode V2 API**, supplying an
@@ -153,33 +156,38 @@ debugging.
   mail") and `metadata` (structured source). It is delivered via `queue` (at the next idle) or `steer`
   (interrupt now). Real user messages use `session.prompt`. So external events are perceived as
   *external*, not as the user speaking.
-- **Sessions are first-class:** create / list / resume; map thread→session; `memory-learn` iterates
-  sessions (`GET /api/session`); `acolyte status` reads stats (`GET /api/session/stats`).
-- **`event.subscribe()` streams** tool activity + text deltas → stream to Telegram, feed learning,
-  live status. (CLI returns only final stdout, parsed — brittle.)
+- **Sessions are first-class:** create / list / get; map thread→session; `memory-learn` iterates
+  sessions (`GET /api/session`); `acolyte status` reads the per-agent session store.
+- **Events:** the thin client can subscribe to the OpenCode SSE stream (`GET /api/event`) and a turn
+  can pass an `OnEvent` handler through `TurnConfig`. v0 uses this only as an optional, best-effort
+  observer; Telegram live streaming, tool-activity feeds, and live status consumers are deferred
+  (`FUTURE-IDEAS.md`). Turn completion still uses `wait` + paginated message collection, so an event
+  stream failure cannot stall a turn.
 - **Long-running daemon ↔ long-running service** (matches autostart). No spawn-per-turn overhead or
   5-minute timeout.
 
 **Key endpoints:** `POST /api/session`, `GET /api/session`, `POST /api/session/{id}/synthetic`,
-`POST /api/session/{id}/inbox` (+ `inbox/{id}/steer` | `inbox/{id}/queue`),
+`GET /api/session/{id}/inbox` + `PATCH|DELETE /api/session/{id}/inbox/{inboxID}`,
 `POST /api/session/{id}/prompt` (real user turns), `PATCH /api/session/{id}` (session-scoped
-permission rules), `GET /api/session/stats`, `GET /api/agent`, `event.subscribe()`.
+permission rules), `GET /api/experimental/session/stats`, `GET /api/agent`, and `GET /api/event`
+(SSE).
 
 **Caveats:**
 - The orchestrator must discover/start the OpenCode service (`opencode serve --service`); internal
-  `opencode/server.go` already does this.
+  `opencode/service.go` already does this.
 - The V2 API is OpenCode's "only intentional breaking change" — pin it and vendor the release's
   `/openapi.json` under `internal/opencode/contract/`, with a contract test that guards every path,
   method, schema, and schema property the thin client uses (`docs/opencode/v2-contract.md`). CI
   installs the same pinned OpenCode version. (Not an engine abstraction — still OpenCode-only; just
   transport hygiene.)
-- Existing `internal/opencode/client.go` uses V1-style paths (`/session/{id}/message`); retarget to
-  V2 (`/api/...`) with `synthetic` + `inbox` for external events and `prompt` for real user turns, and
-  retire the CLI `runner.go` turn path.
+- `internal/opencode/client.go` targets V2 (`/api/...`) only: `synthetic` for external events,
+  `prompt` for real user turns, and the event stream for optional observation. The CLI remains for
+  the agent's own tools and human debugging, not for driving turns.
 
 ### 5.2 Spike validation — `synthetic`/`inbox` reach the model ✅ (2026-11-05)
 
-**Validated live against OpenCode v2.2.5** (throwaway `spike/`). A `synthetic` external event
+**Validated live against OpenCode v2.2.5** (the pinned contract is now v2.2.7; the request shape is
+unchanged). A `synthetic` external event
 **reaches the model and triggers an agent reaction** — it is *not* filtered from the prompt.
 
 **Evidence:** injecting a synthetic carrying a canary produced an assistant turn whose **reasoning
@@ -194,15 +202,18 @@ system event.)
 | Call | Body → Response |
 | ---- | --------------- |
 | `POST /api/session` | `{"location":{"directory":"<ws>"}}` → `{"data":{"id":"ses_…"}}` |
-| `POST /api/session/{id}/synthetic` | `{"text"*, "description", "metadata", "delivery":"steer\|queue", "resume"}` → synthetic message |
+| `POST /api/session/{id}/synthetic` | `{"text"*, "description", "metadata", "delivery":"steer\|queue"}` → synthetic message |
 | `POST /api/session/{id}/prompt` | `{"text"*}` → admitted **user** message (**async**) |
 | read reply | `GET /api/session/{id}/message` (assistant reply lands here) |
 | auth | HTTP Basic `opencode:<password>` (password in `~/.config/opencode/service.json`) |
 
 - `prompt` is **async** — it returns the admitted user message; the assistant reply is read from the
-  session messages (or streamed via `event.subscribe()`).
-- `POST /api/session/{id}/inbox` (+ `inbox/{id}/steer` \| `inbox/{id}/queue`) is the finer-grained
-  admission path; `synthetic` is the convenient one-shot that also admits + delivers.
+  session messages. A turn may optionally observe `GET /api/event` while it runs; that stream is
+  best-effort and not required for completion.
+- `synthetic` is the one-shot admission+delivery path Acolyte uses. `GET /api/session/{id}/inbox` is
+  for inspection; items are updated or removed by `PATCH`/`DELETE /api/session/{id}/inbox/{inboxID}`.
+  There is no `POST /api/session/{id}/inbox` and no `.../inbox/{id}/steer|queue` route in the pinned
+  contract. The API accepts a `resume` field on `synthetic`, but Acolyte does not use it in v0.
 
 ---
 
@@ -301,7 +312,7 @@ The **Envelope** is the single message type between Communication and Orchestrat
   "content": {
     "type": "text" | "media" | "event",
     "text": "…",
-    "media": ["<workspace>/downloads/images/foo.jpg"]   // resolved absolute paths
+    "media": ["<workspace>/media/inbound/images/foo.jpg"]   // resolved absolute paths
   },
   "meta": {},
   "created_at": "2026-11-05T12:00:00Z"
@@ -363,46 +374,128 @@ schema, and evolves independently. The DB is shared; the schemas are not coupled
 ```sql
 -- Orchestrator core (prefix: orch_)
 CREATE TABLE orch_sessions (          -- thread <-> OpenCode session mapping
-  id TEXT PRIMARY KEY, thread TEXT, opencode_session_id TEXT,
-  created_at DATETIME, last_active_at DATETIME
+  id                  TEXT PRIMARY KEY,
+  thread              TEXT NOT NULL UNIQUE,
+  opencode_session_id TEXT NOT NULL,
+  created_at          DATETIME NOT NULL,
+  last_active_at      DATETIME NOT NULL
 );
+CREATE INDEX idx_orch_sessions_last_active ON orch_sessions(last_active_at);
+
 CREATE TABLE orch_cron_jobs (         -- §10: shared cron service
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL UNIQUE,         -- human title (unique)
-  owner TEXT,                         -- who registered: user|memory-learn|heartbeat|comm|…
-  kind TEXT,                          -- prompt | shell | routine
-  spec TEXT,                          -- cron expression (the WHEN)
-  prompt TEXT, shell_path TEXT,       -- the WHAT (by kind): prompt text | shell script path
-  routine TEXT, routine_args TEXT,    --   …or routine name + JSON args
-  agent_target TEXT, session_id TEXT, -- where it runs (agent name/workspace; session)
-  timezone TEXT, enabled INTEGER DEFAULT 1,
-  last_run_at DATETIME, next_run_at DATETIME, created_at DATETIME, meta TEXT
+  id           TEXT PRIMARY KEY,
+  title        TEXT NOT NULL UNIQUE,  -- human title (unique per agent)
+  owner        TEXT NOT NULL DEFAULT '', -- user|memory-learn|heartbeat|comm|…
+  kind         TEXT NOT NULL,         -- prompt | shell | routine
+  spec         TEXT NOT NULL,         -- cron expression (the WHEN)
+  prompt       TEXT NOT NULL DEFAULT '',
+  shell_path   TEXT NOT NULL DEFAULT '',
+  routine      TEXT NOT NULL DEFAULT '',
+  routine_args TEXT NOT NULL DEFAULT '{}',
+  agent_target TEXT NOT NULL DEFAULT '',
+  session_id   TEXT NOT NULL DEFAULT '',
+  timezone     TEXT NOT NULL DEFAULT '',
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  last_run_at  DATETIME,
+  next_run_at  DATETIME,
+  created_at   DATETIME NOT NULL,
+  meta         TEXT NOT NULL DEFAULT '{}'
 );
+CREATE INDEX idx_orch_cron_jobs_next ON orch_cron_jobs(enabled, next_run_at);
+
 CREATE TABLE orch_logs (              -- append-only audit log
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  level TEXT, source TEXT, message TEXT, meta TEXT, created_at DATETIME
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  level      TEXT,
+  source     TEXT,
+  message    TEXT,
+  meta       TEXT,
+  created_at DATETIME
 );
 CREATE TABLE orch_settings (          -- baked capability metadata (non-secret)
-  key TEXT PRIMARY KEY, value TEXT NOT NULL
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 CREATE TABLE orch_cron_routes (       -- durable cron output retries
-  id TEXT PRIMARY KEY, agent_target TEXT NOT NULL, chat_id INTEGER NOT NULL,
-  text TEXT NOT NULL, opencode_session_id TEXT, source_message_id TEXT,
-  attempts INTEGER DEFAULT 0, next_attempt_at DATETIME, last_error TEXT,
-  created_at DATETIME NOT NULL, delivered_at DATETIME
+  id                  TEXT PRIMARY KEY,
+  agent_target        TEXT NOT NULL,
+  chat_id             INTEGER NOT NULL,
+  text                TEXT NOT NULL,
+  opencode_session_id TEXT NOT NULL DEFAULT '',
+  source_message_id   TEXT NOT NULL DEFAULT '',
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at     DATETIME,
+  last_error          TEXT NOT NULL DEFAULT '',
+  created_at          DATETIME NOT NULL,
+  delivered_at        DATETIME
 );
 
 -- Communication / Telegram (prefix: comm_tg_)  -- routing/delivery state, NOT conversation content
-CREATE TABLE comm_tg_settings ( key TEXT PRIMARY KEY, value TEXT NOT NULL );  -- allowed users, channel settings
-CREATE TABLE comm_tg_chats  ( chat_id INTEGER PRIMARY KEY, username TEXT, allowed INTEGER, resolved_at DATETIME );
-CREATE TABLE comm_tg_inbox  ( id TEXT PRIMARY KEY, tg_update_id INTEGER, chat_id INTEGER, envelope_id TEXT, received_at DATETIME, media_path TEXT );
-CREATE TABLE comm_tg_outbox ( id TEXT PRIMARY KEY, envelope_id TEXT, chat_id INTEGER, tg_message_id INTEGER, delivery TEXT, sent_at DATETIME );
-CREATE TABLE comm_tg_media  ( file_path TEXT PRIMARY KEY, tg_file_id TEXT, type TEXT, chat_id INTEGER, saved_at DATETIME );
+CREATE TABLE comm_tg_settings ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
+CREATE TABLE comm_tg_chats (
+  chat_id       INTEGER PRIMARY KEY,
+  username      TEXT NOT NULL DEFAULT '',
+  allowed       INTEGER NOT NULL DEFAULT 1,
+  private       INTEGER NOT NULL DEFAULT 0,
+  first_seen_at DATETIME NOT NULL,
+  last_seen_at  DATETIME NOT NULL
+);
+CREATE TABLE comm_tg_inbox (
+  id                  TEXT PRIMARY KEY,
+  tg_update_id        INTEGER NOT NULL UNIQUE,
+  chat_id             INTEGER NOT NULL,
+  envelope_id         TEXT NOT NULL UNIQUE,
+  media_path          TEXT NOT NULL DEFAULT '',
+  opencode_session_id TEXT NOT NULL DEFAULT '',
+  opencode_message_id TEXT NOT NULL DEFAULT '',
+  received_at         DATETIME NOT NULL,
+  pending_envelope    TEXT NOT NULL DEFAULT '',
+  pending_reply       TEXT NOT NULL DEFAULT '',
+  processed_at        DATETIME,
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  last_error          TEXT NOT NULL DEFAULT '',
+  claimed_until       DATETIME,
+  claim_token         TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE comm_tg_outbox (
+  id                  TEXT PRIMARY KEY,
+  envelope_id         TEXT NOT NULL UNIQUE,
+  chat_id             INTEGER NOT NULL,
+  text                TEXT NOT NULL,
+  media_path          TEXT NOT NULL DEFAULT '', -- v0 outbound image path; text is the caption
+  reply_to            INTEGER,
+  chunks_sent         INTEGER NOT NULL DEFAULT 0,
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at     DATETIME,
+  last_error          TEXT NOT NULL DEFAULT '',
+  delivery            TEXT NOT NULL DEFAULT 'pending',
+  tg_message_id       INTEGER,
+  opencode_session_id TEXT NOT NULL DEFAULT '',
+  source_message_id   TEXT NOT NULL DEFAULT '',
+  created_at          DATETIME NOT NULL,
+  sent_at             DATETIME
+);
+CREATE TABLE comm_tg_media (
+  tg_file_id TEXT PRIMARY KEY,
+  file_path  TEXT NOT NULL,
+  type       TEXT NOT NULL DEFAULT '',
+  chat_id    INTEGER NOT NULL,
+  saved_at   DATETIME NOT NULL
+);
 
 -- Memory (prefix: mem_)  -- optional; most memory lives in files + OpenCode
-CREATE TABLE mem_dreams ( id TEXT PRIMARY KEY, ran_at DATETIME, sessions_scanned INTEGER,
-  skills_created INTEGER, dry_run INTEGER DEFAULT 0, note TEXT );
+CREATE TABLE mem_dreams (
+  id               TEXT PRIMARY KEY,
+  ran_at           DATETIME NOT NULL,
+  sessions_scanned INTEGER NOT NULL,
+  skills_created   INTEGER NOT NULL DEFAULT 0,
+  dry_run          INTEGER NOT NULL DEFAULT 0,
+  note             TEXT NOT NULL DEFAULT ''
+);
 ```
+
+`comm_tg_outbox.opencode_session_id` may be populated by `notify-user`/`send_image` for attribution;
+it never injects a message into that session. The `text` column is the message body for text
+deliveries and the caption for media deliveries.
 
 **Table prefixes = module boundaries.** A module's schema doc lives in `docs/<module>/`. New module =
 new prefix + its own tables. Each module records its schema version in
@@ -428,8 +521,10 @@ Every scheduled thing is one row in `orch_cron_jobs`, on two orthogonal axes:
 
 - **`$SHELL`** — shell jobs run the script with the user's `$SHELL` (e.g. zsh), never hardcoded `sh`.
 - **Target** — a job binds to an agent via `--agent-name` **xor** `--workspace-folder` (if neither,
-  use `$ACOLYTE_WORKSPACE_PATH`, then infer from a valid pwd) and optionally a `--session-id`
-  (default: latest session).
+  use `$ACOLYTE_WORKSPACE_PATH`, then infer from a valid pwd).
+- **Session** — `prompt` and `shell` jobs accept an optional `--session-id` and default to the latest
+  session. `routine` jobs always run in their own `cron:<job ID>` session and reject `--session-id`;
+  this keeps heartbeat/dream isolated from the user's conversation.
 - **Actions are mutually exclusive**: `--prompt` | `--shell` | `--routine`.
 
 ### 10.2 Routines (`routine` kind)
@@ -456,6 +551,10 @@ Two ways to move a message (both target an agent/session like the CLI below):
   (= v0 `mail`.) This generalizes the old `acolyte heartbeat "{text}"` — any cron/agent can use it.
 - **`acolyte notify-user {text}`** — post a notification to the **user only** (e.g. Telegram). It is
   **never** shown to the agent and **never** appears in the session. (= v0 `notify`.)
+  With `--media <path>` the text is optional and becomes the photo caption; v0 accepts one
+  JPEG/PNG/WebP image up to 10 MiB, canonicalized under `media/outbound/images/`. An optional
+  `--session-id` records attribution in `comm_tg_outbox.opencode_session_id` only; it does not inject
+  a message into that session. The same path is exposed to OpenCode as the `send_image` custom tool.
 
 ### 10.5 CLI
 Common targeting flags: `--agent-name <name>` **xor** `--workspace-folder <path>` (if neither, infer
@@ -465,7 +564,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | ------- | -------- |
 | `acolyte new --name <name> --workspace-folder <path> --config '<json>'` | **Scaffold + validate + register** a fresh agent with the capabilities chosen in `--config` (full key reference in [`docs/README.md`](docs/README.md)). On an existing folder it validates + adopts. |
 | `acolyte config <agent> get \| set <key> <value> \| edit` | **Runtime capability mutation** (§4): `get` prints the effective config as `--config`-shaped JSON; `set` updates one durable key (`description`, `engine.model/agent`, `communication.*`, `schedule.*`, `memory-*`) with validate-before-write, `--dry-run` diffs, and `--json`; `edit` opens `opencode.jsonc` in `$EDITOR` and re-validates it (invalid edits are rolled back). Reference: [`docs/orchestrator/config.md`](docs/orchestrator/config.md). |
-| `acolyte status [name \| workspace]` | All agents, or one: name, workspace, last message, job count + next job. |
+| `acolyte status [name \| workspace]` | All agents, or one: name, workspace, job count, next job, last active time, status, description. Communication settings are read with `acolyte config <agent> get`; “last active” is the latest `orch_sessions.last_active_at`, not a message preview. |
 | `acolyte delete <name \| workspace>` | Remove from the registry **only**. Folder untouched. |
 | `acolyte cron --title <t> --datetime <cron> (--prompt <text> \| --shell <path> \| --routine <name>) [--routine-args '<json>'] [--dry-run] [--agent-name\|--workspace-folder] [--session-id] [--timezone <IANA>] [--on-success inbox\|notify-user\|log] [--on-failure inbox\|notify-user\|log]` | Create a job. `--title` unique per agent; `--datetime` cron syntax; actions mutually exclusive; agent-name/workspace-folder mutually exclusive; `--dry-run` only with `--routine`. |
 | `acolyte cron list` | Markdown table of **all** jobs: `title \| datetime \| agent \| owner \| kind \| prompt \| shell \| session` (routine jobs show `routine:<name>`; prompt jobs show `prompt:<text>`). |
@@ -477,7 +576,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session).
 | `acolyte run "<text>"` | Run one real user turn headlessly, print the reply, and map the session to `cli:<agent>`; `--continue` reuses it. Default is a new session, not the latest. |
 | `acolyte memory export --out <zip> [--agent-name\|--workspace-folder] [--session-id <id>] [--no-opencode] [--sanitize] [--force]` | Write the portable memory trace bundle (§6.4): per-session Markdown timelines + persona/skills + orchestrator/communication state; `--session-id` scopes the bundle to that session's transcript, communication rows, and session mapping only (no unrelated conversations or global orchestrator/memory data); `--sanitize` redacts common secret patterns (best-effort). |
 | `acolyte memory import <zip> [--agent-name\|--workspace-folder] [--mode trace\|sessions\|all] [--dry-run] [--force] [--json]` | Import a trace bundle (§6.4): extract into `downloads/memory-traces/<id>` + update `.acolyte/MEMORY-TRACES.md`, and/or replay native sessions into `memory:<trace>:<source-session>` threads. |
-| `acolyte notify-user "<text>"` | Notify the user only — never agent, never session (§10.4). |
+| `acolyte notify-user "<text>" [--media <path>] [--session-id <id>]` | Notify the user only — never agent, never session (§10.4). `--media` sends one photo; `--session-id` is attribution only. |
 | `acolyte inspect --session-id <id>` | Merge OpenCode session messages with communication routing/delivery events, ordered by timestamp. |
 | `acolyte attach [--session-id <id>]` | Attach the OpenCode TUI to the managed service and agent workspace/session. |
 
@@ -529,10 +628,9 @@ CREATE TABLE agents (
   enabled     INTEGER DEFAULT 1,
   registered_at DATETIME, last_seen_at DATETIME
 );
-CREATE TABLE agent_status (              -- optional snapshot for fast `acolyte status`; v0 uses fan-out
-  workspace TEXT PRIMARY KEY,
-  last_message_at DATETIME, next_job_at DATETIME, job_count INTEGER, updated_at DATETIME
-);
+-- Planned, not created in v0: `acolyte status` fans out to the per-agent stores.
+-- CREATE TABLE agent_status (workspace TEXT PRIMARY KEY, last_message_at DATETIME,
+--   next_job_at DATETIME, job_count INTEGER, updated_at DATETIME);
 ```
 
 ---
@@ -603,11 +701,13 @@ Telegram msg
   → update store (comm_tg_outbox) + registry status
 ```
 
-**Every external event = admit a `synthetic` inbox input.** A cron fire (`simple-dreaming`, heartbeat),
-an inbound message, or a background notification is admitted to the mapped session's **inbox** as
-`type: "synthetic"` (with `description` + `metadata`) and delivered via `queue` (next idle) or `steer`
-(interrupt now). Real user messages use `session.prompt`. **Cron** jobs either run a shell command or
-admit a synthetic event; output is routed via Communication.
+**External/background events = admit a `synthetic` inbox input.** A cron fire
+(`simple-dreaming`, heartbeat), an `acolyte inbox` event, or a background notification is admitted to
+the mapped session as `type: "synthetic"` (with `description` + `metadata`) and delivered via
+`queue` (next idle) or `steer` (interrupt now). **Real user messages** use `session.prompt`; inbound
+Telegram media is saved under `media/inbound/<type>/` and referenced by the prompt. **Cron** jobs either run
+a shell command or admit a synthetic event; output is routed via Communication. Turns may observe the
+OpenCode event stream via `TurnConfig.OnEvent`, but completion still uses wait + message collection.
 
 ---
 
@@ -666,6 +766,17 @@ admit a synthetic event; output is routed via Communication.
 27. **The OpenCode V2 contract is pinned** to `2.2.7`: the release's `/openapi.json` is vendored
     under `internal/opencode/contract/`, guarded by a hash + path/schema contract test, and CI
     installs the same version (§5.1, `docs/opencode/v2-contract.md`).
+28. **Media layout = `media/inbound/<type>/` + `media/outbound/images/`.** New inbound files go to
+    `media/inbound`; the v0 outbound image goes to `media/outbound/images`. Legacy `downloads/`
+    paths remain readable; memory traces stay under `downloads/memory-traces/` (§3).
+29. **Event subscription is a client/turn capability, not a v0 consumer feature.** The client can
+    read `GET /api/event` and `TurnConfig.OnEvent` observes a turn, but Telegram streaming, live
+    status, and learning feeds are deferred; turn completion remains wait + message collection
+    (§5.1). The promise is recorded in `FUTURE-IDEAS.md`.
+30. **Routine cron jobs own their session.** `prompt`/`shell` jobs default to the latest session;
+    routine jobs use `cron:<job ID>` and reject `--session-id` (§10.1).
+31. **Outbound media is one image per message, photo-only in v0.** It is stored under
+    `media/outbound/images/` and delivered through the same durable outbox as text (§10.4).
 
 **[OPEN] forks:**
 None.

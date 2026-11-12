@@ -297,6 +297,7 @@ instructions for both macOS and Linux.
 │   └── HEARTBEAT.md          #   what to look for on a heartbeat
 ├── .agents/skills/           # learned OpenCode skills
 ├── .opencode/agents/         # optional OpenCode agent overrides
+├── .opencode/tools/          # generated OpenCode tools (`send_image`)
 ├── media/                    # inbound/ and outbound/ media
 ├── downloads/                # legacy media + memory-trace artifacts
 └── .logs/                    # daily log files
@@ -332,17 +333,22 @@ When an allowed Telegram user sends media:
    and offers it to the agent.
 4. The agent can read or otherwise act on the file via its normal tools.
 
-Photos, documents, audio, voice, and video are all downloaded. The agent can
-send one image back to the user with the `send_image` OpenCode tool or:
+Photos, documents, audio, voice, and video are all downloaded. Legacy files
+under `<workspace>/downloads/<type>/` are still readable; new writes go to
+`media/inbound/`.
+
+The agent can send one image back with the generated `send_image` OpenCode tool
+or:
 
 ```bash
 acolyte notify-user "Here is the chart" --media media/outbound/images/chart.png
+acolyte notify-user --media media/outbound/images/chart.png
 ```
 
-JPEG, PNG, and WebP are accepted up to 10 MiB; the image is copied under
-`media/outbound/images/` and delivered as a Telegram photo. Legacy files under
-`<workspace>/downloads/<type>/` are still readable; new writes go to
-`media/inbound/`.
+v0 supports one JPEG/PNG/WebP photo up to 10 MiB per message. The file is
+canonicalized under `media/outbound/images/`; the caption is optional, and
+`--session-id` records attribution without injecting a message into that
+session. Delivery uses the same durable outbox as text.
 
 ## CLI Commands
 
@@ -350,11 +356,11 @@ JPEG, PNG, and WebP are accepted up to 10 MiB; the image is copied under
 | -------------------------------------------- | ---------------------------------------------- |
 | `acolyte new --name <n> --workspace-folder <p> --config '<json>'` | Scaffold, validate, and register an agent |
 | `acolyte config <agent> get\|set\|edit`       | Read or update an agent's runtime capabilities |
-| `acolyte status [name\|workspace]`           | List agents or show one agent's jobs/activity  |
+| `acolyte status [name\|workspace]`           | List agents or show one agent's jobs/last activity |
 | `acolyte delete <name\|workspace>`           | Remove an agent from the registry (folder kept) |
 | `acolyte cron ...`                           | Manage scheduled prompt/shell/routine jobs     |
 | `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service            |
-| `acolyte notify-user "<text>" [--media <path>]` | Notify the user only; optional single photo |
+| `acolyte notify-user "<text>" [--media <path>]` | Notify the user only; one photo with optional caption |
 | `acolyte inbox "<text>"`                     | Deliver a synthetic external event to an agent |
 | `acolyte run "<text>"`                       | Run one headless agent turn (no Telegram/TUI)  |
 | `acolyte memory export --out <zip>`          | Export the full memory trace as a zip          |

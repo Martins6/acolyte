@@ -10,6 +10,12 @@
   - Reuse the Envelope (`channel`, `from/to.kind = "agent"`); only routing/discovery is new.
   - Internal CLI for agent-to-agent mail/notify.
 - **More human channels** — Discord, Slack, WhatsApp, email, etc. (new `Communication` adapters).
+- **Live Telegram streaming** — use the `GET /api/event` subscription already exposed by the client
+  to edit a placeholder as text deltas arrive, and to show tool activity. Needs message editing,
+  rate limiting, and a consumer for live status/learning.
+- **Outbound albums / multiple images** — extend the v0 one-image `send_image` / `notify-user --media`
+  path to `sendMediaGroup` and multiple files. Inbound albums (`media_group_id`) are also still
+  one-turn-per-item.
 
 ## Memory
 - **`memory-load` modes:** `compact` (distilled current-focus), `rolling` (summary of prior

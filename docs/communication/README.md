@@ -40,7 +40,7 @@ An adapter is started only when:
 - Durable outbound delivery: every reply is written to `comm_tg_outbox`; the adapter attempts it
   immediately and retries transient failures with bounded backoff.
 - It does **not** store conversation content. Inbound rows keep routing metadata and OpenCode
-  message IDs; outbound text is cleared once delivery reaches `sent` or `failed`. The OpenCode
+  message IDs; outbound text/media paths are cleared once delivery reaches `sent`. The OpenCode
   session remains the source of truth.
 
 ## Turns and delivery
@@ -48,7 +48,9 @@ An adapter is started only when:
 Inbound messages are admitted through the router as real user turns. Cron, routines, and
 `acolyte inbox` admit synthetic events. **Turns always run and persist, even when no channel can
 deliver the reply**; a delivery failure is logged and communicated through the outbox/audit log.
-`acolyte notify-user` is the exception: it is user-only and requires a registered chat.
+`acolyte notify-user` is the exception: it is user-only and requires a registered chat. With
+`--media` it sends one photo (JPEG/PNG/WebP, ≤10 MiB) and an optional caption; the OpenCode
+`send_image` tool uses the same outbox path.
 
 ## Services it uses from the Orchestrator
 

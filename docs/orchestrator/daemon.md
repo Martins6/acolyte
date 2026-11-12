@@ -53,6 +53,10 @@ OpenCode session/message IDs needed to join the two.
 
 ## Runtime config
 
-Capabilities are baked by `acolyte new`. There is currently no CLI to change an agent's channels,
-allowed users, schedule, or engine in place; `acolyte new` preserves existing settings. This is
-tracked in `FUTURE-IDEAS.md`.
+Capabilities are baked by `acolyte new` and can be changed in place with
+`acolyte config <agent> get|set|edit`: `description`, `engine.model`, `engine.agent`,
+`communication.channels`, `communication.telegram.allowed_users`, `schedule.timezone`,
+`schedule.heartbeat_minutes`, and `memory-load` / `memory-access` / `memory-learn` /
+`memory-export`. Every `set` validates before writing, supports `--dry-run`, and updates the same
+artifacts `acolyte new` baked. See [`config.md`](config.md). New modes/channels are still deferred;
+`acolyte new` preserves existing settings on adoption.
