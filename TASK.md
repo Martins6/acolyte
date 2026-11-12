@@ -332,7 +332,7 @@ instructions, each PR was merged after the two checks completed.
 | 5 — media/inbound + media/outbound | #84 | unit/telegram pass |
 | 6 — single-image outbound | #85 | unit/telegram pass; review failed with no body |
 | 7 — SPEC/docs | #86 | unit/telegram pass; review requested changes (fixed below) |
-| Final notes + review fixes | this PR | — |
+| Final notes + review fixes | #88 | unit/telegram pass |
 
 ## Follow-ups and observations
 
@@ -373,7 +373,7 @@ the media-layout task in #84, then collided with the other session on tasks 3 an
 | #84 — task 5 media layout | merged; unit/telegram pass |
 | #82 — task 3 duplicate | closed; superseded by #81 |
 | #87 — task 7 duplicate | closed; superseded by #86 |
-| final notes + review fixes | this PR; unit/telegram result recorded in the PR |
+| final notes + review fixes | #88; unit/telegram pass |
 
 ### Review findings and follow-ups from the final pass
 
