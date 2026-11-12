@@ -43,6 +43,8 @@ func TestPinnedOpenAPIContract(t *testing.T) {
 	requirePathOps(t, spec,
 		"/api/info", "get")
 	requirePathOps(t, spec,
+		"/api/event", "get")
+	requirePathOps(t, spec,
 		"/api/session", "get", "post")
 	requirePathOps(t, spec,
 		"/api/session/{sessionID}", "get", "patch")
@@ -91,6 +93,15 @@ func TestPinnedOpenAPIContract(t *testing.T) {
 	requireSchema(t, spec, "SessionMessagesResponse")
 	requireSchema(t, spec, "SessionTransfer.Data")
 	requireSchemaProperties(t, spec, "SessionTransfer.Data", "info", "messages")
+	requireSchema(t, spec, "V2EventEncoded")
+	requireSchema(t, spec, "V2Event")
+	requireSchema(t, spec, "session.idle")
+	requireSchemaProperties(t, spec, "session.idle", "id", "type", "data")
+	requireSchema(t, spec, "session.text.delta")
+	requireSchemaProperties(t, spec, "session.text.delta", "id", "type", "data")
+	requireSchema(t, spec, "session.tool.called")
+	requireSchema(t, spec, "session.tool.success")
+	requireSchema(t, spec, "session.tool.failed")
 }
 
 func requirePathOps(t *testing.T, spec openAPISpec, path string, methods ...string) {
