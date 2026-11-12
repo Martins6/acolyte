@@ -297,7 +297,8 @@ instructions for both macOS and Linux.
 │   └── HEARTBEAT.md          #   what to look for on a heartbeat
 ├── .agents/skills/           # learned OpenCode skills
 ├── .opencode/agents/         # optional OpenCode agent overrides
-├── downloads/                # media, transcripts, artifacts
+├── media/                    # inbound/ and outbound/ media
+├── downloads/                # legacy media + memory-trace artifacts
 └── .logs/                    # daily log files
 ```
 
@@ -326,13 +327,15 @@ When an allowed Telegram user sends media:
 
 1. The Telegram adapter downloads the file (reusing an existing download when the
    Telegram file ID was seen before).
-2. It saves the file under `<workspace>/downloads/<type>/`.
+2. It saves the file under `<workspace>/media/inbound/<type>/`.
 3. It builds a prompt of the form `File located at: <abs-path>\n\nUser message: <caption-or-empty>`
    and offers it to the agent.
 4. The agent can read or otherwise act on the file via its normal tools.
 
 Photos, documents, audio, voice, and video are all downloaded. Media the agent
 sends back to the user is currently text-only; sender-side media is deferred.
+Legacy files under `<workspace>/downloads/<type>/` are still readable; new
+writes go to `media/inbound/`.
 
 ## CLI Commands
 

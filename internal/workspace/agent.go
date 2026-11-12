@@ -37,10 +37,11 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 	}
 
 	dirs := []string{
-		"downloads/images",
-		"downloads/audio",
-		"downloads/documents",
-		"downloads/videos",
+		"media/inbound/images",
+		"media/inbound/audio",
+		"media/inbound/documents",
+		"media/inbound/videos",
+		"media/outbound/images",
 		".acolyte",
 		".agents/skills",
 		".opencode/agents",
@@ -84,6 +85,7 @@ var requiredGitignore = []string{
 	".acolyte.sqlite.db-wal",
 	".logs/",
 	"downloads/",
+	"media/",
 }
 
 // ensureGitignore merges the agent-state patterns into an existing .gitignore

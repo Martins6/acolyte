@@ -121,7 +121,7 @@ func (a *Adapter) buildContent(ctx context.Context, msg *models.Message) (string
 		if err != nil {
 			return "", "", "", fmt.Errorf("download %s: %w", mediaKind(msg), err)
 		}
-		path := media.GetFilePath(a.agent.Workspace, mediaType, ext)
+		path := media.GetInboundFilePath(a.agent.Workspace, mediaType, ext)
 		if err := media.SaveFile(path, data); err != nil {
 			return "", "", "", fmt.Errorf("save %s: %w", mediaKind(msg), err)
 		}
