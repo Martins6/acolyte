@@ -163,6 +163,27 @@ func TestParseConfigExplicitEmptyChannels(t *testing.T) {
 	}
 }
 
+func TestParseConfigNormalizesAllowedUsers(t *testing.T) {
+	cfg, err := ParseConfig(`{"communication":{"telegram":{"allowed_users":["", " @a ", "@a"]}}}`)
+	if err != nil {
+		t.Fatalf("ParseConfig() error: %v", err)
+	}
+	got := cfg.Communication.Telegram.AllowedUsers
+	if len(got) != 1 || got[0] != "@a" {
+		t.Errorf("allowed users = %v, want [@a]", got)
+	}
+}
+
+func TestParseConfigDropsEmptyAllowedUsers(t *testing.T) {
+	cfg, err := ParseConfig(`{"communication":{"telegram":{"allowed_users":["", "   "]}}}`)
+	if err != nil {
+		t.Fatalf("ParseConfig() error: %v", err)
+	}
+	if len(cfg.Communication.Telegram.AllowedUsers) != 0 {
+		t.Errorf("allowed users = %v, want empty", cfg.Communication.Telegram.AllowedUsers)
+	}
+}
+
 func TestParseConfigTrailingData(t *testing.T) {
 	if _, err := ParseConfig(`{}{}`); err == nil {
 		t.Fatal("ParseConfig(trailing data) error = nil, want error")
