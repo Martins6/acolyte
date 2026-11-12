@@ -45,6 +45,7 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 		".acolyte",
 		".agents/skills",
 		".opencode/agents",
+		".opencode/tools",
 		".logs",
 	}
 	for _, dir := range dirs {
@@ -61,14 +62,15 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 	}
 
 	files := map[string]string{
-		"AGENTS.md":             agentAgentsContent(opts),
-		"opencode.jsonc":        opencode,
-		".acolyte/CONFIG.md":    agentConfigContent,
-		".acolyte/SOUL.md":      agentSoulContent,
-		".acolyte/TOOLS.md":     agentToolsContent,
-		".acolyte/USER.md":      agentUserContent,
-		".acolyte/HEARTBEAT.md": agentHeartbeatContent,
-		".gitignore":            agentGitignore,
+		"AGENTS.md":                     agentAgentsContent(opts),
+		"opencode.jsonc":                opencode,
+		".acolyte/CONFIG.md":            agentConfigContent,
+		".acolyte/SOUL.md":              agentSoulContent,
+		".acolyte/TOOLS.md":             agentToolsContent,
+		".acolyte/USER.md":              agentUserContent,
+		".acolyte/HEARTBEAT.md":         agentHeartbeatContent,
+		".opencode/tools/send_image.ts": agentSendImageTool,
+		".gitignore":                    agentGitignore,
 	}
 	for name, content := range files {
 		if err := filesystem.createFileIfMissing(name, content); err != nil {

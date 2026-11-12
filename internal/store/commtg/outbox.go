@@ -17,6 +17,7 @@ type OutboxItem struct {
 	EnvelopeID        string     `json:"envelope_id"`
 	ChatID            int64      `json:"chat_id"`
 	Text              string     `json:"text"`
+	MediaPath         string     `json:"media_path,omitempty"`
 	ReplyTo           *int64     `json:"reply_to,omitempty"`
 	ChunksSent        int        `json:"chunks_sent"`
 	Attempts          int        `json:"attempts"`
@@ -30,7 +31,7 @@ type OutboxItem struct {
 	SentAt            *time.Time `json:"sent_at,omitempty"`
 }
 
-const outboxColumns = `id, envelope_id, chat_id, text, reply_to, chunks_sent,
+const outboxColumns = `id, envelope_id, chat_id, text, media_path, reply_to, chunks_sent,
 	attempts, next_attempt_at, last_error, delivery, tg_message_id,
 	opencode_session_id, source_message_id, created_at, sent_at`
 
@@ -42,8 +43,8 @@ func (s *Store) EnqueueOutbound(item OutboxItem) (OutboxItem, error) {
 	if item.ChatID == 0 {
 		return OutboxItem{}, fmt.Errorf("comm_tg: chat id is required")
 	}
-	if strings.TrimSpace(item.Text) == "" {
-		return OutboxItem{}, fmt.Errorf("comm_tg: outbound text is required")
+	if strings.TrimSpace(item.Text) == "" && strings.TrimSpace(item.MediaPath) == "" {
+		return OutboxItem{}, fmt.Errorf("comm_tg: outbound text or media is required")
 	}
 	if item.ID == "" {
 		id, err := newID("comm_out_")
@@ -63,12 +64,12 @@ func (s *Store) EnqueueOutbound(item OutboxItem) (OutboxItem, error) {
 		item.NextAttemptAt = &next
 	}
 	_, err := s.db.Exec(`INSERT INTO comm_tg_outbox
-		(id, envelope_id, chat_id, text, reply_to, chunks_sent, attempts,
+		(id, envelope_id, chat_id, text, media_path, reply_to, chunks_sent, attempts,
 		 next_attempt_at, last_error, delivery, tg_message_id,
 		 opencode_session_id, source_message_id, created_at, sent_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(envelope_id) DO NOTHING`,
-		item.ID, item.EnvelopeID, item.ChatID, item.Text, nullableInt64(item.ReplyTo),
+		item.ID, item.EnvelopeID, item.ChatID, item.Text, item.MediaPath, nullableInt64(item.ReplyTo),
 		item.ChunksSent, item.Attempts, nullableTime(item.NextAttemptAt), item.LastError,
 		item.Delivery, nullableInt64(item.TGMessageID), item.OpenCodeSessionID,
 		item.SourceMessageID, item.CreatedAt, nullableTime(item.SentAt),
@@ -216,7 +217,7 @@ func scanOutbox(rows *sql.Rows) ([]OutboxItem, error) {
 		var item OutboxItem
 		var replyTo, tgMessageID sql.NullInt64
 		var nextAttempt, sentAt sql.NullTime
-		if err := rows.Scan(&item.ID, &item.EnvelopeID, &item.ChatID, &item.Text, &replyTo,
+		if err := rows.Scan(&item.ID, &item.EnvelopeID, &item.ChatID, &item.Text, &item.MediaPath, &replyTo,
 			&item.ChunksSent, &item.Attempts, &nextAttempt, &item.LastError, &item.Delivery,
 			&tgMessageID, &item.OpenCodeSessionID, &item.SourceMessageID, &item.CreatedAt,
 			&sentAt); err != nil {

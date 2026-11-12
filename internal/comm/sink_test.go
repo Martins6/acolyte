@@ -68,6 +68,37 @@ func TestOutboxSinkNotifyUser(t *testing.T) {
 	}
 }
 
+func TestOutboxSinkNotifyUserMedia(t *testing.T) {
+	sink, pool, agent, cleanup := newSinkHarness(t)
+	defer cleanup()
+	st, release, err := pool.Acquire(agent.Workspace)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, time.Now().UTC()); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	release()
+
+	mediaPath := filepath.Join(agent.Workspace, "media", "outbound", "images", "chart.png")
+	if err := sink.NotifyUserMedia(context.Background(), agent, "chart", mediaPath, "ses_x"); err != nil {
+		t.Fatalf("NotifyUserMedia() error: %v", err)
+	}
+	st, release, err = pool.Acquire(agent.Workspace)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Fatalf("outbox = %+v, %v", outbox, err)
+	}
+	item := outbox[0]
+	if item.Text != "chart" || item.MediaPath != mediaPath || item.OpenCodeSessionID != "ses_x" {
+		t.Errorf("item = %+v", item)
+	}
+}
+
 func TestOutboxSinkInboxWithoutChat(t *testing.T) {
 	sink, pool, agent, cleanup := newSinkHarness(t)
 	defer cleanup()

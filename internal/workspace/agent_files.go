@@ -40,8 +40,63 @@ Learned skills live in ` + "`.agents/skills/`" + ` and are loaded on demand by I
 Acolyte adds CLI-level capabilities. Inspect the live wiring in ` + "`opencode.jsonc`" + `,
 scheduled work with ` + "`acolyte cron list`" + `, and agent state with ` + "`acolyte status`" + `.
 
+To send one image to the user, call the ` + "`send_image`" + ` tool with a workspace-relative path and
+an optional caption. Only jpg, jpeg, png, and webp files are accepted; the file is copied under
+` + "`media/outbound/images/`" + `.
+
 Add a new learned skill as ` + "`.agents/skills/<skill-id>/SKILL.md`" + ` with frontmatter
 ` + "`name`" + ` and ` + "`description`" + `.
+`
+
+const agentSendImageTool = `import { tool } from "@opencode-ai/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import path from "node:path"
+
+const execFileAsync = promisify(execFile)
+
+export default tool({
+  description:
+    "Send exactly one image to the user on Telegram. The image is copied into media/outbound/images and delivered as a photo.",
+  args: {
+    path: tool.schema
+      .string()
+      .describe("Workspace-relative or absolute path to a jpg, jpeg, png, or webp image"),
+    caption: tool.schema
+      .string()
+      .optional()
+      .describe("Optional caption for the photo"),
+  },
+  async execute({ path: imagePath, caption }, context) {
+    const workspace = context.directory || process.env.ACOLYTE_WORKSPACE_PATH || process.cwd()
+    const absolutePath = path.isAbsolute(imagePath)
+      ? imagePath
+      : path.resolve(workspace, imagePath)
+    const binary = process.env.ACOLYTE_BIN || "acolyte"
+    const args = ["notify-user"]
+    if (caption && caption.trim() !== "") {
+      args.push(caption)
+    }
+    args.push("--workspace-folder", workspace)
+    if (context.sessionID) {
+      args.push("--session-id", context.sessionID)
+    }
+    args.push("--media", absolutePath)
+    try {
+      const { stdout } = await execFileAsync(binary, args)
+      return {
+        content: (stdout || "Photo queued.").trim(),
+        metadata: { path: absolutePath, sessionID: context.sessionID },
+      }
+    } catch (error) {
+      const detail =
+        error && typeof error === "object" && "stderr" in error
+          ? String(error.stderr || "").trim()
+          : ""
+      throw new Error(detail || "acolyte send_image failed")
+    }
+  },
+})
 `
 
 const agentUserContent = `# User Information

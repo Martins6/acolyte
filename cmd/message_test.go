@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -124,6 +126,45 @@ func TestNotifyUserQueuesOutbox(t *testing.T) {
 	outbox, err := st.CommTG().ListOutbox(10)
 	if err != nil || len(outbox) != 1 || outbox[0].Text != "hello" {
 		t.Fatalf("outbox = %+v, %v", outbox, err)
+	}
+}
+
+func TestNotifyUserQueuesPhoto(t *testing.T) {
+	ws := setupCronCLI(t)
+	seedChat(t, ws)
+	source := filepath.Join(ws, "chart.png")
+	if err := os.WriteFile(source, []byte("image-bytes"), 0644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	var out bytes.Buffer
+	if err := runNotifyUserWithMedia(context.Background(), &out, "chart", "valet", "", source, "ses_x"); err != nil {
+		t.Fatalf("runNotifyUserWithMedia() error: %v", err)
+	}
+	if !strings.Contains(out.String(), `Photo queued for agent "valet"`) {
+		t.Errorf("output = %q", out.String())
+	}
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Fatalf("outbox = %+v, %v", outbox, err)
+	}
+	item := outbox[0]
+	if item.Text != "chart" || item.MediaPath == "" || item.OpenCodeSessionID != "ses_x" {
+		t.Errorf("item = %+v", item)
+	}
+	if !strings.Contains(item.MediaPath, filepath.Join("media", "outbound", "images")) {
+		t.Errorf("media path = %q, want outbound images", item.MediaPath)
+	}
+}
+
+func TestNotifyUserRequiresTextOrMedia(t *testing.T) {
+	setupCronCLI(t)
+	if err := runNotifyUserWithMedia(context.Background(), &bytes.Buffer{}, "", "valet", "", "", ""); err == nil {
+		t.Fatal("notify-user(empty) error = nil, want error")
 	}
 }
 

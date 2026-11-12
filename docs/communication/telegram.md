@@ -29,6 +29,9 @@ workspace.
 - `Send(Envelope)` resolves the chat from the Envelope thread/`to` and enqueues a row in
   `comm_tg_outbox`.
 - The adapter attempts delivery immediately and again from a 5s retry loop.
+- Outbound media is one image per message in v0: `notify-user --media <path>` validates and copies
+  the file under `media/outbound/images/`, then sends it with `sendPhoto` and an optional caption.
+  JPEG, PNG, and WebP are accepted up to 10 MiB; captions are capped at 1024 characters.
 - Long text is split by UTF-16 units while preserving rune boundaries (Telegram's limit is 4096
   UTF-16 units).
 - Chunk progress is persisted, so a retry resumes after the last delivered chunk.
@@ -42,7 +45,7 @@ workspace.
 | ----- | ----- |
 | `comm_tg_chats` | chat_id, username, allowed, first/last seen |
 | `comm_tg_inbox` | unique tg_update_id, chat_id, envelope_id, media_path, pending replay payload/reply, processed_at, attempts, OpenCode session/message IDs |
-| `comm_tg_outbox` | envelope_id, chat_id, text (pending only), reply_to, chunk progress, attempts, delivery, tg_message_id, source message |
+| `comm_tg_outbox` | envelope_id, chat_id, text/caption (pending only), media_path, reply_to, chunk progress, attempts, delivery, tg_message_id, source message |
 | `comm_tg_media` | tg_file_id, file_path, type, chat_id, saved_at |
 | `comm_tg_settings` | non-secret channel settings (`channels`, `telegram.allowed_users`) |
 
