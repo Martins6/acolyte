@@ -91,6 +91,22 @@ func TestInstallServicePrintSystemWithoutRoot(t *testing.T) {
 	}
 }
 
+func TestSystemScopeRerunCommandQuotesBinary(t *testing.T) {
+	tests := []struct {
+		binary string
+		want   string
+	}{
+		{"/usr/local/bin/acolyte", "sudo /usr/local/bin/acolyte install-service --system"},
+		{"/tmp/my acolyte", "sudo '/tmp/my acolyte' install-service --system"},
+		{"/tmp/a;b", "sudo '/tmp/a;b' install-service --system"},
+	}
+	for _, tt := range tests {
+		if got := systemScopeRerunCommand(tt.binary); got != tt.want {
+			t.Fatalf("systemScopeRerunCommand(%q) = %q, want %q", tt.binary, got, tt.want)
+		}
+	}
+}
+
 func TestIsStrictSubdir(t *testing.T) {
 	tests := []struct {
 		name string

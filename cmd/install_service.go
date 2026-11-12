@@ -73,7 +73,7 @@ and the generated unit instead of writing anything.`,
 		}
 
 		if plan.Scope == service.ScopeSystem && os.Geteuid() != 0 {
-			fmt.Fprintf(out, "System scope needs root. Re-run:\n  sudo %s install-service --system\n\n", opts.Binary)
+			fmt.Fprintf(out, "System scope needs root. Re-run:\n  %s\n\n", systemScopeRerunCommand(opts.Binary))
 			if installServicePrint {
 				fmt.Fprint(out, plan.Manual())
 				return nil
@@ -110,6 +110,10 @@ func init() {
 	installServiceCmd.Flags().BoolVar(&installServiceSystem, "system", false, "Install system-wide (starts at boot; requires root)")
 	installServiceCmd.Flags().BoolVar(&installServicePrint, "print", false, "Print the unit and commands without installing")
 	rootCmd.AddCommand(installServiceCmd)
+}
+
+func systemScopeRerunCommand(binary string) string {
+	return service.ShellJoin([]string{"sudo", binary, "install-service", "--system"})
 }
 
 func resolveInstallScope() (service.Scope, error) {
