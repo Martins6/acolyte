@@ -195,15 +195,21 @@ func runCronCreate(w io.Writer, opts cronCreateOptions) error {
 	}
 	defer st.Close()
 
+	isRoutine := strings.TrimSpace(opts.Routine) != ""
 	sessionID := strings.TrimSpace(opts.SessionID)
+	if isRoutine && sessionID != "" {
+		return fmt.Errorf("--session-id is not supported with --routine; routines run in their own cron session")
+	}
 	if sessionID != "" {
 		if err := verifySessionMapping(st, sessionID); err != nil {
 			return err
 		}
-	} else if session, ok, err := st.Orch().LatestSession(); err != nil {
-		return err
-	} else if ok {
-		sessionID = session.OpenCodeSessionID
+	} else if !isRoutine {
+		if session, ok, err := st.Orch().LatestSession(); err != nil {
+			return err
+		} else if ok {
+			sessionID = session.OpenCodeSessionID
+		}
 	}
 
 	timezone := strings.TrimSpace(opts.Timezone)

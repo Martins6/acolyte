@@ -139,6 +139,15 @@ func TestRunCronCreatePromptAndRoutine(t *testing.T) {
 	ws := setupCronCLI(t)
 	fixedCronNow(t)
 
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.Orch().UpsertSession("test", "ses_latest", time.Now().UTC()); err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+	st.Close()
+
 	if err := runCronCreate(&bytes.Buffer{}, cronCreateOptions{
 		Title:     "prompt",
 		Datetime:  "0 9 * * *",
@@ -157,17 +166,27 @@ func TestRunCronCreatePromptAndRoutine(t *testing.T) {
 		t.Fatalf("create routine: %v", err)
 	}
 
-	st, err := store.Open(ws)
+	st, err = store.Open(ws)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
+	promptJob, err := st.Orch().GetCronJobByTitle("prompt")
+	if err != nil {
+		t.Fatalf("get prompt: %v", err)
+	}
+	if promptJob.SessionID != "ses_latest" {
+		t.Errorf("prompt job session = %q, want ses_latest", promptJob.SessionID)
+	}
 	routineJob, err := st.Orch().GetCronJobByTitle("dream")
 	if err != nil {
 		t.Fatalf("get routine: %v", err)
 	}
 	if routineJob.Kind != "routine" || routineJob.Routine != "dream" || !strings.Contains(routineJob.RoutineArgs, "5") {
 		t.Errorf("routine job = %+v", routineJob)
+	}
+	if routineJob.SessionID != "" {
+		t.Errorf("routine job session = %q, want empty (own cron session)", routineJob.SessionID)
 	}
 }
 
@@ -217,6 +236,7 @@ func TestRunCronCreateValidation(t *testing.T) {
 		{Title: "x", Datetime: "not a cron", Prompt: "p", AgentName: "valet"},
 		{Title: "x", Datetime: "@every 1h", Routine: "missing", AgentName: "valet"},
 		{Title: "x", Datetime: "@every 1h", Routine: "dream", RoutineArgs: `{"weeks":1}`, AgentName: "valet"},
+		{Title: "x", Datetime: "@every 1h", Routine: "dream", AgentName: "valet", SessionID: "ses_any"},
 		{Title: "x", Datetime: "@every 1h", Prompt: "p", AgentName: "valet", Workspace: "/tmp/other"},
 		{Title: "x", Datetime: "@every 1h", Prompt: "p", AgentName: "valet", OnSuccess: "bad"},
 	}
