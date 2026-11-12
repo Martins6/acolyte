@@ -12,7 +12,7 @@ import (
 )
 
 // Thin client for the OpenCode V2 HTTP API (SPEC §5.1). Request/response
-// shapes are pinned against the OpenCode v2.2.5 /openapi.json contract.
+// shapes are pinned against the OpenCode v2.2.7 /openapi.json contract.
 
 // ModelRef selects a model (OpenCode Model.Ref).
 type ModelRef struct {
