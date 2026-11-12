@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/service"
@@ -135,15 +136,18 @@ func buildServiceOptions(scope service.Scope) (service.Options, error) {
 	if err != nil {
 		return service.Options{}, err
 	}
+	userHome, err = paths.Canonical(userHome)
+	if err != nil {
+		return service.Options{}, err
+	}
 
 	home := strings.TrimSpace(os.Getenv(paths.HomeEnv))
 	if home == "" {
 		home = filepath.Join(userHome, ".acolyte")
-	} else {
-		home, err = paths.Abs(home)
-		if err != nil {
-			return service.Options{}, err
-		}
+	}
+	home, err = paths.Canonical(home)
+	if err != nil {
+		return service.Options{}, err
 	}
 
 	return service.Options{
@@ -243,23 +247,65 @@ func isTransientPath(entry string) bool {
 }
 
 func prepareServiceDirs(opts service.Options) error {
-	dirs := []string{opts.Home}
+	userHome, err := paths.Canonical(opts.UserHome)
+	if err != nil {
+		return err
+	}
+	home, err := paths.Canonical(opts.Home)
+	if err != nil {
+		return err
+	}
+
+	asRoot := os.Geteuid() == 0 && opts.UID != 0
+	if asRoot && !isStrictSubdir(userHome, home) {
+		return fmt.Errorf("refusing to prepare ACOLYTE_HOME %q as root: it must be a dedicated directory inside %q; move it under your home or run without --system", opts.Home, opts.UserHome)
+	}
+
+	dirs := []string{home}
 	if opts.GOOS == "darwin" {
-		dirs = append(dirs, filepath.Join(opts.Home, service.LogDir))
+		dirs = append(dirs, filepath.Join(home, service.LogDir))
 	}
 	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
+		info, statErr := os.Lstat(dir)
+		existed := statErr == nil
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return fmt.Errorf("stat %s: %w", dir, statErr)
 		}
-		if os.Geteuid() == 0 && opts.UID != 0 {
-			// A sudo install must not leave root-owned directories behind:
-			// the daemon runs as the target user and writes here.
-			if err := os.Chown(dir, opts.UID, -1); err != nil {
-				return fmt.Errorf("chown %s: %w", dir, err)
+		if existed && !info.IsDir() {
+			return fmt.Errorf("%s exists and is not a directory", dir)
+		}
+		if !existed {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("create %s: %w", dir, err)
 			}
+		}
+		if !asRoot {
+			continue
+		}
+		if existed && !ownedByUID(info, opts.UID) {
+			// Never change ownership of a pre-existing directory the target
+			// user does not own: that is a destructive sudo-only side effect.
+			return fmt.Errorf("refusing to change ownership of existing directory %q; run: sudo chown %d %q", dir, opts.UID, dir)
+		}
+		if err := os.Chown(dir, opts.UID, -1); err != nil {
+			return fmt.Errorf("chown %s: %w", dir, err)
 		}
 	}
 	return nil
+}
+
+// isStrictSubdir reports whether path is a dedicated directory below base.
+func isStrictSubdir(base, path string) bool {
+	rel, err := filepath.Rel(base, path)
+	if err != nil || rel == "." || rel == ".." || filepath.IsAbs(rel) {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func ownedByUID(info os.FileInfo, uid int) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == uid
 }
 
 func runServiceCommands(plan service.Plan) error {

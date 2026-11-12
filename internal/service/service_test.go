@@ -151,6 +151,37 @@ func TestRenderSystemdSystem(t *testing.T) {
 	}
 }
 
+func TestRenderRejectsControlCharacters(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Options)
+	}{
+		{"home newline", func(o *Options) { o.Home = "/home/alice/.acolyte\nExecStartPre=/bin/sh -c evil" }},
+		{"path carriage return", func(o *Options) { o.PATH = "/usr/bin\rExecStartPre=/bin/sh -c evil" }},
+		{"binary tab", func(o *Options) { o.Binary = "/usr/local/bin/acolyte\t" }},
+		{"user newline", func(o *Options) { o.UserName = "alice\nUser=root" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := testOptions("linux", ScopeSystem)
+			tt.mutate(&opts)
+			if _, err := Render(opts); err == nil {
+				t.Fatal("expected control character error")
+			}
+		})
+	}
+}
+
+func TestRenderRequiresUserNameForSystemScope(t *testing.T) {
+	t.Setenv("USER", "")
+	opts := testOptions("linux", ScopeSystem)
+	opts.UserName = ""
+
+	if _, err := Render(opts); err == nil {
+		t.Fatal("expected error for missing system user name")
+	}
+}
+
 func TestRenderUnsupportedPlatform(t *testing.T) {
 	opts := testOptions("linux", ScopeUser)
 	opts.GOOS = "windows"

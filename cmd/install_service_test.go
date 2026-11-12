@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,5 +58,71 @@ func TestInstallServicePrint(t *testing.T) {
 	}
 	if strings.Contains(out, "Installed acolyte service.") {
 		t.Fatalf("print must not report an install:\n%s", out)
+	}
+}
+
+func TestIsStrictSubdir(t *testing.T) {
+	tests := []struct {
+		name string
+		base string
+		path string
+		want bool
+	}{
+		{"child", "/Users/alice", "/Users/alice/.acolyte", true},
+		{"nested child", "/Users/alice", "/Users/alice/agents/valet", true},
+		{"same directory", "/Users/alice", "/Users/alice", false},
+		{"parent", "/Users/alice", "/Users", false},
+		{"sibling prefix", "/Users/alice", "/Users/alice2", false},
+		{"traversal", "/Users/alice", "/Users/alice/../etc", false},
+		{"outside", "/Users/alice", "/etc", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStrictSubdir(tt.base, tt.path); got != tt.want {
+				t.Fatalf("isStrictSubdir(%q, %q) = %t, want %t", tt.base, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrepareServiceDirsCreatesHome(t *testing.T) {
+	userHome := t.TempDir()
+	home := filepath.Join(userHome, ".acolyte")
+	opts := service.Options{
+		GOOS:     "linux",
+		Scope:    service.ScopeUser,
+		Home:     home,
+		UserHome: userHome,
+		UID:      os.Getuid(),
+	}
+
+	if err := prepareServiceDirs(opts); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", home)
+	}
+}
+
+func TestPrepareServiceDirsRejectsFile(t *testing.T) {
+	userHome := t.TempDir()
+	path := filepath.Join(userHome, "not-a-directory")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := service.Options{
+		GOOS:     "linux",
+		Scope:    service.ScopeUser,
+		Home:     path,
+		UserHome: userHome,
+		UID:      os.Getuid(),
+	}
+
+	if err := prepareServiceDirs(opts); err == nil {
+		t.Fatal("expected error when ACOLYTE_HOME is a file")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -207,6 +208,9 @@ func applyDefaults(opts *Options) error {
 	if strings.TrimSpace(opts.UserName) == "" {
 		opts.UserName = os.Getenv("USER")
 	}
+	if opts.Scope == ScopeSystem && strings.TrimSpace(opts.UserName) == "" {
+		return fmt.Errorf("service: user name is required for system scope")
+	}
 	if opts.UID < 0 {
 		return fmt.Errorf("service: uid must not be negative")
 	}
@@ -215,6 +219,30 @@ func applyDefaults(opts *Options) error {
 	}
 	if strings.TrimSpace(opts.PATH) == "" {
 		opts.PATH = DefaultPath(opts.UserHome)
+	}
+
+	// Unit files are line-oriented: a newline in any value would inject a
+	// directive into systemd units, and control characters are invalid XML in
+	// launchd plists. Reject them before rendering either format.
+	for name, value := range map[string]string{
+		"binary":    opts.Binary,
+		"acolyte":   opts.Home,
+		"user home": opts.UserHome,
+		"user name": opts.UserName,
+		"PATH":      opts.PATH,
+	} {
+		if err := validateNoControl(name, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateNoControl(field, value string) error {
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("service: %s contains a control character (U+%04X)", field, r)
+		}
 	}
 	return nil
 }
