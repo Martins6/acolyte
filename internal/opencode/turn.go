@@ -32,6 +32,11 @@ type TurnConfig struct {
 	// afterwards. Routine turns use it to confine untrusted model output to
 	// memory paths instead of relying on prompt instructions.
 	Permissions []PermissionRule
+
+	// OnEvent, when non-nil, receives the session's events (idle, text deltas,
+	// tool activity) while the turn runs. The event stream is best-effort: a
+	// subscription failure never fails or stalls the turn itself.
+	OnEvent EventHandler
 }
 
 // SyntheticEvent is an external/background event admitted to a session
@@ -107,6 +112,9 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 		}
 	}()
 
+	stopEvents := c.startEventObserver(ctx, info.ID, cfg.OnEvent)
+	defer stopEvents()
+
 	item, err := c.Prompt(ctx, info.ID, text)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
@@ -163,6 +171,9 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 			err = errors.Join(err, restoreErr)
 		}
 	}()
+
+	stopEvents := c.startEventObserver(ctx, info.ID, cfg.OnEvent)
+	defer stopEvents()
 
 	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
@@ -221,6 +232,31 @@ var permissionRestoreTimeout = 10 * time.Second
 // not touch session state. A failed restriction aborts the turn (fail closed);
 // a failed restore is surfaced to the caller but leaves the safer rules in
 // place.
+// startEventObserver runs an optional best-effort event subscription for the
+// duration of a turn. It returns a cancel function; callers must always call
+// it (normally with defer).
+func (c *Client) startEventObserver(ctx context.Context, sessionID string, handle EventHandler) func() {
+	if handle == nil {
+		return func() {}
+	}
+	eventCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		_ = c.SubscribeEvents(eventCtx, []string{
+			"session.idle",
+			"session.text.delta",
+			"session.tool.called",
+			"session.tool.success",
+			"session.tool.failed",
+		}, func(event Event) error {
+			if event.SessionID() != sessionID {
+				return nil
+			}
+			return handle(event)
+		})
+	}()
+	return cancel
+}
+
 func (c *Client) restrictSession(ctx context.Context, info *SessionInfo, permissions []PermissionRule) (func() error, error) {
 	if permissions == nil {
 		return func() error { return nil }, nil
