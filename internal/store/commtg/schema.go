@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "comm_tg"
-	version = 7
+	version = 8
 )
 
 // Migrate creates or upgrades the Telegram communication schema.
@@ -70,6 +70,12 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("comm_tg: migrate to version 7: %w", err)
 		}
 		current = 7
+	}
+	if current < 8 {
+		if err := migrateV8(db); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 8: %w", err)
+		}
+		current = 8
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -271,6 +277,20 @@ func migrateV7(db *sql.DB) error {
 		}
 	}
 	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_comm_tg_outbox_envelope ON comm_tg_outbox(envelope_id)`)
+	return err
+}
+
+// migrateV8 adds the outbound media path. Existing text-only rows keep an
+// empty value and deliver exactly as before.
+func migrateV8(db *sql.DB) error {
+	columns, err := tableColumns(db, "comm_tg_outbox")
+	if err != nil {
+		return err
+	}
+	if columns["media_path"] {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE comm_tg_outbox ADD COLUMN media_path TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 

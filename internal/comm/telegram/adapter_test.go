@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,18 +23,38 @@ import (
 )
 
 type fakeAPI struct {
-	mu           sync.Mutex
-	sent         []*bot.SendMessageParams
-	sendErr      error
-	getFileErr   error
-	getFileCalls int
-	nextID       int
+	mu            sync.Mutex
+	sent          []*bot.SendMessageParams
+	sentPhotos    []*bot.SendPhotoParams
+	sentPhotoData [][]byte
+	sendErr       error
+	getFileErr    error
+	getFileCalls  int
+	nextID        int
 }
 
 func (f *fakeAPI) SendMessage(_ context.Context, params *bot.SendMessageParams) (*models.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, params)
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
+	f.nextID++
+	return &models.Message{ID: f.nextID}, nil
+}
+
+func (f *fakeAPI) SendPhoto(_ context.Context, params *bot.SendPhotoParams) (*models.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sentPhotos = append(f.sentPhotos, params)
+	if upload, ok := params.Photo.(*models.InputFileUpload); ok {
+		data, err := io.ReadAll(upload.Data)
+		if err != nil {
+			return nil, err
+		}
+		f.sentPhotoData = append(f.sentPhotoData, data)
+	}
 	if f.sendErr != nil {
 		return nil, f.sendErr
 	}
@@ -234,6 +255,42 @@ func TestSendEnqueuesAndDelivers(t *testing.T) {
 	}
 	if due, _ := st.CommTG().DueOutbound(time.Now().Add(time.Hour), 10); len(due) != 0 {
 		t.Errorf("due after send = %+v", due)
+	}
+}
+
+func TestSendPhoto(t *testing.T) {
+	adapter, api, st, _ := newTestAdapter(t, "42")
+	imagePath := filepath.Join(adapter.agent.Workspace, "media", "outbound", "images", "chart.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	payload := []byte("not-a-real-png-but-upload-bytes")
+	if err := os.WriteFile(imagePath, payload, 0644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	env := envelope.New(envelope.DirectionOut, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Content{Type: envelope.ContentMedia, Text: "chart", Media: []string{imagePath}})
+	if err := adapter.Send(env); err != nil {
+		t.Fatalf("Send() error: %v", err)
+	}
+	api.mu.Lock()
+	photos := append([]*bot.SendPhotoParams(nil), api.sentPhotos...)
+	uploaded := append([][]byte(nil), api.sentPhotoData...)
+	api.mu.Unlock()
+	if len(photos) != 1 {
+		t.Fatalf("photos = %d, want 1", len(photos))
+	}
+	if photos[0].Caption != "chart" {
+		t.Errorf("caption = %q, want chart", photos[0].Caption)
+	}
+	if len(uploaded) != 1 || string(uploaded[0]) != string(payload) {
+		t.Errorf("upload = %q, want %q", uploaded, payload)
+	}
+	list, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(list) != 1 || list[0].Delivery != "sent" || list[0].MediaPath != imagePath {
+		t.Errorf("outbox = %+v, %v", list, err)
 	}
 }
 

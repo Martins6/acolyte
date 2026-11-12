@@ -33,6 +33,9 @@ type SentMessage struct {
 	ChatID  int64
 	Text    string
 	ReplyTo *int64
+	// Media is the uploaded bytes for a sendPhoto call. It is nil for
+	// sendMessage.
+	Media []byte
 }
 
 // Failure scripts one method call to fail instead of succeeding.
@@ -306,6 +309,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetUpdates(w, r, form)
 	case "sendMessage":
 		s.handleSendMessage(w, form)
+	case "sendPhoto":
+		s.handleSendPhoto(w, form)
 	case "getFile":
 		s.handleGetFile(w, form)
 	default:
@@ -391,6 +396,45 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, form map[string][]stri
 		Date: int(time.Now().Unix()),
 		Chat: models.Chat{ID: chatID, Type: models.ChatTypePrivate},
 		Text: text,
+	})
+}
+
+func (s *Server) handleSendPhoto(w http.ResponseWriter, form map[string][]string) {
+	chatID, err := parseChatID(formString(form, "chat_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Bad Request: chat not found")
+		return
+	}
+	photo := formString(form, "photo")
+	if photo == "" {
+		writeError(w, http.StatusBadRequest, "Bad Request: photo is empty")
+		return
+	}
+	caption := formString(form, "caption")
+	var replyTo *int64
+	if raw := formString(form, "reply_parameters"); raw != "" {
+		var params models.ReplyParameters
+		if err := json.Unmarshal([]byte(raw), &params); err == nil && params.MessageID != 0 {
+			id := int64(params.MessageID)
+			replyTo = &id
+		}
+	}
+
+	s.mu.Lock()
+	s.nextMessageID++
+	id := s.nextMessageID
+	s.messages = append(s.messages, SentMessage{
+		ID: id, ChatID: chatID, Text: caption, ReplyTo: replyTo, Media: []byte(photo),
+	})
+	s.notifyMessagesLocked()
+	s.mu.Unlock()
+
+	writeOK(w, models.Message{
+		ID:      int(id),
+		Date:    int(time.Now().Unix()),
+		Chat:    models.Chat{ID: chatID, Type: models.ChatTypePrivate},
+		Caption: caption,
+		Photo:   []models.PhotoSize{{FileID: "sent-photo", FileUniqueID: "sent-photo", FileSize: len(photo)}},
 	})
 }
 

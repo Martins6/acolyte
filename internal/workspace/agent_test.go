@@ -33,6 +33,7 @@ func TestScaffoldAgent(t *testing.T) {
 		".acolyte/TOOLS.md",
 		".acolyte/USER.md",
 		".acolyte/HEARTBEAT.md",
+		".opencode/tools/send_image.ts",
 		".gitignore",
 	} {
 		if _, err := os.Stat(filepath.Join(ws, name)); err != nil {
@@ -40,7 +41,7 @@ func TestScaffoldAgent(t *testing.T) {
 		}
 	}
 	for _, dir := range []string{
-		".agents/skills", ".opencode/agents", ".logs",
+		".agents/skills", ".opencode/agents", ".opencode/tools", ".logs",
 		"media/inbound/images", "media/inbound/audio", "media/inbound/documents", "media/inbound/videos",
 		"media/outbound/images",
 	} {
@@ -74,6 +75,14 @@ func TestScaffoldAgent(t *testing.T) {
 	}
 	if len(config.Agent) != 0 {
 		t.Errorf("agent block = %v, want empty for build", config.Agent)
+	}
+
+	tool, err := os.ReadFile(filepath.Join(ws, ".opencode/tools/send_image.ts"))
+	if err != nil {
+		t.Fatalf("read send_image tool: %v", err)
+	}
+	if !strings.Contains(string(tool), "notify-user") || !strings.Contains(string(tool), "--media") {
+		t.Errorf("send_image tool does not call notify-user --media")
 	}
 }
 
