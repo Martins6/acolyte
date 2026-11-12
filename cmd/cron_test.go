@@ -169,6 +169,9 @@ func TestRunCronCreatePromptAndRoutine(t *testing.T) {
 	if routineJob.Kind != "routine" || routineJob.Routine != "dream" || !strings.Contains(routineJob.RoutineArgs, "5") {
 		t.Errorf("routine job = %+v", routineJob)
 	}
+	if routineJob.SessionID != "" {
+		t.Errorf("routine job session = %q, want empty", routineJob.SessionID)
+	}
 }
 
 func TestRunCronCreateDryRun(t *testing.T) {
@@ -217,6 +220,7 @@ func TestRunCronCreateValidation(t *testing.T) {
 		{Title: "x", Datetime: "not a cron", Prompt: "p", AgentName: "valet"},
 		{Title: "x", Datetime: "@every 1h", Routine: "missing", AgentName: "valet"},
 		{Title: "x", Datetime: "@every 1h", Routine: "dream", RoutineArgs: `{"weeks":1}`, AgentName: "valet"},
+		{Title: "x", Datetime: "@every 1h", Routine: "dream", AgentName: "valet", SessionID: "ses_x"},
 		{Title: "x", Datetime: "@every 1h", Prompt: "p", AgentName: "valet", Workspace: "/tmp/other"},
 		{Title: "x", Datetime: "@every 1h", Prompt: "p", AgentName: "valet", OnSuccess: "bad"},
 	}
