@@ -33,7 +33,6 @@
   its normal config refresh.
 
 ## Orchestrator
-- **`acolyte install-service`** — write the launchd plist / systemd unit for auto-start automatically.
 - **Status cache** — maintain an `agent_status` snapshot in the registry for fast `acolyte status`
   vs. fan-out reads.
 - **Per-agent isolation hardening** — one daemon already serves all registered agents; harden
