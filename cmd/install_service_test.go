@@ -61,6 +61,36 @@ func TestInstallServicePrint(t *testing.T) {
 	}
 }
 
+func TestInstallServicePrintSystemWithoutRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("system-scope print hint only applies to non-root callers")
+	}
+
+	resetInstallServiceFlags(t)
+	installServiceUser = false
+	installServiceSystem = true
+	installServicePrint = true
+
+	var buf bytes.Buffer
+	installServiceCmd.SetOut(&buf)
+	t.Cleanup(func() { installServiceCmd.SetOut(nil) })
+
+	if err := installServiceCmd.RunE(installServiceCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{
+		"System scope needs root. Re-run:",
+		"install-service --system",
+		"# 1. Write this file to",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("print output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestIsStrictSubdir(t *testing.T) {
 	tests := []struct {
 		name string

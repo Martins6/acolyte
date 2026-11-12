@@ -73,15 +73,19 @@ and the generated unit instead of writing anything.`,
 			return err
 		}
 
+		if plan.Scope == service.ScopeSystem && os.Geteuid() != 0 {
+			fmt.Fprintf(out, "System scope needs root. Re-run:\n  sudo %s install-service --system\n\n", opts.Binary)
+			if installServicePrint {
+				fmt.Fprint(out, plan.Manual())
+				return nil
+			}
+			fmt.Fprint(out, plan.Manual())
+			return fmt.Errorf("system scope requires root")
+		}
+
 		if installServicePrint {
 			fmt.Fprint(out, plan.Manual())
 			return nil
-		}
-
-		if plan.Scope == service.ScopeSystem && os.Geteuid() != 0 {
-			fmt.Fprintf(out, "System scope needs root. Re-run:\n  sudo %s install-service --system\n\n", opts.Binary)
-			fmt.Fprint(out, plan.Manual())
-			return fmt.Errorf("system scope requires root")
 		}
 
 		if err := prepareServiceDirs(opts); err != nil {
