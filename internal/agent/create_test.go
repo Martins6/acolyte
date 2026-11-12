@@ -139,6 +139,46 @@ func TestCreateFresh(t *testing.T) {
 	}
 }
 
+func TestCreatePersistsExplicitEmptyChannels(t *testing.T) {
+	_, ws := setup(t)
+	cfg := createTestConfig(t, `{
+		"communication": { "channels": [], "telegram": { "allowed_users": ["@you"] } }
+	}`)
+	result, err := Create(context.Background(), CreateOptions{Name: "valet", Workspace: ws, Config: cfg})
+	if err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+	defer st.Close()
+
+	channels, ok, err := st.CommTG().GetSetting("channels")
+	if err != nil || !ok {
+		t.Fatalf("channels setting = ok:%v err:%v", ok, err)
+	}
+	if channels != `[]` {
+		t.Errorf("channels = %q, want []", channels)
+	}
+	users, ok, err := st.CommTG().GetSetting("telegram.allowed_users")
+	if err != nil || !ok || users != `["@you"]` {
+		t.Errorf("allowed users = %q, ok:%v err:%v", users, ok, err)
+	}
+
+	effective, err := LoadConfig(st, result.Agent)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if len(effective.Communication.Channels) != 0 {
+		t.Errorf("effective channels = %v, want empty", effective.Communication.Channels)
+	}
+	if len(effective.Communication.Telegram.AllowedUsers) != 1 {
+		t.Errorf("effective allowed users = %v, want 1", effective.Communication.Telegram.AllowedUsers)
+	}
+}
+
 func TestCreateDreamJobArgs(t *testing.T) {
 	_, ws := setup(t)
 	cfg := createTestConfig(t, `{

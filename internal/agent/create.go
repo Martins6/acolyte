@@ -287,24 +287,26 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 		}
 	}
 
-	if hasTelegram(cfg) {
-		if _, exists, err := st.CommTG().GetSetting("channels"); err != nil {
+	// Persist the channel selection even when it is empty: [] is an explicit
+	// "no channels" choice, and omitting the setting would make the daemon
+	// fall back to its Telegram default. Adoption still preserves an existing
+	// setting.
+	if _, exists, err := st.CommTG().GetSetting("channels"); err != nil {
+		return nil, err
+	} else if !exists {
+		if err := st.CommTG().SetSetting("channels", mustJSON(cfg.Communication.Channels)); err != nil {
+			return nil, err
+		}
+	}
+	if len(cfg.Communication.Telegram.AllowedUsers) > 0 {
+		if _, exists, err := st.CommTG().GetSetting("telegram.allowed_users"); err != nil {
 			return nil, err
 		} else if !exists {
-			if err := st.CommTG().SetSetting("channels", mustJSON(cfg.Communication.Channels)); err != nil {
+			if err := st.CommTG().SetSetting(
+				"telegram.allowed_users",
+				mustJSON(cfg.Communication.Telegram.AllowedUsers),
+			); err != nil {
 				return nil, err
-			}
-		}
-		if len(cfg.Communication.Telegram.AllowedUsers) > 0 {
-			if _, exists, err := st.CommTG().GetSetting("telegram.allowed_users"); err != nil {
-				return nil, err
-			} else if !exists {
-				if err := st.CommTG().SetSetting(
-					"telegram.allowed_users",
-					mustJSON(cfg.Communication.Telegram.AllowedUsers),
-				); err != nil {
-					return nil, err
-				}
 			}
 		}
 	}
@@ -353,15 +355,6 @@ func setSettingIfMissing(store *orch.Store, key, value string) error {
 		return nil
 	}
 	return store.SetSetting(key, value)
-}
-
-func hasTelegram(cfg Config) bool {
-	for _, channel := range cfg.Communication.Channels {
-		if channel == "telegram" {
-			return true
-		}
-	}
-	return false
 }
 
 func nextRun(spec, timezone string) (*time.Time, error) {
