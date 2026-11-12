@@ -2,26 +2,29 @@
 
 ## Autopilot Run Instructions
 
-This file is the execution plan for an autonomous run. Follow these rules unless the user says
-otherwise:
+**This file is meant to run on autopilot.** Do not stop for approval between tasks.
 
-- Use the `implementation-plan` workflow: create/accept the plan, then auto-approve each task.
-  Track execution with sbeads (epic + child tasks); run `sb show <task>` before starting and
-  `sb close <task>` when done.
-- Work one task at a time, in the order below unless a dependency changes. Keep each PR focused on
-  one task; do not mix unrelated fixes.
-- Branch from the latest `origin/dev` and open every PR against `dev`.
-- Before opening a PR, run `go vet ./...` and `go test ./...` locally. Include the commands and
-  results in the PR body.
-- After opening a PR, wait for **two** PR checks (`unit` and `telegram`). Do not wait for a third
-  check or for the review agent to finish. If the two checks have completed, merge the PR even if
-  they are red. Use `--admin` only if branch protection blocks the merge.
-- If a check never appears, wait a bounded 10 minutes, record that in the PR, and merge anyway.
-- Do not stop to ask for approval between tasks. If a task is genuinely blocked by a decision,
-  credential, or manual step, stop and record the blocker in `# Next Steps`.
-- At the end, add a final `# Next Steps` section at the bottom of this file with comments,
-  follow-ups, and anything that looked suspicious during the run. Include the merged PR numbers and
-  the CI outcome for each task.
+Run order:
+
+1. Use the `implementation-plan` skill in accept mode. Create one sbeads epic whose description is
+   this plan, add one child task per numbered section below, and auto-approve each task. Run
+   `sb show <task>` before starting each task and `sb close <task>` when it is done.
+2. Execute the tasks in order unless a dependency says otherwise. Keep each PR focused on exactly
+   one task; do not mix unrelated fixes.
+3. Branch from the latest `origin/dev` and open **every** new task as its own PR against `dev`.
+   Before opening a PR, run `go vet ./...` and `go test -race -count=1 ./...` locally and include
+   the commands and results in the PR body.
+4. After opening a PR, wait for **two** CI results: the `unit` and `telegram` checks. Do **not**
+   wait for the third `review` check. As soon as those two checks have completed, merge the PR even
+   if either one is red. Use `--admin` only if branch protection blocks the merge.
+5. If one of the two checks never appears, wait at most 10 minutes, record that in the PR, and merge
+   anyway.
+6. At the end, append a `# Next Steps` section at the bottom of this file with comments,
+   follow-ups, anything suspicious seen during the run, the merged PR number(s), and the CI result
+   for each task.
+
+Never merge `dev` into `main` during this run. If a task is genuinely blocked by a decision,
+credential, or manual step, stop and record the blocker under `# Next Steps`.
 
 Work from the SPEC v0 implementation audit. Tasks 1–4 are code fixes. Task 5 standardizes the media
 directory layout. Task 6 adds single-image outbound media through an OpenCode tool and
