@@ -161,8 +161,9 @@ debugging.
   sessions (`GET /api/session`). `acolyte status` uses the local store's session/job fan-out; the
   OpenCode stats endpoint is `GET /api/experimental/session/stats` (not used by v0 status).
 - **`event.subscribe()` is available** through the thin SSE client (`SubscribeEvents`) and the
-  optional `TurnConfig.OnEvent` turn observer. v0 consumes it for live turn observation/status;
-  streaming partial text into Telegram is deferred (it needs message editing and rate limiting).
+  optional `TurnConfig.OnEvent` turn observer. No production call site supplies `OnEvent` in v0;
+  the hook is tested and ready for future consumers. Telegram partial-text streaming, live status,
+  and learning feeds are deferred (they need message editing, rate limiting, and a consumer design).
 - **Long-running daemon ↔ long-running service** (matches autostart). No spawn-per-turn overhead or
   5-minute timeout.
 
@@ -176,7 +177,7 @@ debugging.
 
 **Caveats:**
 - The orchestrator must discover/start the OpenCode service (`opencode serve --service`); internal
-  `opencode/server.go` already does this.
+  `opencode/service.go` already does this.
 - The V2 API is OpenCode's "only intentional breaking change" — pin it and vendor the release's
   `/openapi.json` under `internal/opencode/contract/`, with a contract test that guards every path,
   method, schema, and schema property the thin client uses (`docs/opencode/v2-contract.md`). CI

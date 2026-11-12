@@ -82,5 +82,11 @@ The bot **token** is a secret read from the layered `.env` files:
 `<workspace>/.env` overrides `$ACOLYTE_HOME/.env`; the process environment overrides both. Neither
 file is ever committed or scaffolded. See `SPEC.md` §4.
 
-Runtime config mutation (changing allowed users/channels without re-running `acolyte new`) is not
-exposed yet; see `FUTURE-IDEAS.md`.
+Runtime config mutation is available without re-running `acolyte new`:
+
+```bash
+acolyte config valet set communication.channels '["telegram"]'
+acolyte config valet set communication.telegram.allowed_users '@alice,@bob'
+```
+
+See `docs/orchestrator/config.md` for validation, `--dry-run`, and the full key list.
