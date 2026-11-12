@@ -313,3 +313,50 @@ outbound media convention. We want one predictable layout for both directions.
 - `SPEC.md` contains no path, endpoint, column, or behavior that the code does not implement.
 - `rg` finds no stale “no CLI to change …” text.
 - New links and doc references resolve.
+
+---
+
+# Next Steps
+
+Autopilot run completed on 2026-11-12. The two PR checks (`unit`, `telegram`) passed for every task;
+the OpenCode review check passed for tasks 1–5 and failed on task 6 with no review body. Per the run
+instructions, each PR was merged after the two checks completed.
+
+| Task | PR | CI |
+| ---- | -- | -- |
+| Autopilot instructions | #77 | unit/telegram pass |
+| 1 — explicit empty channels | #78 | unit/telegram pass |
+| 2 — allowed-user normalization | #80 | unit/telegram pass |
+| 3 — routine session isolation | #81 | unit/telegram pass |
+| 4 — event.subscribe client | #83 | unit/telegram pass |
+| 5 — media/inbound + media/outbound | #84 | unit/telegram pass |
+| 6 — single-image outbound | #85 | unit/telegram pass; review failed with no body |
+| 7 — SPEC/docs | this PR | — |
+
+## Follow-ups and observations
+
+- **Outbound image + final text are separate messages.** `send_image` is a thin wrapper around
+  `acolyte notify-user --media`, so the photo is sent immediately and the agent's final turn text is
+  a later Telegram message. If one message with image + caption is desired, extend `TurnResult` to
+  extract `send_image` tool calls and merge them with the reply.
+- **`send_image` needs `acolyte` on `PATH`** (or `ACOLYTE_BIN`). It also expects OpenCode's
+  `context.directory`; the generated tool falls back to `ACOLYTE_WORKSPACE_PATH` and then `cwd`.
+- **Outbound v0 is intentionally narrow:** one photo, JPEG/PNG/WebP, ≤10 MiB, caption ≤1024
+  characters, no document fallback, no albums.
+- **Image validation is extension + size + symlink/path checks**, not MIME magic-byte verification.
+  A future hardening pass should decode/validate the image before copying it.
+- **Event subscription exists but consumers are minimal.** `SubscribeEvents` and
+  `TurnConfig.OnEvent` are available and tested; Telegram partial-text streaming, learning feeds,
+  and a dedicated live-status consumer remain follow-ups.
+- **`acolyte status` still uses local fan-out reads** and reports `last_active_at`; it does not show
+  communication settings or a true “last message.” Use `acolyte config <agent> get` for settings.
+- **Legacy `downloads/` media is still readable**, but there is no automatic migration to
+  `media/inbound/`. Memory-trace bundles remain under `downloads/memory-traces/`.
+- **Task 5 merged from PR #84 while this run was in progress**; it was verified by its unit/telegram
+  checks and the merged tree was used for task 6.
+- **Investigate the task-6 OpenCode review failure** (`review` check red, no review body). The
+  deterministic checks were green; the failure may be workflow/model-related rather than the diff.
+- **Dead legacy scaffold removed:** `internal/workspace/template.go` and `files.go` (the old
+  `opencode.json` / `MAIN-PROMPTS/` layout) are gone.
+- **Spec endpoint list now follows pinned OpenCode 2.2.7**, including the experimental stats path,
+  the real inbox shape, and the SSE event endpoint.

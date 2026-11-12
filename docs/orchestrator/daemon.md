@@ -38,7 +38,7 @@ OpenCode session/message IDs needed to join the two.
 
 - `acolyte inspect --session-id <id>` reads the session from OpenCode and the matching
   `comm_tg_inbox`/`comm_tg_outbox` rows, then prints a timestamp-ordered JSON event stream with
-  message-ID links.
+  message-ID links. Outbound media rows include the `media_path` attribution when available.
 - `acolyte attach` runs `opencode attach <service-url> --dir <workspace> [--session <id>]` with the
   service credentials in the environment. Running `opencode` directly starts a separate server and
   will not see Acolyte's sessions.
@@ -53,6 +53,7 @@ OpenCode session/message IDs needed to join the two.
 
 ## Runtime config
 
-Capabilities are baked by `acolyte new`. There is currently no CLI to change an agent's channels,
-allowed users, schedule, or engine in place; `acolyte new` preserves existing settings. This is
-tracked in `FUTURE-IDEAS.md`.
+Capabilities are baked by `acolyte new` and can be changed in place with
+`acolyte config <agent> get|set|edit` (channels, allowed users, schedule, engine, memory keys; see
+[`config.md`](config.md)). `acolyte new` still preserves existing settings/jobs when it adopts a
+folder. New modes/channels remain deferred in [`FUTURE-IDEAS.md`](../../FUTURE-IDEAS.md).
