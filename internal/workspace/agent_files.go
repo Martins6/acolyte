@@ -63,6 +63,7 @@ const agentGitignore = `# Agent-local secrets and state
 .acolyte.sqlite.db-wal
 .logs/
 downloads/
+media/
 `
 
 func agentAgentsContent(opts AgentOptions) string {

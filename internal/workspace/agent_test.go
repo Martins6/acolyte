@@ -41,7 +41,8 @@ func TestScaffoldAgent(t *testing.T) {
 	}
 	for _, dir := range []string{
 		".agents/skills", ".opencode/agents", ".logs",
-		"downloads/images", "downloads/audio", "downloads/documents", "downloads/videos",
+		"media/inbound/images", "media/inbound/audio", "media/inbound/documents", "media/inbound/videos",
+		"media/outbound/images",
 	} {
 		info, err := os.Stat(filepath.Join(ws, dir))
 		if err != nil || !info.IsDir() {
