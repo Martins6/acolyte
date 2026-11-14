@@ -29,7 +29,7 @@ Consequences:
 ## Decision
 
 The "merge even if `unit`/`telegram` is red; use `--admin` only if branch protection blocks the
-merge" latitude in [`TASK.md`](../../TASK.md) is scoped, not general:
+merge" latitude from the #77–#88 autopilot run instructions is scoped, not general:
 
 - It exists **only** for an autopilot run whose instructions explicitly ask for that behavior.
   It is not a default for human or agent merges.
@@ -43,7 +43,7 @@ merge" latitude in [`TASK.md`](../../TASK.md) is scoped, not general:
 Required checks and stop-on-red must be enabled in this order — the instructions change **before**
 the gate does, so no run can merge red through a required check:
 
-1. **Switch autopilot to stop-on-red first.** Update the run instructions (`TASK.md`) to require
+1. **Switch autopilot to stop-on-red first.** Update the autopilot run instructions to require
    `unit` and `telegram` to pass before merging, and to stop and report on red.
 2. **Then enable required status checks on `dev`.** From that moment a red or missing check blocks
    the merge at the platform level.
@@ -62,8 +62,7 @@ Rules that hold at every step:
 
 ## Checklist: enabling required checks safely
 
-- [ ] Confirm autopilot instructions (`TASK.md` step 4) already say **stop on red**; merge that
-      change first.
+- [ ] Confirm the autopilot instructions already say **stop on red**; merge that change first.
 - [ ] Confirm no in-flight autopilot run still relies on the merge-red latitude.
 - [ ] Enable `unit` and `telegram` as required status checks on `dev` (Settings → Branches →
       branch protection rule).

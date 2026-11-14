@@ -5,7 +5,8 @@
 > contract-free** and plugs straight into OpenCode features (§6). The one real code/data contract
 > is **Communication ⇄ Orchestrator** (§8), backed by a per-module-namespaced store that holds only
 > what OpenCode sessions don't (§9). There is **no `.acolyte.jsonc`** — capabilities live in
-> `opencode.jsonc` + the `acolyte` CLI (§4). Deferred ideas live in [`FUTURE-IDEAS.md`](FUTURE-IDEAS.md).
+> `opencode.jsonc` + the `acolyte` CLI (§4). Deferred ideas live in
+> [#113](https://github.com/Martins6/acolyte/issues/113).
 
 ---
 
@@ -17,7 +18,8 @@ have the whole agent.
 
 Each agent folder **is an OpenCode project** with an Acolyte overlay. OpenCode runs the model +
 tools; Acolyte layers high-level modules on top and wires them together. **One `acolyte` daemon
-serves all registered agents**; per-agent isolation hardening is deferred (`FUTURE-IDEAS.md`).
+serves all registered agents**; per-agent isolation hardening is deferred
+([#113](https://github.com/Martins6/acolyte/issues/113)).
 
 | Module            | Responsibility                                                    | Pluggable? |
 | ----------------- | ----------------------------------------------------------------- | ---------- |
@@ -27,7 +29,8 @@ serves all registered agents**; per-agent isolation hardening is deferred (`FUTU
 | **Orchestrator**  | `acolyte` daemon/CLI — turn loop, envelope bus, **cron service**, DB, registry. | **Fixed** |
 
 **Capabilities are baked at `acolyte new`** (§10). Runtime capability-switching is deferred
-(`FUTURE-IDEAS.md`). Agent-to-agent messaging is deferred (`FUTURE-IDEAS.md`).
+([#113](https://github.com/Martins6/acolyte/issues/113)). Agent-to-agent messaging is deferred
+([#113](https://github.com/Martins6/acolyte/issues/113)).
 
 ---
 
@@ -115,7 +118,7 @@ can afterwards be changed in place with **`acolyte config <agent> get|set|edit`*
 `set` is validated before anything is written, supports `--dry-run` diffs, and mutates the same
 artifacts `acolyte new` wrote (targeted `opencode.jsonc` edits, registry, store settings, and the
 dream/heartbeat jobs). Keys outside that surface (new memory modes, new channels) still require
-re-running a capability step — see `FUTURE-IDEAS.md`.
+re-running a capability step — see [#113](https://github.com/Martins6/acolyte/issues/113).
 
 **Identity note / tradeoff:** because there's no per-folder config, `name`/`description` live in the
 **registry**, not the folder. Moving a folder to a new machine = re-register (`acolyte new` on the
@@ -332,7 +335,7 @@ The **Envelope** is the single message type between Communication and Orchestrat
 Media is resolved to file paths before reaching the engine. Inbound files live under
 `media/inbound/<type>/`; outbound images are copied under `media/outbound/images/` and delivered as
 Telegram photos. v0 supports one image per outbound message. `channel` and `from/to.kind` reserve the
-agent-to-agent case (`FUTURE-IDEAS.md`).
+agent-to-agent case ([#113](https://github.com/Martins6/acolyte/issues/113)).
 
 ---
 
@@ -536,7 +539,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session f
 
 > Runtime capability mutation is supported for the keys listed above via `acolyte config` (§4);
 > `acolyte new` still preserves existing settings/jobs on adoption. New modes/channels remain
-> deferred — see `FUTURE-IDEAS.md`.
+> deferred — see [#113](https://github.com/Martins6/acolyte/issues/113).
 
 ---
 
@@ -679,10 +682,10 @@ admit a synthetic event; output is routed via Communication.
 9. **`acolyte new` bakes capabilities at creation**; runtime mutation of the listed keys
    (`description`, `engine.*`, `communication.*`, `schedule.*`, `memory-*`) is supported through
    `acolyte config <agent> get|set|edit` with validate-before-write and `--dry-run` (§4/§10.5).
-   New modes/channels stay deferred (`FUTURE-IDEAS.md`).
+   New modes/channels stay deferred ([#113](https://github.com/Martins6/acolyte/issues/113)).
 10. **`CONFIG.md`** persona file for meta-awareness (§11).
 11. **Docs live in `docs/`** per module/mode (§ see `docs/`), linked from `CONFIG.md`.
-12. **Deferred ideas live in `FUTURE-IDEAS.md`.**
+12. **Deferred ideas live in [#113](https://github.com/Martins6/acolyte/issues/113).**
 13. **Identity lives in the persona + registry** — UX identity in `.acolyte/*.md`; name/description
     in the registry. No per-folder identity record needed (closed).
 14. **Engine transport = the OpenCode V2 API, not the CLI** (§5.1). External/background events enter
@@ -706,7 +709,7 @@ admit a synthetic event; output is routed via Communication.
     (per-agent); precedence process env > workspace > global; workspace values are scoped, never
     process-global. Both files are gitignored and never scaffolded.
 23. **One daemon serves all registered agents** (§1/§14); per-agent isolation and supervision
-    hardening is deferred (`FUTURE-IDEAS.md`).
+    hardening is deferred ([#113](https://github.com/Martins6/acolyte/issues/113)).
 24. **`acolyte status` uses fan-out reads in v0** (§12); the `agent_status` snapshot cache is deferred.
 25. **Dream writes** are prompt-guided and direct/conservative by default; `dry_run` meta +
     `acolyte cron --dry-run` make the run proposal-only. Both model phases use a session-scoped

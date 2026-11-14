@@ -32,4 +32,5 @@ Each sub-component is selected per agent (baked at `acolyte new`) as either:
 ## Adding a mode
 
 Because Memory is contract-free: add a doc under `docs/memory/<sub-component>/<mode>.md` and whatever
-OpenCode/cron artifacts the mode needs. No Acolyte API change. See `FUTURE-IDEAS.md` for planned modes.
+OpenCode/cron artifacts the mode needs. No Acolyte API change. See
+[#113](https://github.com/Martins6/acolyte/issues/113) for planned modes.
