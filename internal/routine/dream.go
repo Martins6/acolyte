@@ -136,6 +136,8 @@ func (dreamRoutine) Run(ctx context.Context, env Env, args map[string]any) (stri
 	}
 	validatorSessionID, err := dreamValidatorSessionID(ctx, env)
 	if err != nil {
+		_ = finishDream(env, now, len(selected), 0, false, analysisText, "",
+			"validator session error: "+truncateNote(err.Error(), 500), nil, reverted)
 		return "", err
 	}
 	writerPrompt := buildDreamWriterPrompt(env.Agent.Name, claims)

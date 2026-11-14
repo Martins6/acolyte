@@ -416,6 +416,17 @@ func TestDreamRoutinePropagatesValidatorProbeErrors(t *testing.T) {
 	if err != nil || !ok || validator.OpenCodeSessionID != "ses_stale" {
 		t.Errorf("validator session = %+v, %v, %v; want stale mapping retained after probe error", validator, ok, err)
 	}
+	var scanned, dryRun int
+	var note string
+	if err := st.DB().QueryRow(`SELECT sessions_scanned, dry_run, note FROM mem_dreams`).Scan(&scanned, &dryRun, &note); err != nil {
+		t.Fatalf("read dream audit row: %v", err)
+	}
+	if scanned != 1 || dryRun != 0 {
+		t.Errorf("dream row = scanned:%d dry:%d, want 1/0", scanned, dryRun)
+	}
+	if !strings.Contains(note, "validator session error") || !strings.Contains(note, "probe") {
+		t.Errorf("note = %s, want validator probe error", note)
+	}
 }
 
 func TestDreamRoutineDryRunRevertsWrites(t *testing.T) {
