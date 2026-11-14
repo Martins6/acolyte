@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/service"
 )
 
@@ -88,6 +89,32 @@ func TestInstallServicePrintSystemWithoutRoot(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("print output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestBuildServiceOptionsCapturesShell(t *testing.T) {
+	t.Setenv(paths.HomeEnv, t.TempDir())
+	t.Setenv("SHELL", "/bin/zsh")
+
+	opts, err := buildServiceOptions(service.ScopeUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Shell != "/bin/zsh" {
+		t.Fatalf("Shell = %q, want /bin/zsh", opts.Shell)
+	}
+}
+
+func TestBuildServiceOptionsOmitsMissingShell(t *testing.T) {
+	t.Setenv(paths.HomeEnv, t.TempDir())
+	t.Setenv("SHELL", "")
+
+	opts, err := buildServiceOptions(service.ScopeUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Shell != "" {
+		t.Fatalf("Shell = %q, want empty", opts.Shell)
 	}
 }
 

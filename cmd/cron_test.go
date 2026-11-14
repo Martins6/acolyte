@@ -172,6 +172,47 @@ func TestRunCronCreatePromptAndRoutine(t *testing.T) {
 	if routineJob.SessionID != "" {
 		t.Errorf("routine job session = %q, want empty", routineJob.SessionID)
 	}
+	var meta cronJobMeta
+	if err := json.Unmarshal([]byte(routineJob.Meta), &meta); err != nil {
+		t.Fatalf("routine meta: %v", err)
+	}
+	if meta.OnSuccess != "log" || meta.OnFailure != "log" {
+		t.Errorf("routine meta = %+v, want log routing", meta)
+	}
+}
+
+func TestRunCronCreateRoutineExplicitRouting(t *testing.T) {
+	ws := setupCronCLI(t)
+	fixedCronNow(t)
+
+	if err := runCronCreate(&bytes.Buffer{}, cronCreateOptions{
+		Title:       "dream-notify",
+		Datetime:    "@every 72h",
+		Routine:     "dream",
+		RoutineArgs: `{"days":5}`,
+		AgentName:   "valet",
+		OnSuccess:   "notify-user",
+		OnFailure:   "notify-user",
+	}); err != nil {
+		t.Fatalf("create routine: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("dream-notify")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	var meta cronJobMeta
+	if err := json.Unmarshal([]byte(job.Meta), &meta); err != nil {
+		t.Fatalf("meta: %v", err)
+	}
+	if meta.OnSuccess != "notify-user" || meta.OnFailure != "notify-user" {
+		t.Errorf("meta = %+v, want explicit notify-user routing", meta)
+	}
 }
 
 func TestRunCronCreateDryRun(t *testing.T) {

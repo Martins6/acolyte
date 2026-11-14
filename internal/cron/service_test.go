@@ -66,6 +66,38 @@ func (f fakeRoutine) Run(context.Context, routine.Env, map[string]any) (string, 
 	return f.out, nil
 }
 
+type failingRoutine struct {
+	name string
+	out  string
+	err  error
+}
+
+func (f failingRoutine) Name() string        { return f.name }
+func (f failingRoutine) Owner() string       { return "test" }
+func (f failingRoutine) Description() string { return "failing routine" }
+func (f failingRoutine) Args() []routine.ArgSpec {
+	return nil
+}
+func (f failingRoutine) Run(context.Context, routine.Env, map[string]any) (string, error) {
+	return f.out, f.err
+}
+
+type sessionProbeRoutine struct {
+	captured *routine.Env
+}
+
+func (sessionProbeRoutine) Name() string        { return "session-probe" }
+func (sessionProbeRoutine) Owner() string       { return "test" }
+func (sessionProbeRoutine) Description() string { return "captures the routine session" }
+func (sessionProbeRoutine) Args() []routine.ArgSpec {
+	return nil
+}
+func (r sessionProbeRoutine) Run(ctx context.Context, env routine.Env, _ map[string]any) (string, error) {
+	*r.captured = env
+	_, _, err := env.Inbox(ctx, "ping", nil)
+	return "", err
+}
+
 func setupCron(t *testing.T) (*registry.Registry, string, time.Time) {
 	t.Helper()
 	t.Setenv(paths.HomeEnv, t.TempDir())
@@ -101,6 +133,24 @@ func addJob(t *testing.T, ws string, job orch.CronJob) {
 	if err := st.Orch().AddCronJob(job); err != nil {
 		t.Fatalf("add job: %v", err)
 	}
+}
+
+func cronLogMessages(t *testing.T, ws string) []string {
+	t.Helper()
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	logs, err := st.Orch().ListLogs(0)
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	messages := make([]string, 0, len(logs))
+	for _, entry := range logs {
+		messages = append(messages, entry.Message)
+	}
+	return messages
 }
 
 func startTestService(t *testing.T, reg *registry.Registry, routines *routine.Registry, sink Sink, turn TurnRunner, shell string, now time.Time) *Service {
@@ -815,6 +865,139 @@ func TestRoutineJobRoutesOutput(t *testing.T) {
 	if len(sink.notified) != 1 || sink.notified[0] != "routine-output" {
 		t.Errorf("notified = %v, want routine-output", sink.notified)
 	}
+}
+
+func TestRoutineDefaultsToLogRouting(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "routine", Kind: "routine", Spec: "@every 1h", Routine: "fake",
+		RoutineArgs: `{}`, AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+	})
+
+	routines := routine.NewRegistry()
+	if err := routines.Register(fakeRoutine{name: "fake", out: "routine-output"}); err != nil {
+		t.Fatalf("register routine: %v", err)
+	}
+	sink := &fakeSink{}
+	service := startTestService(t, reg, routines, sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if len(sink.notified) != 0 {
+		t.Errorf("notified = %v, want routine output kept internal", sink.notified)
+	}
+	if len(sink.inboxed) != 0 {
+		t.Errorf("inboxed = %v, want routine output kept internal", sink.inboxed)
+	}
+	if messages := cronLogMessages(t, ws); !containsMessage(messages, "output: routine-output") {
+		t.Errorf("logs = %v, want routine output log", messages)
+	}
+}
+
+func TestRoutineFailureDefaultsToLogRouting(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "routine-fail", Kind: "routine", Spec: "@every 1h", Routine: "fail",
+		RoutineArgs: `{}`, AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+	})
+
+	routines := routine.NewRegistry()
+	if err := routines.Register(failingRoutine{name: "fail", out: "routine-boom", err: errors.New("routine failed")}); err != nil {
+		t.Fatalf("register routine: %v", err)
+	}
+	sink := &fakeSink{}
+	service := startTestService(t, reg, routines, sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if len(sink.notified) != 0 {
+		t.Errorf("notified = %v, want routine failure kept internal", sink.notified)
+	}
+	if messages := cronLogMessages(t, ws); !containsMessage(messages, "output: routine-boom") {
+		t.Errorf("logs = %v, want routine failure output log", messages)
+	}
+}
+
+func TestRoutineExplicitFailureRoutingStillNotifies(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "routine-fail", Kind: "routine", Spec: "@every 1h", Routine: "fail",
+		RoutineArgs: `{}`, AgentTarget: "valet", Enabled: true, NextRunAt: &past,
+		Meta: `{"on_success":"notify-user","on_failure":"notify-user"}`,
+	})
+
+	routines := routine.NewRegistry()
+	if err := routines.Register(failingRoutine{name: "fail", out: "routine-boom", err: errors.New("routine failed")}); err != nil {
+		t.Fatalf("register routine: %v", err)
+	}
+	sink := &fakeSink{}
+	service := startTestService(t, reg, routines, sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if len(sink.notified) != 1 || sink.notified[0] != "routine-boom" {
+		t.Errorf("notified = %v, want explicit failure routing to notify-user", sink.notified)
+	}
+}
+
+func TestRoutineIgnoresStoredSession(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	past := now.Add(-time.Minute)
+	addJob(t, ws, orch.CronJob{
+		Title: "probe", Kind: "routine", Spec: "@every 1h", Routine: "session-probe",
+		RoutineArgs: `{}`, AgentTarget: "valet", SessionID: "ses_user", Enabled: true, NextRunAt: &past,
+	})
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("probe")
+	if err != nil {
+		st.Close()
+		t.Fatalf("get job: %v", err)
+	}
+	if _, err := st.Orch().UpsertSession("cron:"+job.ID, "ses_thread", now); err != nil {
+		st.Close()
+		t.Fatalf("upsert session: %v", err)
+	}
+	st.Close()
+
+	var captured routine.Env
+	routines := routine.NewRegistry()
+	if err := routines.Register(sessionProbeRoutine{captured: &captured}); err != nil {
+		t.Fatalf("register routine: %v", err)
+	}
+	sink := &fakeSink{}
+	service := startTestService(t, reg, routines, sink, nil, "/bin/sh", now)
+	service.Tick(context.Background())
+	service.Wait()
+	service.Stop()
+
+	if captured.Thread != "cron:"+job.ID {
+		t.Errorf("thread = %q, want cron:%s", captured.Thread, job.ID)
+	}
+	if captured.SessionID != "ses_thread" {
+		t.Errorf("session = %q, want the cron thread session", captured.SessionID)
+	}
+	if len(sink.inboxInputs) != 1 || sink.inboxInputs[0] != "ses_thread" {
+		t.Errorf("synthetic turn sessions = %v, want [ses_thread]", sink.inboxInputs)
+	}
+}
+
+func containsMessage(messages []string, want string) bool {
+	for _, message := range messages {
+		if strings.Contains(message, want) {
+			return true
+		}
+	}
+	return false
 }
 
 type inboxRoutine struct{}

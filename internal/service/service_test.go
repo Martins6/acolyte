@@ -151,6 +151,43 @@ func TestRenderSystemdSystem(t *testing.T) {
 	}
 }
 
+func TestRenderEmitsShellWhenConfigured(t *testing.T) {
+	tests := []struct {
+		goos string
+		want string
+	}{
+		{"darwin", "<key>SHELL</key>\n    <string>/bin/zsh</string>"},
+		{"linux", `Environment="SHELL=/bin/zsh"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goos, func(t *testing.T) {
+			opts := testOptions(tt.goos, ScopeUser)
+			opts.Shell = "/bin/zsh"
+			plan, err := Render(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(plan.Content, tt.want) {
+				t.Errorf("unit missing %q:\n%s", tt.want, plan.Content)
+			}
+		})
+	}
+}
+
+func TestRenderOmitsShellWhenEmpty(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			plan, err := Render(testOptions(goos, ScopeUser))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(plan.Content, "SHELL") {
+				t.Errorf("unit contains SHELL without a configured shell:\n%s", plan.Content)
+			}
+		})
+	}
+}
+
 func TestRenderRejectsControlCharacters(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -160,6 +197,7 @@ func TestRenderRejectsControlCharacters(t *testing.T) {
 		{"path carriage return", func(o *Options) { o.PATH = "/usr/bin\rExecStartPre=/bin/sh -c evil" }},
 		{"binary tab", func(o *Options) { o.Binary = "/usr/local/bin/acolyte\t" }},
 		{"user newline", func(o *Options) { o.UserName = "alice\nUser=root" }},
+		{"shell newline", func(o *Options) { o.Shell = "/bin/zsh\nExecStartPre=/bin/sh -c evil" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

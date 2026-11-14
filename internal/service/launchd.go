@@ -68,6 +68,9 @@ func launchdPlist(opts Options, logPath, errPath string) string {
 	writePlistString(&b, "    ", "HOME", opts.UserHome)
 	writePlistString(&b, "    ", "ACOLYTE_HOME", opts.Home)
 	writePlistString(&b, "    ", "PATH", opts.PATH)
+	if opts.Shell != "" {
+		writePlistString(&b, "    ", "SHELL", opts.Shell)
+	}
 	b.WriteString("  </dict>\n")
 
 	writePlistString(&b, "  ", "StandardOutPath", errPath)

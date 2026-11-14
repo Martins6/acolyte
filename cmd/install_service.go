@@ -180,6 +180,7 @@ func buildServiceOptions(scope service.Scope) (service.Options, error) {
 		UserName: username,
 		UID:      uid,
 		PATH:     servicePath(userHome),
+		Shell:    os.Getenv("SHELL"),
 	}, nil
 }
 

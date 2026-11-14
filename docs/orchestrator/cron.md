@@ -15,6 +15,8 @@
 | `routine`| yes | module | `--routine <name>` + args (a registered routine) | internal / by routine |
 
 - **`$SHELL`** — shell jobs run the script with the user's `$SHELL` (e.g. zsh), never hardcoded `sh`.
+  Installed services bake `$SHELL` from the installing shell into the unit (see
+  [autostart](autostart.md)).
 - **Target** — `--agent-name <name>` **xor** `--workspace-folder <path>` (if neither, use
   `$ACOLYTE_WORKSPACE_PATH`, then infer from a valid pwd); optional `--session-id <id>` (default =
   latest session).
@@ -37,7 +39,10 @@ previous session rules afterwards. OpenCode evaluates session rules after the ag
 (last match wins), so this is an enforced tool boundary rather than prompt guidance.
 
 Routine output returns empty so cron does not double-notify; heartbeat delivery is performed by the
-routine through the communication sink.
+routine through the communication sink. Routine jobs default both success and failure routing to
+`log` (internal); an explicit `--on-success`/`--on-failure` can still choose `inbox` or
+`notify-user`. Routine jobs always run in `cron:<job ID>` and reject `--session-id`, even if a
+stored row carries one.
 
 ## CLI
 ```bash

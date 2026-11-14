@@ -70,6 +70,9 @@ func systemdUnit(opts Options) string {
 	writeSystemdEnv(&b, "HOME", opts.UserHome)
 	writeSystemdEnv(&b, "ACOLYTE_HOME", opts.Home)
 	writeSystemdEnv(&b, "PATH", opts.PATH)
+	if opts.Shell != "" {
+		writeSystemdEnv(&b, "SHELL", opts.Shell)
+	}
 
 	fmt.Fprintf(&b, "WorkingDirectory=%s\n", systemdQuote(opts.Home, false))
 	fmt.Fprintf(&b, "ExecStart=%s %s\n", systemdQuote(opts.Binary, true), systemdQuote("start", true))

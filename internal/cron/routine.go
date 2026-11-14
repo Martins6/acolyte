@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/martins6/acolyte/internal/opencode"
@@ -31,16 +32,20 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		return "", "", err
 	}
 
+	// Routines are headless and own their session. A stored session id is a
+	// legacy or misconfigured value; never route a routine turn into a user
+	// session, even if one was persisted on the row.
 	thread := cronThread(job)
-	sessionID := job.SessionID
-	if sessionID == "" {
-		session, ok, err := st.Orch().GetSessionByThread(thread)
-		if err != nil {
-			return "", "", err
-		}
-		if ok {
-			sessionID = session.OpenCodeSessionID
-		}
+	if stored := strings.TrimSpace(job.SessionID); stored != "" {
+		log.Printf("cron: routine %s ignores stored session %q; using %s", job.Title, stored, thread)
+	}
+	sessionID := ""
+	session, ok, err := st.Orch().GetSessionByThread(thread)
+	if err != nil {
+		return "", "", err
+	}
+	if ok {
+		sessionID = session.OpenCodeSessionID
 	}
 
 	jobMeta := map[string]any{}
