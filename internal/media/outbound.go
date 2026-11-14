@@ -19,8 +19,9 @@ const (
 // PrepareOutboundImage validates a single image and canonicalizes it under
 // <workspace>/media/outbound/images/. A source already in that directory is
 // accepted unchanged; any other workspace file is copied there. The function
-// rejects symlinks, paths outside the workspace, non-image extensions, and
-// oversized files.
+// rejects symlinks, paths outside the workspace, non-image extensions,
+// oversized files, and content that does not decode as a JPEG, PNG, or WebP
+// image matching the file extension.
 func PrepareOutboundImage(workspace, source string) (string, error) {
 	workspace, err := filepath.EvalSymlinks(strings.TrimSpace(workspace))
 	if err != nil {
@@ -69,6 +70,9 @@ func PrepareOutboundImage(workspace, source string) (string, error) {
 	case ".jpg", ".jpeg", ".png", ".webp":
 	default:
 		return "", fmt.Errorf("media: unsupported image type %q (use jpg, jpeg, png, or webp)", extension)
+	}
+	if err := validateImageFile(real, extension); err != nil {
+		return "", err
 	}
 
 	outboundDir := filepath.Join(workspace, "media", "outbound", "images")

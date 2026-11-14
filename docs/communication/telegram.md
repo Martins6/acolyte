@@ -31,7 +31,8 @@ workspace.
 - The adapter attempts delivery immediately and again from a 5s retry loop.
 - Outbound media is one image per message in v0: `notify-user --media <path>` validates and copies
   the file under `media/outbound/images/`, then sends it with `sendPhoto` and an optional caption.
-  JPEG, PNG, and WebP are accepted up to 10 MiB; captions are capped at 1024 characters.
+  JPEG, PNG, and WebP are accepted up to 10 MiB; captions are capped at 1024 characters. The file
+  content is sniffed and must decode as JPEG/PNG/WebP matching its extension.
 - Long text is split by UTF-16 units while preserving rune boundaries (Telegram's limit is 4096
   UTF-16 units).
 - Chunk progress is persisted, so a retry resumes after the last delivered chunk.
