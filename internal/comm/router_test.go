@@ -271,6 +271,13 @@ func TestRouterPromptIncludesMedia(t *testing.T) {
 			pathLines: 1,
 		},
 		{
+			name:      "longer path with the same prefix is not the media path",
+			text:      "back up /tmp/dir/photo.jpg.backup first",
+			media:     []string{"/tmp/dir/photo.jpg"},
+			want:      "back up /tmp/dir/photo.jpg.backup first\nFile located at: /tmp/dir/photo.jpg",
+			pathLines: 1,
+		},
+		{
 			name:      "multiple media files",
 			text:      "see these",
 			media:     []string{"/tmp/a.jpg", "/tmp/b.pdf"},

@@ -167,12 +167,12 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 }
 
 // buildInboundPrompt combines envelope text with resolved media paths. A path
-// already named in the text (for example the richer prompt built by the
-// Telegram adapter) is not repeated.
+// already present as a complete token (for example the richer prompt built by
+// the Telegram adapter) is not repeated.
 func buildInboundPrompt(text string, media []string) string {
 	text = strings.TrimSpace(text)
 	for _, path := range media {
-		if path == "" || strings.Contains(text, path) {
+		if path == "" || promptNamesPath(text, path) {
 			continue
 		}
 		if text != "" {
@@ -181,6 +181,44 @@ func buildInboundPrompt(text string, media []string) string {
 		text += "File located at: " + path
 	}
 	return text
+}
+
+// promptNamesPath reports whether text contains path as a complete path rather
+// than as part of a longer path such as /tmp/photo.jpg.backup.
+func promptNamesPath(text, path string) bool {
+	if path == "" {
+		return false
+	}
+	for offset := 0; offset+len(path) <= len(text); {
+		index := strings.Index(text[offset:], path)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		end := start + len(path)
+		if promptPathBoundary(text, start-1) && promptPathBoundary(text, end) {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+// promptPathBoundary reports whether the byte at index separates path tokens.
+// Letters, digits, path separators, and common filename characters ('.', '-',
+// '_', '~') continue a path; everything else is a boundary.
+func promptPathBoundary(text string, index int) bool {
+	if index < 0 || index >= len(text) {
+		return true
+	}
+	switch c := text[index]; {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return false
+	case c == '/', c == '.', c == '-', c == '_', c == '~':
+		return false
+	default:
+		return true
+	}
 }
 
 func (r *Router) linkInbound(st *store.Store, env envelope.Envelope, result *opencode.TurnResult) error {
