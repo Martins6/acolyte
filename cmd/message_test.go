@@ -131,9 +131,41 @@ func TestNotifyUserQueuesOutbox(t *testing.T) {
 	}
 }
 
+func TestNotifyUserQueuesTextWithSessionAttribution(t *testing.T) {
+	ws := setupCronCLI(t)
+	seedChat(t, ws)
+	fake := &fakeCLITurn{}
+	withFakeTurn(t, fake)
+	var out bytes.Buffer
+	if err := runNotifyUserWithMedia(context.Background(), &out, "hello", "valet", "", "", "  ses_x  "); err != nil {
+		t.Fatalf("runNotifyUserWithMedia() error: %v", err)
+	}
+	if !strings.Contains(out.String(), `queued for agent "valet"`) {
+		t.Errorf("output = %q", out.String())
+	}
+	if fake.userCalls != 0 || fake.synthCalls != 0 {
+		t.Errorf("turn calls = user:%d synth:%d, want none", fake.userCalls, fake.synthCalls)
+	}
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Fatalf("outbox = %+v, %v", outbox, err)
+	}
+	item := outbox[0]
+	if item.Text != "hello" || item.OpenCodeSessionID != "ses_x" || item.MediaPath != "" {
+		t.Errorf("item = %+v", item)
+	}
+}
+
 func TestNotifyUserQueuesPhoto(t *testing.T) {
 	ws := setupCronCLI(t)
 	seedChat(t, ws)
+	fake := &fakeCLITurn{}
+	withFakeTurn(t, fake)
 	source := filepath.Join(ws, "chart.png")
 	var imageData bytes.Buffer
 	if err := png.Encode(&imageData, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
@@ -148,6 +180,9 @@ func TestNotifyUserQueuesPhoto(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `Photo queued for agent "valet"`) {
 		t.Errorf("output = %q", out.String())
+	}
+	if fake.userCalls != 0 || fake.synthCalls != 0 {
+		t.Errorf("turn calls = user:%d synth:%d, want none", fake.userCalls, fake.synthCalls)
 	}
 	st, err := store.Open(ws)
 	if err != nil {

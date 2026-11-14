@@ -48,6 +48,7 @@ func runNotifyUser(ctx context.Context, w io.Writer, text, agentName, workspace 
 func runNotifyUserWithMedia(ctx context.Context, w io.Writer, text, agentName, workspace, mediaPath, sessionID string) error {
 	text = strings.TrimSpace(text)
 	mediaPath = strings.TrimSpace(mediaPath)
+	sessionID = strings.TrimSpace(sessionID)
 	if text == "" && mediaPath == "" {
 		return fmt.Errorf("message or --media is required")
 	}
@@ -69,7 +70,7 @@ func runNotifyUserWithMedia(ctx context.Context, w io.Writer, text, agentName, w
 		fmt.Fprintf(w, "Photo queued for agent %q.\n", agent.Name)
 		return nil
 	}
-	if err := sink.NotifyUser(ctx, agent, text); err != nil {
+	if err := sink.NotifyUserAttributed(ctx, agent, text, sessionID); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Notification queued for agent %q.\n", agent.Name)
