@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -55,15 +56,29 @@ var (
 // (4xx) and handler errors stop the subscription instead of retrying forever.
 // An optional types filter is sent as repeated `types` query parameters.
 func (c *Client) SubscribeEvents(ctx context.Context, types []string, handle EventHandler) error {
+	return c.subscribeEvents(ctx, types, handle, nil)
+}
+
+// subscribeEvents is SubscribeEvents with an optional readiness callback. ready
+// runs once, after the first response establishes the stream and before any
+// event is scanned, so a caller can avoid missing events emitted immediately
+// after the connection is accepted. Reconnects do not signal ready again.
+func (c *Client) subscribeEvents(ctx context.Context, types []string, handle EventHandler, ready func()) error {
 	if handle == nil {
 		return fmt.Errorf("opencode: event handler is required")
+	}
+	var readyOnce sync.Once
+	signalReady := func() {
+		if ready != nil {
+			readyOnce.Do(ready)
+		}
 	}
 	delay := eventReconnectDelay
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := c.subscribeEventsOnce(ctx, types, handle)
+		err := c.subscribeEventsOnce(ctx, types, handle, signalReady)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -89,7 +104,7 @@ func (c *Client) SubscribeEvents(ctx context.Context, types []string, handle Eve
 	}
 }
 
-func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle EventHandler) error {
+func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle EventHandler, ready func()) error {
 	endpoint := c.baseURL + "/api/event"
 	if len(types) > 0 {
 		values := url.Values{}
@@ -121,6 +136,9 @@ func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
+	}
+	if ready != nil {
+		ready()
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
