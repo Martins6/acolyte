@@ -61,4 +61,4 @@ Envelope bus (in/out), the shared store pool, the cron service (for scheduled se
 | Channel | Doc | Status |
 | ------- | --- | ------ |
 | Telegram | [`telegram.md`](telegram.md) | v0 |
-| agent-mail / agent-im / agent-post | — | deferred (`FUTURE-IDEAS.md`) |
+| agent-mail / agent-im / agent-post | — | deferred ([#113](https://github.com/Martins6/acolyte/issues/113)) |

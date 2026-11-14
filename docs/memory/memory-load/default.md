@@ -29,4 +29,4 @@ toggles exactly that entry in place (`{"mode":"default"}` adds it, `null` remove
 
 ## Notes
 This is the baseline loader. Other planned modes (`compact`, `rolling`, `role-sliced`) change *what*
-is surfaced or *how much* — see `FUTURE-IDEAS.md`.
+is surfaced or *how much* — see [#113](https://github.com/Martins6/acolyte/issues/113).

@@ -18,4 +18,4 @@ both access paths natively.
 
 ## Notes
 Extra access modes (`recall`, `vector`, `graph`) add tools on top of the native baseline (query past
-sessions, RAG, knowledge-graph). See `FUTURE-IDEAS.md`.
+sessions, RAG, knowledge-graph). See [#113](https://github.com/Martins6/acolyte/issues/113).

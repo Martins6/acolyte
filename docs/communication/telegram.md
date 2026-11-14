@@ -58,8 +58,8 @@ finishing. Merging the two would require suppressing the tool-side send and hold
 the turn ends.
 
 To merge later, extend `TurnResult` with images extracted from `send_image` tool calls and send one
-photo whose caption is the final reply. See `FUTURE-IDEAS.md` → Communication → *Merged image +
-final text*.
+photo whose caption is the final reply. See [#113](https://github.com/Martins6/acolyte/issues/113)
+→ Communication → *Merged image + final text*.
 
 ## State (`.acolyte.sqlite.db`, prefix `comm_tg_`)
 
