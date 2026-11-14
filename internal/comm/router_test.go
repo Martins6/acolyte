@@ -278,6 +278,27 @@ func TestRouterPromptIncludesMedia(t *testing.T) {
 			pathLines: 1,
 		},
 		{
+			name:      "sibling path with a plus sign is not the media path",
+			text:      "back up /tmp/photo.jpg+backup first",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "back up /tmp/photo.jpg+backup first\nFile located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "unicode sibling path is not the media path",
+			text:      "back up /tmp/photo.jpgфото first",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "back up /tmp/photo.jpgфото first\nFile located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "prose path mention gets a media marker",
+			text:      "please review /tmp/photo.jpg before sending",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "please review /tmp/photo.jpg before sending\nFile located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
 			name:      "multiple media files",
 			text:      "see these",
 			media:     []string{"/tmp/a.jpg", "/tmp/b.pdf"},
