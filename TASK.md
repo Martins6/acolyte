@@ -20,8 +20,9 @@ Run order:
    latitude applies **only while `dev` has no required status checks**; if required checks are
    enabled, stop on red and never use `--admin` (see
    [`docs/orchestrator/merge-policy.md`](docs/orchestrator/merge-policy.md)).
-5. If one of the two checks never appears, wait at most 10 minutes, record that in the PR, and merge
-   anyway.
+5. If one of the two checks never appears, wait at most 10 minutes and record that in the PR. This
+   merge-anyway latitude applies **only while `dev` has no required status checks**; if required
+   checks are enabled, stop, record the missing required check, and report instead of merging.
 6. At the end, append a `# Next Steps` section at the bottom of this file with comments,
    follow-ups, anything suspicious seen during the run, the merged PR number(s), and the CI result
    for each task.

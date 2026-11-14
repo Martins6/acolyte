@@ -43,11 +43,14 @@ workspace.
 
 ### Delivery semantics
 
-v0 keeps image delivery and the turn's reply as **two messages**:
+v0 never merges the photo and the turn's reply into one Telegram message:
 
 - `send_image` / `acolyte notify-user --media` queues the photo immediately when the tool or
   command runs, sending the explicit caption when one is provided.
-- The agent's final assistant text is delivered as a separate message.
+- Telegram turns (daemon router) and `acolyte inbox` turns (through `OutboxSink.Inbox`) deliver the
+  agent's final assistant text as a separate Telegram message. `acolyte inbox` also prints the
+  reply to stdout.
+- `acolyte run` prints the final reply to stdout only; the photo is still sent immediately.
 
 This is deliberately immediate and deterministic: it works from the CLI runner, routines, and any
 harness that does not go through the router's reply path, and it does not depend on the turn
