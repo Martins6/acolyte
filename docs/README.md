@@ -192,7 +192,8 @@ docs/
     ├── cron.md                     ← shared cron service (shell + headless agent jobs)
     ├── config.md                   ← `acolyte config` runtime capability updates
     ├── heartbeat.md                ← the special always-on cron
-    └── autostart.md                ← running always-on (macOS/Linux)
+    ├── autostart.md                ← running always-on (macOS/Linux)
+    └── merge-policy.md             ← merge-red policy + stop-on-red trigger
 ```
 
 **A module `README.md`** covers intent, sub-components/args, and how it plugs into OpenCode. **A mode

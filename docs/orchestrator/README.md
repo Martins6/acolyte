@@ -37,3 +37,4 @@ The daemon runs at boot via `launchd` (macOS) or `systemd` (Linux) — see
 - [`cron.md`](cron.md) — the shared cron service.
 - [`config.md`](config.md) — `acolyte config` runtime capability updates.
 - [`autostart.md`](autostart.md) — running always-on.
+- [`merge-policy.md`](merge-policy.md) — merge-red latitude, stop-on-red trigger, no-`--admin` rule.
