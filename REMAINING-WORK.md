@@ -37,10 +37,10 @@ infrastructure flake, not a diff/model/workflow-logic failure.
 ## 3. Image + final text delivery (PR #90)
 
 **Landed.** The v0 decision is documented: `send_image` and `notify-user --media` deliver the photo
-immediately (with their explicit caption). For turns routed through the daemon's inbound router the
-agent's final text is a separate Telegram message; headless callers such as `acolyte run` print it
-to stdout. The tradeoff and the merge path are recorded in `docs/communication/telegram.md` and
-`FUTURE-IDEAS.md`.
+immediately (with their explicit caption) and never merge it with the reply. Telegram turns and
+`acolyte inbox` turns deliver the final text as a separate Telegram message (`inbox` also prints
+it); `acolyte run` prints the reply to stdout only. The tradeoff and the merge path are recorded in
+`docs/communication/telegram.md` and `FUTURE-IDEAS.md`.
 
 **Next steps.**
 - **One photo + reply caption, if wanted.** Extend `TurnResult` with an `Images` field populated from
