@@ -351,6 +351,277 @@ func setOpencodeString(raw, key, value string) (string, error) {
 	return insertTopLevelString(raw, key, string(quoted))
 }
 
+// setOpencodeInstruction adds or removes exactly one string entry in the
+// top-level "instructions" array with a targeted text edit. Comments,
+// formatting, unrelated keys, and every other entry survive. A duplicate
+// "instructions" key or a non-array value is rejected because either would
+// make the edit ambiguous.
+func setOpencodeInstruction(raw, instruction string, present bool) (string, error) {
+	quoted, err := json.Marshal(instruction)
+	if err != nil {
+		return "", fmt.Errorf("workspace: quote instructions value: %w", err)
+	}
+	for {
+		masked, err := maskJSONC(raw)
+		if err != nil {
+			return "", fmt.Errorf("workspace: %s: %w", opencodeConfigName, err)
+		}
+		valueStart, found, err := topLevelValueStart(masked, "instructions")
+		if err != nil {
+			return "", fmt.Errorf("workspace: %s: %w", opencodeConfigName, err)
+		}
+		if !found {
+			if !present {
+				return raw, nil
+			}
+			return insertTopLevelValue(raw, "instructions", "["+string(quoted)+"]")
+		}
+		if masked[valueStart] != '[' {
+			return "", fmt.Errorf("workspace: %s: %q exists but is not an array", opencodeConfigName, "instructions")
+		}
+		valueEnd, err := jsonValueEnd(masked, valueStart)
+		if err != nil {
+			return "", fmt.Errorf("workspace: %s: instructions: %w", opencodeConfigName, err)
+		}
+		spans := instructionSpans(masked, valueStart, valueEnd, instruction)
+		if len(spans) == 0 {
+			if !present {
+				return raw, nil
+			}
+			return insertInstruction(raw, masked, valueStart, valueEnd, string(quoted)), nil
+		}
+		if present {
+			return raw, nil
+		}
+		// Remove one occurrence at a time so the remaining spans and comma
+		// boundaries stay valid after each splice.
+		raw = removeInstruction(raw, masked, spans[0])
+	}
+}
+
+// byteSpan is a half-open byte range in a JSONC document.
+type byteSpan struct {
+	start int
+	end   int
+}
+
+// topLevelValueStart returns the index of the value of a unique top-level key
+// in a masked document. found is false when the key is absent.
+func topLevelValueStart(masked, key string) (int, bool, error) {
+	start := -1
+	for _, loc := range topLevelKeyPattern.FindAllStringSubmatchIndex(masked, -1) {
+		if jsoncDepth(masked, loc[0]) != 1 {
+			continue
+		}
+		decoded, err := unquoteJSONKey(masked[loc[2]:loc[3]])
+		if err != nil || decoded != key {
+			continue
+		}
+		if start >= 0 {
+			return 0, false, fmt.Errorf("duplicate top-level key %q (ambiguous document)", key)
+		}
+		start = loc[1]
+		for start < len(masked) && isJSONCSpace(masked[start]) {
+			start++
+		}
+	}
+	if start < 0 {
+		return 0, false, nil
+	}
+	if start >= len(masked) {
+		return 0, false, fmt.Errorf("top-level key %q has no value", key)
+	}
+	return start, true, nil
+}
+
+// jsonValueEnd returns the index just past the JSON value starting at start.
+func jsonValueEnd(masked string, start int) (int, error) {
+	if start >= len(masked) {
+		return 0, fmt.Errorf("missing value")
+	}
+	if masked[start] == '"' {
+		end, ok := stringEnd(masked, start)
+		if !ok {
+			return 0, fmt.Errorf("unterminated string")
+		}
+		return end, nil
+	}
+	if masked[start] != '[' && masked[start] != '{' {
+		for i := start; i < len(masked); i++ {
+			if masked[i] == ',' || masked[i] == '}' || masked[i] == ']' || isJSONCSpace(masked[i]) {
+				return i, nil
+			}
+		}
+		return len(masked), nil
+	}
+	depth := 0
+	for i := start; i < len(masked); {
+		switch masked[i] {
+		case '"':
+			end, ok := stringEnd(masked, i)
+			if !ok {
+				return 0, fmt.Errorf("unterminated string")
+			}
+			i = end
+		case '[', '{':
+			depth++
+			i++
+		case ']', '}':
+			depth--
+			i++
+			if depth == 0 {
+				return i, nil
+			}
+		default:
+			i++
+		}
+	}
+	return 0, fmt.Errorf("unbalanced value starting at byte %d", start)
+}
+
+// instructionSpans returns the array-element string spans whose decoded value
+// equals instruction. Strings nested inside objects or arrays are ignored.
+func instructionSpans(masked string, open, close int, instruction string) []byteSpan {
+	var spans []byteSpan
+	depth := 1 // inside the top-level array
+	for i := open + 1; i < close; {
+		switch masked[i] {
+		case '"':
+			end, ok := stringEnd(masked, i)
+			if !ok {
+				return spans
+			}
+			if depth == 1 {
+				var decoded string
+				if json.Unmarshal([]byte(masked[i:end]), &decoded) == nil && decoded == instruction {
+					spans = append(spans, byteSpan{start: i, end: end})
+				}
+			}
+			i = end
+		case '[', '{':
+			depth++
+			i++
+		case ']', '}':
+			depth--
+			i++
+		default:
+			i++
+		}
+	}
+	return spans
+}
+
+// insertInstruction appends one string element to the array at open..close,
+// preserving the surrounding whitespace, comments, and formatting.
+func insertInstruction(raw, masked string, open, close int, quoted string) string {
+	indent := lineIndent(raw, open)
+	elementIndent := indent + "  "
+	bodyEnd := close - 1 // index of the closing ']'
+	last := lastStructural(masked[:bodyEnd])
+	if last <= open {
+		// Empty array: keep a single-line array inline and expand a
+		// multi-line one.
+		if strings.Contains(raw[open+1:bodyEnd], "\n") {
+			return raw[:open+1] + "\n" + elementIndent + quoted + raw[open+1:]
+		}
+		return raw[:open+1] + quoted + raw[open+1:]
+	}
+	separator := raw[last+1 : bodyEnd]
+	if !strings.Contains(separator, "\n") {
+		if token, index := nextJSONCToken(raw, last+1); token == ',' && index < bodyEnd {
+			return raw[:index+1] + " " + quoted + raw[index+1:]
+		}
+		return raw[:last+1] + ", " + quoted + raw[bodyEnd:]
+	}
+	comma := ","
+	if token, index := nextJSONCToken(raw, last+1); token == ',' && index < bodyEnd {
+		comma = ""
+	}
+	if !strings.HasSuffix(separator, "\n") {
+		separator += "\n"
+	}
+	return raw[:last+1] + comma + separator + elementIndent + quoted + "\n" + indent + raw[bodyEnd:]
+}
+
+// removeInstruction deletes one array element plus one adjacent comma,
+// leaving comments and every other entry in place. When the entry sits alone
+// on its line, the whole line is removed so the surviving array keeps a clean
+// shape.
+func removeInstruction(raw, masked string, span byteSpan) string {
+	prev := lastStructural(masked[:span.start])
+	commaBefore := prev >= 0 && masked[prev] == ','
+	nextToken, nextIndex := nextJSONCToken(raw, span.end)
+	commaAfter := nextToken == ','
+
+	lineStart := strings.LastIndexByte(raw[:span.start], '\n') + 1
+	prefixClean := strings.Trim(raw[lineStart:span.start], " \t\r") == ""
+	lineEnd := len(raw)
+	if index := strings.IndexByte(raw[span.end:], '\n'); index >= 0 {
+		lineEnd = span.end + index + 1
+	}
+	tailClean := false
+	switch {
+	case commaAfter && nextIndex < lineEnd:
+		// The comma is removed with the line; anything else (a comment,
+		// the closing bracket) keeps the line intact.
+		tailClean = strings.Trim(raw[span.end:nextIndex], " \t\r") == "" &&
+			strings.Trim(raw[nextIndex+1:lineEnd], " \t\r\n") == ""
+	case commaAfter:
+		tailClean = false
+	default:
+		tailClean = strings.Trim(raw[span.end:lineEnd], " \t\r\n") == ""
+	}
+	if prefixClean && tailClean {
+		if commaBefore {
+			return raw[:prev] + raw[prev+1:lineStart] + raw[lineEnd:]
+		}
+		return raw[:lineStart] + raw[lineEnd:]
+	}
+
+	if commaBefore {
+		return raw[:prev] + raw[prev+1:span.start] + raw[span.end:]
+	}
+	if commaAfter {
+		return raw[:span.start] + raw[span.end:nextIndex] + raw[nextIndex+1:]
+	}
+	return raw[:span.start] + raw[span.end:]
+}
+
+// nextJSONCToken returns the first byte at or after pos that is neither JSON
+// whitespace nor inside a comment, plus its index. raw must already be valid
+// JSONC.
+func nextJSONCToken(raw string, pos int) (byte, int) {
+	for pos < len(raw) {
+		switch {
+		case isJSONCSpace(raw[pos]):
+			pos++
+		case raw[pos] == '/' && pos+1 < len(raw) && raw[pos+1] == '/':
+			for pos < len(raw) && raw[pos] != '\n' {
+				pos++
+			}
+		case raw[pos] == '/' && pos+1 < len(raw) && raw[pos+1] == '*':
+			pos += 2
+			for pos+1 < len(raw) && !(raw[pos] == '*' && raw[pos+1] == '/') {
+				pos++
+			}
+			if pos+1 < len(raw) {
+				pos += 2
+			}
+		default:
+			return raw[pos], pos
+		}
+	}
+	return 0, pos
+}
+
+// lineIndent returns the leading whitespace of the line containing pos.
+func lineIndent(raw string, pos int) string {
+	start := strings.LastIndexByte(raw[:pos], '\n') + 1
+	line := raw[start:pos]
+	trimmed := strings.TrimLeft(line, " \t")
+	return line[:len(line)-len(trimmed)]
+}
+
 // countTopLevelKey counts depth-1 occurrences of a key in a masked document.
 // Occurrences are compared by decoded value, so a unicode-escaped spelling
 // of the key counts the same as the plain one.
@@ -369,10 +640,15 @@ func countTopLevelKey(masked, key string) int {
 	return count
 }
 
-// insertTopLevelString appends "<key>": <value> to the root object, adding a
-// comma after the last structural entry when one is missing. Bytes between
-// the last entry and the closing brace (whitespace and comments) are kept.
+// insertTopLevelString appends "<key>": <value> to the root object.
 func insertTopLevelString(raw, key, quotedValue string) (string, error) {
+	return insertTopLevelValue(raw, key, quotedValue)
+}
+
+// insertTopLevelValue appends "<key>": <rawValue> to the root object, adding a
+// comma after the last structural entry when one is missing. Bytes between the
+// last entry and the closing brace (whitespace and comments) are kept.
+func insertTopLevelValue(raw, key, rawValue string) (string, error) {
 	masked, err := maskJSONC(raw)
 	if err != nil {
 		return "", fmt.Errorf("workspace: %s: %w", opencodeConfigName, err)
@@ -385,7 +661,7 @@ func insertTopLevelString(raw, key, quotedValue string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	entry := string(quotedKey) + ": " + quotedValue
+	entry := string(quotedKey) + ": " + rawValue
 	indent := trimJSONCIndent(masked)
 
 	prev := lastStructural(masked[:last])
@@ -398,7 +674,9 @@ func insertTopLevelString(raw, key, quotedValue string) (string, error) {
 		separator += "\n"
 	}
 	comma := ","
-	if masked[prev] == ',' {
+	// JSONC allows a trailing comma before the closing brace; reuse it
+	// instead of producing a double comma.
+	if token, _ := nextJSONCToken(raw, prev+1); token == ',' {
 		comma = ""
 	}
 	return raw[:prev+1] + comma + separator + indent + entry + "\n" + raw[last:], nil

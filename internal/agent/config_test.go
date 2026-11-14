@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -57,6 +58,52 @@ func TestParseConfigFull(t *testing.T) {
 	}
 	if cfg.Schedule.HeartbeatMinutes != 60 {
 		t.Errorf("heartbeat = %d, want 60", cfg.Schedule.HeartbeatMinutes)
+	}
+}
+
+func TestParseConfigMemoryLoadPresence(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "omitted keeps default", raw: `{}`, want: true},
+		{name: "explicit default", raw: `{"memory-load": {"mode": "default"}}`, want: true},
+		{name: "empty mode defaults", raw: `{"memory-load": {}}`, want: true},
+		{name: "explicit null is native", raw: `{"memory-load": null}`, want: false},
+		// encoding/json matches struct fields case-insensitively, so the
+		// presence check must fold case with it.
+		{name: "case variant explicit null", raw: `{"Memory-Load": null}`, want: false},
+		{name: "upper case default", raw: `{"MEMORY-LOAD": {"mode": "default"}}`, want: true},
+		{name: "mixed case explicit null", raw: `{"mEmOrY-lOaD": null}`, want: false},
+		// Case variants that differ only by spelling are treated as present
+		// (safe); the last decoded value still wins.
+		{name: "case variant duplicate is present", raw: `{"memory-load": null, "Memory-Load": null}`, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseConfig(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseConfig() error: %v", err)
+			}
+			if got := cfg.memoryLoadEnabled(); got != tc.want {
+				t.Errorf("memoryLoadEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseConfigPresenceFlagDoesNotMarshal(t *testing.T) {
+	cfg, err := ParseConfig(`{"memory-load": null}`)
+	if err != nil {
+		t.Fatalf("ParseConfig() error: %v", err)
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+	if strings.Contains(string(raw), "memoryLoadSet") {
+		t.Errorf("presence flag leaked into JSON: %s", raw)
 	}
 }
 

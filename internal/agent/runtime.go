@@ -12,6 +12,7 @@ import (
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
 	"github.com/martins6/acolyte/internal/store/orch"
+	"github.com/martins6/acolyte/internal/workspace"
 )
 
 // SupportedSetKeys lists every key `acolyte config <agent> set` accepts, in
@@ -393,6 +394,12 @@ func planSet(st *store.Store, a registry.Agent, key, value string, current Confi
 		switch key {
 		case "memory-load":
 			res.Before, res.After, proposed.MemoryLoad = current.MemoryLoad, desired, desired
+			// memory-load is the only memory key wired into opencode.jsonc:
+			// default surfaces the persona bundle, null leaves the native
+			// baseline. memory-access/export stay setting-only.
+			if err := planOpencodePersona(res, a.Workspace, desired != nil); err != nil {
+				return nil, err
+			}
 		case "memory-access":
 			res.Before, res.After, proposed.MemoryAccess = current.MemoryAccess, desired, desired
 		case "memory-export":
@@ -442,6 +449,26 @@ func planOpencodeString(res *SetResult, workspace, key, value string) error {
 	if err != nil {
 		return err
 	}
+	return planOpencodeUpdate(res, workspace, raw, updated)
+}
+
+// planOpencodePersona stages adding/removing the persona instructions glob
+// (.acolyte/*.md) in opencode.jsonc plus its diff.
+func planOpencodePersona(res *SetResult, ws string, present bool) error {
+	raw, err := readOpencodeConfig(ws)
+	if err != nil {
+		return err
+	}
+	updated, err := setOpencodeInstruction(raw, workspace.PersonaInstruction, present)
+	if err != nil {
+		return err
+	}
+	return planOpencodeUpdate(res, ws, raw, updated)
+}
+
+// planOpencodeUpdate validates and stages an already-planned opencode.jsonc
+// edit. An unchanged document stages nothing.
+func planOpencodeUpdate(res *SetResult, workspace, raw, updated string) error {
 	if updated == raw {
 		return nil
 	}
@@ -572,14 +599,36 @@ func sameCapabilityJob(existing, desired orch.CronJob) bool {
 }
 
 func (r *SetResult) apply(st *store.Store, a registry.Agent) error {
+	wroteOpencode := false
 	if r.opencodeAfter != "" && r.opencodeAfter != r.opencodeBefore {
 		if err := writeOpencodeConfig(a.Workspace, r.opencodeAfter); err != nil {
 			return err
 		}
+		wroteOpencode = true
 	}
+	if err := r.applyMutations(st, a); err != nil {
+		if !wroteOpencode {
+			return err
+		}
+		// opencode.jsonc is the durable wiring for the same capability the
+		// store/jobs describe. If a later mutation fails, restore the file so
+		// `get` can never disagree with the actual instructions.
+		if restoreErr := restoreOpencodeConfig(a.Workspace, r.opencodeBefore); restoreErr != nil {
+			return fmt.Errorf("%w (restoring the previous %s failed: %v)", err, opencodeConfigName, restoreErr)
+		}
+		return fmt.Errorf("%w (the previous %s was restored)", err, opencodeConfigName)
+	}
+	return nil
+}
+
+// applyMutations applies the planned job, setting, and registry writes after
+// the opencode.jsonc edit has been staged. The caller rolls that edit back if
+// any of these fail.
+func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) error {
 	// Job mutations run before settings and identity writes: if a user job
 	// grabbed the capability title between plan and apply, the conditional
-	// mutation refuses and nothing else has been written yet.
+	// mutation refuses before any setting changes, and the caller restores
+	// the already-written opencode.jsonc.
 	orchStore := st.Orch()
 	for _, change := range r.Jobs {
 		capability, ok := capabilityByTitle(change.Title)

@@ -11,6 +11,7 @@ import (
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
+	"github.com/martins6/acolyte/internal/workspace"
 )
 
 func setup(t *testing.T) (string, string) {
@@ -136,6 +137,74 @@ func TestCreateFresh(t *testing.T) {
 	channels, ok, err := st.CommTG().GetSetting("channels")
 	if err != nil || !ok || channels != `["telegram"]` {
 		t.Errorf("channels = %q, %v, %v; want [\"telegram\"]", channels, ok, err)
+	}
+}
+
+func TestCreateMemoryLoadInstructions(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		wantPersona bool
+		wantSetting bool
+	}{
+		{name: "omitted keeps default", raw: `{}`, wantPersona: true},
+		{name: "explicit default", raw: `{"memory-load": {"mode": "default"}}`, wantPersona: true, wantSetting: true},
+		{name: "empty mode defaults", raw: `{"memory-load": {}}`, wantPersona: true, wantSetting: true},
+		{name: "explicit null is native baseline", raw: `{"memory-load": null}`, wantPersona: false},
+		// encoding/json accepts case-insensitive field spellings; an explicit
+		// null must be honored however the key is cased.
+		{name: "case variant null is native baseline", raw: `{"Memory-Load": null}`, wantPersona: false},
+		{name: "upper case default", raw: `{"MEMORY-LOAD": {"mode": "default"}}`, wantPersona: true, wantSetting: true},
+		{name: "unrelated case variant keeps memory-load default", raw: `{"MEMORY-ACCESS": null}`, wantPersona: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := createRuntimeAgent(t, tc.raw)
+			instructions := instructionsOf(t, ws)
+			hasPersona := false
+			for _, entry := range instructions {
+				if entry == workspace.PersonaInstruction {
+					hasPersona = true
+				}
+			}
+			if hasPersona != tc.wantPersona {
+				t.Errorf("instructions = %v, want persona %v", instructions, tc.wantPersona)
+			}
+
+			st := openRuntimeStore(t, ws)
+			_, ok, err := st.Orch().GetSetting("memory.load")
+			if err != nil {
+				t.Fatalf("GetSetting(memory.load): %v", err)
+			}
+			if ok != tc.wantSetting {
+				t.Errorf("memory.load setting present = %v, want %v", ok, tc.wantSetting)
+			}
+		})
+	}
+}
+
+func TestCreateAdoptDoesNotRewriteOpencode(t *testing.T) {
+	_, ws := setup(t)
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    createTestConfig(t, `{"memory-load": null}`),
+	}); err != nil {
+		t.Fatalf("Create(first) error: %v", err)
+	}
+	original := readOpencode(t, ws)
+
+	// The adoption config requests the default persona instructions, but an
+	// existing opencode.jsonc must never be rewritten by `acolyte new`.
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    createTestConfig(t, `{}`),
+	}); err != nil {
+		t.Fatalf("Create(second) error: %v", err)
+	}
+	if updated := readOpencode(t, ws); updated != original {
+		t.Errorf("adopt rewrote opencode.jsonc:\n%s", updated)
 	}
 }
 

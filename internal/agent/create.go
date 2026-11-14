@@ -92,10 +92,11 @@ func Create(ctx context.Context, opts CreateOptions) (*CreateResult, error) {
 	}
 
 	if err := workspace.ScaffoldAgent(ws, workspace.AgentOptions{
-		Name:        name,
-		Description: opts.Config.Description,
-		Agent:       opts.Config.Engine.Agent,
-		Model:       opts.Config.Engine.Model,
+		Name:                name,
+		Description:         opts.Config.Description,
+		Agent:               opts.Config.Engine.Agent,
+		Model:               opts.Config.Engine.Model,
+		PersonaInstructions: opts.Config.memoryLoadEnabled(),
 	}); err != nil {
 		return nil, err
 	}

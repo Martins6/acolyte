@@ -21,6 +21,12 @@ type Config struct {
 	MemoryExport  *MemoryConfig       `json:"memory-export"`
 	Communication CommunicationConfig `json:"communication"`
 	Schedule      ScheduleConfig      `json:"schedule"`
+
+	// memoryLoadSet records whether the raw config carried a "memory-load"
+	// key. A nil pointer alone cannot distinguish an omitted key (the v0
+	// default, which wires the persona instructions) from an explicit null
+	// (the native baseline, which must not). The flag never marshals.
+	memoryLoadSet bool
 }
 
 // EngineConfig wires the OpenCode engine.
@@ -79,10 +85,37 @@ func ParseConfig(raw string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("config: parse trailing data: %w", err)
 	}
+	// The struct decode cannot tell an omitted key from an explicit null, so
+	// check the raw object for the key's presence before defaults apply.
+	// encoding/json matches struct fields case-insensitively, so the
+	// presence check must fold case too: {"Memory-Load": null} decodes to a
+	// nil MemoryLoad and must still count as an explicit null.
+	var rawKeys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &rawKeys); err != nil {
+		return Config{}, fmt.Errorf("config: parse: %w", err)
+	}
+	for key := range rawKeys {
+		if strings.EqualFold(key, "memory-load") {
+			// Multiple spellings that differ only by case count as present;
+			// the decoded value (last key wins) still decides null vs. mode.
+			config.memoryLoadSet = true
+			break
+		}
+	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+// memoryLoadEnabled reports whether memory-load should wire the persona
+// instructions into opencode.jsonc. Omitting memory-load keeps the v0 default
+// (mode "default"); an explicit null selects the native baseline.
+func (c Config) memoryLoadEnabled() bool {
+	if !c.memoryLoadSet {
+		return true
+	}
+	return c.MemoryLoad != nil
 }
 
 // Validate normalizes defaults and rejects unsupported v0 modes/arguments.
