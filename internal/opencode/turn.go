@@ -11,9 +11,6 @@ import (
 	"github.com/martins6/acolyte/internal/lock"
 )
 
-// turnTimeout matches the retired CLI runner's 5-minute cap.
-const turnTimeout = 5 * time.Minute
-
 // ErrTurnTruncated reports that a turn's marker was delivered but lies older
 // than the newest collection window, so its reply cannot be bounded reliably.
 var ErrTurnTruncated = errors.New("opencode: turn output exceeded the collection window")
@@ -28,6 +25,9 @@ type TurnConfig struct {
 	Agent     string
 	Provider  string
 	Model     string
+	// Timeout, when positive, bounds the turn with an additional deadline.
+	// Zero leaves the caller's context as the only deadline.
+	Timeout time.Duration
 	// Permissions, when non-nil, temporarily replaces the session-scoped
 	// permission rules for this turn and restores the previous rules
 	// afterwards. Routine turns use it to confine untrusted model output to
@@ -67,8 +67,11 @@ type TurnResult struct {
 // admit a prompt, wait for the agent loop to go idle, and collect the reply.
 // An empty sessionID creates a fresh session rooted at cfg.Workspace.
 func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg TurnConfig) (result *TurnResult, err error) {
-	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
-	defer cancel()
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
 	sessionID = strings.TrimSpace(sessionID)
 
 	var held *lock.Lock
@@ -131,8 +134,11 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 // RunSyntheticTurn admits an external event and collects the agent's reaction.
 // An empty sessionID creates a fresh session rooted at cfg.Workspace.
 func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (result *TurnResult, err error) {
-	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
-	defer cancel()
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
 	sessionID = strings.TrimSpace(sessionID)
 
 	var held *lock.Lock

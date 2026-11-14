@@ -181,7 +181,8 @@ The first run creates a session and maps it to the `cli:<agent>` thread.
 `--continue` reuses that session; `--session-id` selects an existing session
 that is already mapped to the agent. Use `acolyte inspect --session-id <id>` to
 read the transcript, or `acolyte attach --agent-name <agent>` to open the latest
-session in the TUI.
+session in the TUI. Pass `--timeout 10m` to bound a turn; without it there is no
+built-in cap, so the turn runs until it finishes or its context is canceled.
 
 ### 8. Export a Memory Trace
 

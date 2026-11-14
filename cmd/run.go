@@ -54,7 +54,7 @@ func init() {
 	runCmd.Flags().BoolVarP(&runContinue, "continue", "c", false, "continue the agent's last CLI session")
 	runCmd.Flags().BoolVar(&runJSON, "json", false, "print one JSON object to stdout")
 	runCmd.Flags().BoolVar(&runVerbose, "verbose", false, "print turn diagnostics to stderr")
-	runCmd.Flags().DurationVar(&runTimeout, "timeout", 5*time.Minute, "maximum turn duration (the built-in cap is 5m)")
+	runCmd.Flags().DurationVar(&runTimeout, "timeout", 0, "maximum turn duration (0 means no limit)")
 }
 
 // runOptions is one `acolyte run` invocation. It is separate from the cobra
@@ -84,8 +84,6 @@ type runResult struct {
 	DurationMS int64    `json:"duration_ms"`
 }
 
-const runTurnCap = 5 * time.Minute
-
 func runRun(ctx context.Context, stdout, stderr io.Writer, text string, opts runOptions) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -95,14 +93,8 @@ func runRun(ctx context.Context, stdout, stderr io.Writer, text string, opts run
 	if opts.SessionID != "" && opts.Continue {
 		return fmt.Errorf("use --session-id or --continue, not both")
 	}
-	if opts.Timeout == 0 {
-		opts.Timeout = runTurnCap
-	}
 	if opts.Timeout < 0 {
-		return fmt.Errorf("--timeout must be greater than zero")
-	}
-	if opts.Timeout > runTurnCap {
-		return fmt.Errorf("--timeout cannot exceed %s", runTurnCap)
+		return fmt.Errorf("--timeout must not be negative")
 	}
 
 	agent, err := resolveTargetAgent(opts.AgentName, opts.Workspace)
@@ -134,11 +126,11 @@ func runRun(ctx context.Context, stdout, stderr io.Writer, text string, opts run
 		return fmt.Errorf("opencode service unavailable: %w", err)
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
-
 	start := time.Now()
-	result, turnErr := client.RunUserTurn(runCtx, sessionID, text, opencode.TurnConfig{Workspace: agent.Workspace})
+	result, turnErr := client.RunUserTurn(ctx, sessionID, text, opencode.TurnConfig{
+		Workspace: agent.Workspace,
+		Timeout:   opts.Timeout,
+	})
 	duration := time.Since(start)
 	out.DurationMS = duration.Milliseconds()
 
