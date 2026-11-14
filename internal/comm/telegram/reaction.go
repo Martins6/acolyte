@@ -57,10 +57,12 @@ func (a *Adapter) startTyping(ctx context.Context, chatID int64) func() {
 
 	typingCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	firstAttempt := make(chan struct{})
 
 	go func() {
 		defer close(done)
 		logged := false
+		first := true
 		for {
 			if err := sendTyping(typingCtx, api, chatID); err != nil && !logged && typingCtx.Err() == nil {
 				// One log per typing session keeps a failing send from
@@ -68,6 +70,10 @@ func (a *Adapter) startTyping(ctx context.Context, chatID int64) func() {
 				logged = true
 				log.Printf("telegram: typing indicator for chat %d of %s: %v",
 					chatID, a.agent.Name, media.RedactToken(err, a.token))
+			}
+			if first {
+				close(firstAttempt)
+				first = false
 			}
 			select {
 			case <-typingCtx.Done():
@@ -78,6 +84,9 @@ func (a *Adapter) startTyping(ctx context.Context, chatID int64) func() {
 	}()
 
 	return func() {
+		// An instant turn can finish before the goroutine is scheduled. Wait
+		// for its first attempt so "typing" is never skipped on fast replies.
+		<-firstAttempt
 		cancel()
 		select {
 		case <-done:
