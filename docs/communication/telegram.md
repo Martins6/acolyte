@@ -14,6 +14,11 @@ workspace.
 - Checks the sender against `telegram.allowed_users` (numeric ID or `@username`, case-insensitive).
   Unauthorized senders receive a short refusal and are not admitted.
 - Records `tg_update_id` for dedup and stores the inbound envelope as a pending replay payload.
+- Reacts with 👀 on every accepted inbound message (allowed sender, first delivery of that update)
+  through `setMessageReaction`. Best-effort: a failure is logged and never blocks admission.
+- Sends the `typing` chat action when processing starts and refreshes it every 4s until the turn's
+  reply is enqueued (Telegram clears chat actions after about 5 seconds). Best-effort; it never
+  blocks the turn.
 - Hands each Envelope to the Orchestrator's inbound sink. Only a successful admission (or an
   already-linked OpenCode message) clears the payload and marks the row processed. Failed/aborted
   admissions stay pending and are replayed on start and every 30s.
@@ -23,6 +28,20 @@ workspace.
   and media is retried by replay. The Envelope carries the absolute path and a prompt of the form
   `File located at: <path>\n\nUser message: <caption>`.
 - Hands each Envelope to the Orchestrator's inbound sink.
+
+## Commands
+
+On start the adapter registers its command menu with `setMyCommands` (default scope). The menu
+currently has one entry: `/new` — "Start a new session". Registration failure is logged and does
+not fail startup.
+
+`/new` is handled by the communication router inside the per-thread lock, not by the model:
+
+- It deletes the `telegram:<chat_id>` → OpenCode session mapping in `orch_sessions` and replies
+  `New session started.` so the next message creates a fresh OpenCode session.
+- `/new@botname` and `/new` with extra arguments are accepted the same way.
+- No model turn runs for `/new`.
+- Any other slash command is passed to the agent as normal text.
 
 ## Outbound
 
@@ -34,6 +53,8 @@ workspace.
   JPEG, PNG, and WebP are accepted up to 10 MiB; captions are capped at 1024 characters. The file
   content is sniffed and must fully decode as JPEG/PNG/WebP matching its extension; decoding is
   bounded to 50 million pixels.
+- When one turn produces several assistant messages with text, they are joined with a blank line
+  (`\n\n`) before chunking.
 - Long text is split by UTF-16 units while preserving rune boundaries (Telegram's limit is 4096
   UTF-16 units).
 - Chunk progress is persisted, so a retry resumes after the last delivered chunk.
@@ -74,11 +95,13 @@ photo whose caption is the final reply. See [#113](https://github.com/Martins6/a
 ## Testing
 
 `internal/comm/telegram/telegramtest` is an in-process Telegram Bot API
-emulator. It serves `getMe`, `getUpdates`, `sendMessage`, `getFile` and file
-downloads over a real HTTP listener and exposes helpers to queue updates,
-inspect sent messages, register files and inject API failures. Tests point the
+emulator. It serves `getMe`, `getUpdates`, `sendMessage`, `sendPhoto`, `getFile`,
+`setMessageReaction`, `sendChatAction` and `setMyCommands`, plus file downloads
+over a real HTTP listener, and exposes helpers to queue updates, inspect sent
+messages, register files and inject API failures. Tests point the
 adapter at it with `telegram.Options.ServerURL`; the emulator is never used by
-production code.
+production code. Emulated tests cover the acknowledgment reaction, the typing
+action, and command menu registration.
 
 Run the hermetic suite with:
 

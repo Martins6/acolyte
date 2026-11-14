@@ -361,6 +361,30 @@ func TestRunUserTurnToleratesMalformedContent(t *testing.T) {
 	}
 }
 
+func TestAssistantTextSeparatesMessagesWithBlankLine(t *testing.T) {
+	t.Parallel()
+
+	msgs := []Message{
+		{ID: "msg_1", Type: "assistant", Content: []ContentPart{{Type: "text", Text: "first"}}},
+		{ID: "msg_user", Type: "user", Text: "ignored"},
+		{ID: "msg_2", Type: "assistant", Content: []ContentPart{{Type: "text", Text: "second"}}},
+	}
+	if got := assistantText(msgs); got != "first\n\nsecond" {
+		t.Errorf("assistantText() = %q, want %q", got, "first\n\nsecond")
+	}
+}
+
+func TestAssistantTextSingleMessageUnchanged(t *testing.T) {
+	t.Parallel()
+
+	msgs := []Message{
+		{ID: "msg_1", Type: "assistant", Content: []ContentPart{{Type: "text", Text: "only"}}},
+	}
+	if got := assistantText(msgs); got != "only" {
+		t.Errorf("assistantText() = %q, want %q", got, "only")
+	}
+}
+
 func TestAssistantToolActivity(t *testing.T) {
 	t.Parallel()
 

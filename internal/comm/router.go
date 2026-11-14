@@ -115,6 +115,16 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 	defer release()
 
+	if name, ok := parseCommand(env.Content.Text); ok && name == CommandNew {
+		if _, err := st.Orch().DeleteSession(env.Thread); err != nil {
+			return fmt.Errorf("comm: reset session for thread %q: %w", env.Thread, err)
+		}
+		if err := r.sendReply(ctx, st, agent, env, nil, NewSessionReply); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	sessionID := ""
 	if session, ok, err := st.Orch().GetSessionByThread(env.Thread); err != nil {
 		return err

@@ -172,8 +172,8 @@ debugging.
   text/reasoning deltas are deliberately never persisted. Turn results also expose a post-turn
   `ToolActivity` summary (name, status, id) parsed from the collected assistant messages;
   `acolyte run --json` prints it as `tool_activity` when non-empty. This is not streaming.
-  Telegram partial-text streaming and live status remain deferred (they need message editing,
-  rate limiting, and a consumer design).
+  Telegram partial-text streaming remains deferred (it needs message editing, rate limiting, and a
+  consumer design); the typing indicator and per-message acknowledgment reaction are implemented.
 - **Long-running daemon ↔ long-running service** (matches autostart). No spawn-per-turn overhead or
   5-minute timeout.
 
@@ -762,6 +762,10 @@ notify-user`** = user-only, never agent, never session (v0 `notify`) (§10.4).
     OpenCode/communication history. Full communication config is exposed by
     `acolyte config <agent> get`; the `agent_status` cache and any OpenCode stats integration
     remain deferred.
+32. **Telegram inbound UX is best-effort and adapter-local.** An accepted message gets a 👀 reaction,
+    and `typing` is sent immediately and refreshed every 4s until the reply is enqueued.
+    `setMyCommands` registers `/new`, which clears the `telegram:<chat_id>` → session mapping under
+    the thread lock and replies without a model turn; multi-message replies are joined with `\n\n`.
 
 **[OPEN] forks:**
 None.

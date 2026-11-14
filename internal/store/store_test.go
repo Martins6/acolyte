@@ -343,6 +343,28 @@ func TestCommSettings(t *testing.T) {
 	}
 }
 
+func TestDeleteSession(t *testing.T) {
+	s, _ := openTest(t)
+	store := s.Orch()
+	thread := "telegram:10"
+	if _, err := store.UpsertSession(thread, "ses_old", time.Now().UTC()); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+
+	deleted, err := store.DeleteSession(thread)
+	if err != nil || !deleted {
+		t.Fatalf("DeleteSession() = %v, %v; want true, nil", deleted, err)
+	}
+	if _, ok, err := store.GetSessionByThread(thread); err != nil || ok {
+		t.Fatalf("GetSessionByThread() = %v, %v; want false, nil", ok, err)
+	}
+
+	deleted, err = store.DeleteSession(thread)
+	if err != nil || deleted {
+		t.Fatalf("DeleteSession() again = %v, %v; want false, nil", deleted, err)
+	}
+}
+
 func TestNewerSchemaRejected(t *testing.T) {
 	s, ws := openTest(t)
 	if _, err := s.DB().Exec(`UPDATE schema_meta SET version = 99 WHERE module = 'orch'`); err != nil {

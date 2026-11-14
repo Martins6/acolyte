@@ -138,6 +138,32 @@ func (h *routerHarness) seedInbound(t *testing.T, env envelope.Envelope, updateI
 	}
 }
 
+func (h *routerHarness) seedSession(t *testing.T, thread, sessionID string) {
+	t.Helper()
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	if _, err := st.Orch().UpsertSession(thread, sessionID, time.Now().UTC()); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+}
+
+func (h *routerHarness) hasSession(t *testing.T, thread string) bool {
+	t.Helper()
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	_, ok, err := st.Orch().GetSessionByThread(thread)
+	if err != nil {
+		t.Fatalf("GetSessionByThread() error: %v", err)
+	}
+	return ok
+}
+
 func TestRouterInboundPersistsSessionLinksAndRoutes(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
@@ -470,5 +496,139 @@ func TestRouterReleasesThreadLocks(t *testing.T) {
 	defer h.router.lockMu.Unlock()
 	if len(h.router.locks) != 0 {
 		t.Errorf("thread locks = %d, want 0 after all callers finish", len(h.router.locks))
+	}
+}
+
+func TestRouterNewCommandResetsSession(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	thread := envelope.TelegramThread(70)
+	h.seedSession(t, thread, "ses_old")
+
+	env := envelope.New(envelope.DirectionIn, "telegram", thread,
+		envelope.Party{Kind: envelope.PartyUser, ID: "70"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "/new"})
+	env.Meta = map[string]any{"telegram_message_id": float64(88)}
+	h.seedInbound(t, env, 400)
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if h.turn.calls != 0 {
+		t.Errorf("turn calls = %d, want 0", h.turn.calls)
+	}
+	if len(h.outbound.events) != 1 {
+		t.Fatalf("outbound events = %d, want 1", len(h.outbound.events))
+	}
+	out := h.outbound.events[0]
+	if out.Content.Text != NewSessionReply {
+		t.Errorf("outbound text = %q, want %q", out.Content.Text, NewSessionReply)
+	}
+	if out.Thread != env.Thread {
+		t.Errorf("outbound thread = %q, want %q", out.Thread, env.Thread)
+	}
+	if out.Meta["reply_to_message_id"] != float64(88) {
+		t.Errorf("outbound meta = %+v, want reply_to_message_id preserved", out.Meta)
+	}
+	if h.hasSession(t, thread) {
+		t.Error("thread mapping still exists after /new")
+	}
+}
+
+func TestRouterNewCommandWithBotSuffix(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	thread := envelope.TelegramThread(71)
+	h.seedSession(t, thread, "ses_old")
+
+	env := envelope.New(envelope.DirectionIn, "telegram", thread,
+		envelope.Party{Kind: envelope.PartyUser, ID: "71"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "/new@acolyte_bot"})
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if h.turn.calls != 0 {
+		t.Errorf("turn calls = %d, want 0", h.turn.calls)
+	}
+	if h.hasSession(t, thread) {
+		t.Error("thread mapping still exists after /new@acolyte_bot")
+	}
+}
+
+func TestRouterUnknownCommandRunsTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(72),
+		envelope.Party{Kind: envelope.PartyUser, ID: "72"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "/help"})
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if h.turn.calls != 1 {
+		t.Fatalf("turn calls = %d, want 1", h.turn.calls)
+	}
+	if len(h.turn.prompts) != 1 || h.turn.prompts[0] != "/help" {
+		t.Errorf("prompts = %v, want [/help]", h.turn.prompts)
+	}
+}
+
+func TestRouterNewCommandConcurrency(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.turn.delay = 50 * time.Millisecond
+	thread := envelope.TelegramThread(73)
+	h.seedSession(t, thread, "ses_old")
+
+	slow := envelope.New(envelope.DirectionIn, "telegram", thread,
+		envelope.Party{Kind: envelope.PartyUser, ID: "73"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "slow work"})
+	done := make(chan error, 1)
+	go func() { done <- h.router.HandleInbound(context.Background(), h.agent, slow) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		h.turn.mu.Lock()
+		started := h.turn.calls > 0
+		h.turn.mu.Unlock()
+		if started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slow turn never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	reset := envelope.New(envelope.DirectionIn, "telegram", thread,
+		envelope.Party{Kind: envelope.PartyUser, ID: "73"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "/new"})
+	resetDone := make(chan error, 1)
+	go func() { resetDone <- h.router.HandleInbound(context.Background(), h.agent, reset) }()
+
+	select {
+	case err := <-resetDone:
+		if err != nil {
+			t.Fatalf("HandleInbound(/new) error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("/new blocked behind the in-flight turn")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("HandleInbound(slow) error: %v", err)
+	}
+
+	if h.turn.maxActive != 1 {
+		t.Errorf("max active turns = %d, want 1 for the same thread", h.turn.maxActive)
+	}
+	if len(h.outbound.events) != 2 {
+		t.Fatalf("outbound events = %d, want 2", len(h.outbound.events))
+	}
+	if h.outbound.events[1].Content.Text != NewSessionReply {
+		t.Errorf("last outbound text = %q, want %q after the turn finished",
+			h.outbound.events[1].Content.Text, NewSessionReply)
+	}
+	if h.hasSession(t, thread) {
+		t.Error("thread mapping still exists after /new")
 	}
 }

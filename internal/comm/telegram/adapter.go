@@ -34,6 +34,28 @@ const (
 	// local Bot API server and for hermetic tests. Tokens are sent to this
 	// URL, so a plain http override is only accepted for loopback hosts.
 	ServerURLEnv = "ACOLYTE_TELEGRAM_API_URL"
+	// AckReaction is the emoji added to an allowed inbound message to
+	// acknowledge that the agent picked it up.
+	AckReaction = "👀"
+	// TypingRefreshInterval keeps the typing chat action alive; Telegram chat
+	// actions expire after about five seconds.
+	TypingRefreshInterval = 4 * time.Second
+)
+
+// botCommands is the slash-command menu registered with Telegram on Start.
+var botCommands = []models.BotCommand{
+	{Command: "new", Description: "Start a new session"},
+}
+
+const (
+	// ackTimeout bounds the best-effort acknowledgment reaction.
+	ackTimeout = 5 * time.Second
+	// typingSendTimeout bounds one sendChatAction call.
+	typingSendTimeout = 5 * time.Second
+	// typingStopTimeout bounds how long a stopped typing loop may linger.
+	typingStopTimeout = 2 * time.Second
+	// commandRegistrationTimeout bounds the startup setMyCommands call.
+	commandRegistrationTimeout = 10 * time.Second
 )
 
 // API is the Telegram surface the adapter uses. *bot.Bot implements it.
@@ -41,6 +63,9 @@ type API interface {
 	SendMessage(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error)
 	SendPhoto(ctx context.Context, params *bot.SendPhotoParams) (*models.Message, error)
 	GetFile(ctx context.Context, params *bot.GetFileParams) (*models.File, error)
+	SendChatAction(ctx context.Context, params *bot.SendChatActionParams) (bool, error)
+	SetMessageReaction(ctx context.Context, params *bot.SetMessageReactionParams) (bool, error)
+	SetMyCommands(ctx context.Context, params *bot.SetMyCommandsParams) (bool, error)
 	Token() string
 }
 
@@ -169,6 +194,13 @@ func (a *Adapter) Start(ctx context.Context, sink comm.InboundSink) error {
 	}
 	a.api = b
 	a.bot = b
+	// The command menu is a convenience for users; a registration failure
+	// must never stop the adapter.
+	commandsCtx, commandsCancel := context.WithTimeout(ctx, commandRegistrationTimeout)
+	if err := a.registerCommands(commandsCtx); err != nil {
+		log.Printf("telegram: register commands for %s: %v", a.agent.Name, media.RedactToken(err, a.token))
+	}
+	commandsCancel()
 
 	a.mu.Lock()
 	a.ctx, a.cancel = context.WithCancel(ctx)
