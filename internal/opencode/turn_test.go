@@ -9,7 +9,92 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestRunTurnTimeout(t *testing.T) {
+	t.Parallel()
+
+	turns := []struct {
+		name string
+		run  func(*Client, TurnConfig) error
+	}{
+		{
+			name: "user",
+			run: func(client *Client, cfg TurnConfig) error {
+				_, err := client.RunUserTurn(context.Background(), "ses_x", "hello", cfg)
+				return err
+			},
+		},
+		{
+			name: "synthetic",
+			run: func(client *Client, cfg TurnConfig) error {
+				_, err := client.RunSyntheticTurn(context.Background(), "ses_x", SyntheticEvent{Text: "event"}, cfg)
+				return err
+			},
+		},
+	}
+	cases := []struct {
+		name         string
+		timeout      time.Duration
+		wantDeadline bool
+	}{
+		{name: "explicit", timeout: 30 * time.Second, wantDeadline: true},
+		{name: "zero", timeout: 0, wantDeadline: false},
+	}
+	for _, turn := range turns {
+		for _, tc := range cases {
+			t.Run(turn.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				client := NewClient("http://opencode.test", "")
+				var (
+					deadline    time.Time
+					hasDeadline bool
+				)
+				client.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					deadline, hasDeadline = req.Context().Deadline()
+					return nil, errors.New("stop after inspecting context")
+				})
+
+				err := turn.run(client, TurnConfig{Timeout: tc.timeout})
+				if err == nil {
+					t.Fatal("turn error = nil, want transport error")
+				}
+				if hasDeadline != tc.wantDeadline {
+					t.Fatalf("request deadline = %v (set=%v), want set=%v", deadline, hasDeadline, tc.wantDeadline)
+				}
+				if tc.wantDeadline {
+					remaining := time.Until(deadline)
+					if remaining <= 0 || remaining > tc.timeout {
+						t.Errorf("time until deadline = %v, want within (0, %v]", remaining, tc.timeout)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRunUserTurnExplicitShortTimeoutCancels(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("http://opencode.test", "")
+	client.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+
+	_, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{Timeout: 20 * time.Millisecond})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunUserTurn() error = %v, want deadline exceeded", err)
+	}
+}
 
 func TestRunUserTurnPreservesInputOnCollectError(t *testing.T) {
 	t.Parallel()
