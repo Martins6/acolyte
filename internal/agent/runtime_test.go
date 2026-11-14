@@ -397,6 +397,71 @@ func TestSetMemoryLoadDryRunPreviewsDiffWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestSetMemoryLoadRestoresOpencodeWhenSettingWriteFails(t *testing.T) {
+	installTriggers := func(t *testing.T, st *store.Store, statements ...string) {
+		t.Helper()
+		for _, statement := range statements {
+			if _, err := st.DB().Exec(statement); err != nil {
+				t.Fatalf("install trigger: %v", err)
+			}
+		}
+	}
+
+	t.Run("set", func(t *testing.T) {
+		ws := createRuntimeAgent(t, `{"memory-load": null}`)
+		before := readOpencode(t, ws)
+		st := openRuntimeStore(t, ws)
+		installTriggers(t, st,
+			`CREATE TRIGGER fail_setting_insert BEFORE INSERT ON orch_settings
+			 BEGIN SELECT RAISE(ABORT, 'settings blocked'); END`,
+			`CREATE TRIGGER fail_setting_update BEFORE UPDATE ON orch_settings
+			 BEGIN SELECT RAISE(ABORT, 'settings blocked'); END`,
+		)
+
+		_, err := SetConfig(st, runtimeAgent(t, "valet"), SetOptions{
+			Key: "memory-load", Value: `{"mode":"default"}`,
+		})
+		if err == nil || !strings.Contains(err.Error(), "settings blocked") ||
+			!strings.Contains(err.Error(), "the previous opencode.jsonc was restored") {
+			t.Fatalf("SetConfig() error = %v, want setting failure with restored config", err)
+		}
+		if after := readOpencode(t, ws); after != before {
+			t.Errorf("opencode.jsonc was not restored:\n%s", after)
+		}
+		if _, ok, err := st.Orch().GetSetting("memory.load"); err != nil || ok {
+			t.Errorf("memory.load setting present = %v, %v; want absent", ok, err)
+		}
+	})
+
+	t.Run("null", func(t *testing.T) {
+		ws := createRuntimeAgent(t, `{"memory-load": {"mode":"default"}}`)
+		before := readOpencode(t, ws)
+		st := openRuntimeStore(t, ws)
+		installTriggers(t, st,
+			`CREATE TRIGGER fail_setting_delete BEFORE DELETE ON orch_settings
+			 BEGIN SELECT RAISE(ABORT, 'settings blocked'); END`,
+		)
+
+		_, err := SetConfig(st, runtimeAgent(t, "valet"), SetOptions{Key: "memory-load", Value: "null"})
+		if err == nil || !strings.Contains(err.Error(), "settings blocked") ||
+			!strings.Contains(err.Error(), "the previous opencode.jsonc was restored") {
+			t.Fatalf("SetConfig() error = %v, want setting failure with restored config", err)
+		}
+		if after := readOpencode(t, ws); after != before {
+			t.Errorf("opencode.jsonc was not restored:\n%s", after)
+		}
+		setting, ok, err := st.Orch().GetSetting("memory.load")
+		if err != nil || !ok {
+			t.Errorf("memory.load setting present = %v, %v; want preserved", ok, err)
+		} else {
+			var stored MemoryConfig
+			if err := json.Unmarshal([]byte(setting), &stored); err != nil || stored.Mode != "default" {
+				t.Errorf("memory.load = %q: mode = %q, %v", setting, stored.Mode, err)
+			}
+		}
+	})
+}
+
 func TestSetMemoryAccessLeavesInstructions(t *testing.T) {
 	ws := createRuntimeAgent(t, `{"memory-load": null}`)
 	before := readOpencode(t, ws)

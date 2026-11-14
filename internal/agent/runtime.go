@@ -599,14 +599,36 @@ func sameCapabilityJob(existing, desired orch.CronJob) bool {
 }
 
 func (r *SetResult) apply(st *store.Store, a registry.Agent) error {
+	wroteOpencode := false
 	if r.opencodeAfter != "" && r.opencodeAfter != r.opencodeBefore {
 		if err := writeOpencodeConfig(a.Workspace, r.opencodeAfter); err != nil {
 			return err
 		}
+		wroteOpencode = true
 	}
+	if err := r.applyMutations(st, a); err != nil {
+		if !wroteOpencode {
+			return err
+		}
+		// opencode.jsonc is the durable wiring for the same capability the
+		// store/jobs describe. If a later mutation fails, restore the file so
+		// `get` can never disagree with the actual instructions.
+		if restoreErr := restoreOpencodeConfig(a.Workspace, r.opencodeBefore); restoreErr != nil {
+			return fmt.Errorf("%w (restoring the previous %s failed: %v)", err, opencodeConfigName, restoreErr)
+		}
+		return fmt.Errorf("%w (the previous %s was restored)", err, opencodeConfigName)
+	}
+	return nil
+}
+
+// applyMutations applies the planned job, setting, and registry writes after
+// the opencode.jsonc edit has been staged. The caller rolls that edit back if
+// any of these fail.
+func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) error {
 	// Job mutations run before settings and identity writes: if a user job
 	// grabbed the capability title between plan and apply, the conditional
-	// mutation refuses and nothing else has been written yet.
+	// mutation refuses before any setting changes, and the caller restores
+	// the already-written opencode.jsonc.
 	orchStore := st.Orch()
 	for _, change := range r.Jobs {
 		capability, ok := capabilityByTitle(change.Title)
