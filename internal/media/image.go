@@ -22,6 +22,10 @@ const (
 	imageFormatWebP imageFormat = "webp"
 )
 
+// maxOutboundPixels bounds the decoded pixel count before a full decode so a
+// crafted image cannot trigger huge allocations.
+const maxOutboundPixels int64 = 50_000_000
+
 func (f imageFormat) label() string {
 	switch f {
 	case imageFormatJPEG:
@@ -65,8 +69,8 @@ func imageFormatForExtension(extension string) (imageFormat, bool) {
 }
 
 // validateImageFile confirms that path contains a decodable JPEG, PNG, or WebP
-// image whose content format matches extension. It only decodes the image
-// header, so it does not allocate full pixel buffers.
+// image whose content format matches extension. It parses the header for
+// dimensions, enforces a pixel-count bound, then fully decodes the image.
 func validateImageFile(path, extension string) error {
 	want, ok := imageFormatForExtension(extension)
 	if !ok {
@@ -100,6 +104,16 @@ func validateImageFile(path, extension string) error {
 	}
 	if config.Width <= 0 || config.Height <= 0 {
 		return fmt.Errorf("media: image %s has invalid dimensions %dx%d", path, config.Width, config.Height)
+	}
+	if width, height := int64(config.Width), int64(config.Height); width > maxOutboundPixels/height {
+		return fmt.Errorf("media: image %s is %dx%d, exceeding the %d-pixel limit", path, config.Width, config.Height, maxOutboundPixels)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("media: rewind image %s: %w", path, err)
+	}
+	if _, _, err := image.Decode(file); err != nil {
+		return fmt.Errorf("media: decode image %s: %w", path, err)
 	}
 	return nil
 }

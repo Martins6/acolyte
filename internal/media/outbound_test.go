@@ -3,6 +3,8 @@ package media
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/jpeg"
 	"image/png"
@@ -168,6 +170,43 @@ func TestPrepareOutboundImageRejectsInvalidContent(t *testing.T) {
 				t.Fatalf("PrepareOutboundImage(%q) error = nil, want error", tc.path)
 			}
 		})
+	}
+}
+
+func TestPrepareOutboundImageRejectsHeaderOnlyPNG(t *testing.T) {
+	workspace := t.TempDir()
+	pngData := encodeTestImage(t, ".png", 2, 2)
+	// Keep the PNG signature and the complete IHDR chunk but drop the IDAT and
+	// IEND chunks, so the header parses while the pixel data is missing.
+	headerOnly := pngData[:33]
+	source := filepath.Join(workspace, "header-only.png")
+	writeTestImage(t, source, headerOnly)
+
+	if _, _, err := image.DecodeConfig(bytes.NewReader(headerOnly)); err != nil {
+		t.Fatalf("fixture header should decode: %v", err)
+	}
+	if _, err := PrepareOutboundImage(workspace, source); err == nil {
+		t.Fatal("PrepareOutboundImage(header-only png) error = nil, want error")
+	}
+}
+
+func TestPrepareOutboundImageRejectsExcessivePixels(t *testing.T) {
+	workspace := t.TempDir()
+	pngData := encodeTestImage(t, ".png", 2, 2)
+	// Declare 10000x10000 pixels and repair the IHDR checksum so the header
+	// parses; the pixel bound must reject the file before any full decode.
+	binary.BigEndian.PutUint32(pngData[16:20], 10000)
+	binary.BigEndian.PutUint32(pngData[20:24], 10000)
+	binary.BigEndian.PutUint32(pngData[29:33], crc32.ChecksumIEEE(pngData[12:29]))
+	source := filepath.Join(workspace, "too-many-pixels.png")
+	writeTestImage(t, source, pngData)
+
+	_, err := PrepareOutboundImage(workspace, source)
+	if err == nil {
+		t.Fatal("PrepareOutboundImage(excessive pixels) error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "pixel limit") {
+		t.Fatalf("error = %q, want pixel limit rejection", err)
 	}
 }
 
