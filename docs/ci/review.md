@@ -54,7 +54,9 @@ Context from the same run:
 
 - The action's cache key `opencode-Linux-X64-v1.19.5` missed, so the install step had to run.
 - `curl: (56)` means "failure in receiving network data": the TCP connection was reset while
-  downloading the script. `bash` never received or executed the script — the pipe died first.
+  downloading the script. The download step failed before the install could complete; these logs
+  cannot show whether `bash` received any bytes that were streamed before the reset, but they do
+  show that the installer exited non-zero and the install did not succeed.
 - `Add opencode to PATH` and `Run opencode` were both **skipped**, so `opencode github run` never
   started: no model request, no `gh pr diff`, no review body.
 - `Checkout repository`, `Restore trusted agent runtime config`, `Remove action comment`, and the
