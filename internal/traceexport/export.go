@@ -7,8 +7,10 @@ package traceexport
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -115,6 +117,7 @@ type counts struct {
 	CommInbox    int `json:"comm_inbox"`
 	CommOutbox   int `json:"comm_outbox"`
 	CommMedia    int `json:"comm_media"`
+	MediaFiles   int `json:"media_files"`
 	MemoryDreams int `json:"memory_dreams"`
 }
 
@@ -132,6 +135,12 @@ type bundle struct {
 	commOut   int
 	commMedia int
 	dreams    int
+
+	// mediaFiles counts files actually copied under communication/media/.
+	mediaFiles int
+	// mediaEntries maps each zip entry to its source path so duplicate rows
+	// for one file are copied once and distinct files never overwrite one.
+	mediaEntries map[string]string
 }
 
 // Export writes the zip at req.OutPath atomically and returns its summary.
@@ -261,6 +270,7 @@ func (b *bundle) writeBundle(ctx context.Context) error {
 			CommInbox:    b.commIn,
 			CommOutbox:   b.commOut,
 			CommMedia:    b.commMedia,
+			MediaFiles:   b.mediaFiles,
 			MemoryDreams: b.dreams,
 		},
 		Warnings: b.warnings,
@@ -280,24 +290,40 @@ func (b *bundle) writeBundle(ctx context.Context) error {
 }
 
 func (b *bundle) write(name string, data []byte) error {
-	clean := path.Clean(strings.TrimPrefix(filepath.ToSlash(name), "/"))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return fmt.Errorf("traceexport: unsafe zip entry %q", name)
+	clean, err := zipEntryName(name)
+	if err != nil {
+		return err
 	}
 	if b.request.Sanitize {
 		data = sanitizeEntry(clean, data)
 	}
-	header := &zip.FileHeader{Name: clean, Method: zip.Deflate, Modified: b.now}
-	header.SetMode(fs.FileMode(0644))
-	writer, err := b.zip.CreateHeader(header)
+	writer, err := b.createEntry(clean)
 	if err != nil {
-		return fmt.Errorf("traceexport: create zip entry %q: %w", clean, err)
+		return err
 	}
 	if _, err := writer.Write(data); err != nil {
 		return fmt.Errorf("traceexport: write zip entry %q: %w", clean, err)
 	}
 	b.files++
 	return nil
+}
+
+func zipEntryName(name string) (string, error) {
+	clean := path.Clean(strings.TrimPrefix(filepath.ToSlash(name), "/"))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("traceexport: unsafe zip entry %q", name)
+	}
+	return clean, nil
+}
+
+func (b *bundle) createEntry(clean string) (io.Writer, error) {
+	header := &zip.FileHeader{Name: clean, Method: zip.Deflate, Modified: b.now}
+	header.SetMode(fs.FileMode(0644))
+	writer, err := b.zip.CreateHeader(header)
+	if err != nil {
+		return nil, fmt.Errorf("traceexport: create zip entry %q: %w", clean, err)
+	}
+	return writer, nil
 }
 
 func (b *bundle) warn(format string, args ...any) {
@@ -707,6 +733,11 @@ func (b *bundle) exportCommunication() error {
 			return err
 		}
 	}
+	// Copy the referenced files after filtering so a scoped bundle only
+	// carries media for the selected chats.
+	if err := b.exportMedia(media); err != nil {
+		return err
+	}
 	if single {
 		// Channel settings are global to the agent, not to one conversation.
 		return nil
@@ -760,6 +791,161 @@ func filterMediaByIDs(media []commtg.MediaItem, chatIDs map[int64]bool) []commtg
 		}
 	}
 	return filtered
+}
+
+const mediaZipDir = "communication/media"
+
+// exportMedia copies every referenced media file into the bundle so the trace
+// is self-contained. The metadata index (communication/media.json) keeps the
+// original source paths as provenance; the copies under communication/media/
+// are the portable form. Sources outside the workspace, paths escaping through
+// `..`, symlinked components, missing files, and non-regular files are skipped
+// with a manifest warning rather than failing the export.
+func (b *bundle) exportMedia(media []commtg.MediaItem) error {
+	for _, item := range media {
+		rel, err := mediaRelPath(b.request.Agent.Workspace, item.FilePath)
+		if err != nil {
+			b.warn("skipped media %s (%s): %v", item.TGFileID, item.FilePath, err)
+			continue
+		}
+		source, err := openMediaSource(b.request.Agent.Workspace, rel)
+		if err != nil {
+			b.warn("skipped media %s (%s): %v", item.TGFileID, item.FilePath, err)
+			continue
+		}
+		name, copyFile := b.mediaEntryName(rel)
+		if !copyFile {
+			_ = source.Close() // the same source file is already in the bundle
+			continue
+		}
+		err = b.copyMediaFile(name, source)
+		_ = source.Close()
+		if err != nil {
+			return err
+		}
+		b.mediaFiles++
+	}
+	return nil
+}
+
+// mediaRelPath resolves a stored media path against the agent workspace and
+// enforces textual containment. Absolute paths outside the workspace and
+// relative paths that escape through `..` are rejected before any filesystem
+// access; the secure open in openMediaSource rejects symlinked components.
+func mediaRelPath(workspace, filePath string) (string, error) {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return "", fmt.Errorf("workspace is not configured")
+	}
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return "", fmt.Errorf("empty file path")
+	}
+	workspaceAbs, err := paths.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace: %w", err)
+	}
+	rel := filePath
+	absolute := filepath.IsAbs(rel)
+	if absolute {
+		sourceAbs, err := paths.Abs(rel)
+		if err != nil {
+			return "", fmt.Errorf("resolve source path: %w", err)
+		}
+		rel, err = filepath.Rel(workspaceAbs, sourceAbs)
+		if err != nil {
+			return "", fmt.Errorf("source is outside the workspace")
+		}
+	}
+	rel = filepath.Clean(rel)
+	if rel == "." || rel == ".." || filepath.IsAbs(rel) ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if absolute {
+			return "", fmt.Errorf("source is outside the workspace")
+		}
+		return "", fmt.Errorf("source path escapes the workspace")
+	}
+	return rel, nil
+}
+
+// mediaEntryName returns the deterministic zip entry for one workspace-relative
+// source path and reports whether it still needs to be copied. Names keep the
+// original base name and extension with a short hash of the source path, plus a
+// counter only if two distinct sources would otherwise collide. A repeated
+// source path is copied once.
+func (b *bundle) mediaEntryName(sourcePath string) (string, bool) {
+	if b.mediaEntries == nil {
+		b.mediaEntries = make(map[string]string)
+	}
+	for attempt := 0; ; attempt++ {
+		name := path.Join(mediaZipDir, mediaArchiveName(sourcePath, attempt))
+		previous, used := b.mediaEntries[name]
+		if !used {
+			b.mediaEntries[name] = sourcePath
+			return name, true
+		}
+		if previous == sourcePath {
+			return "", false
+		}
+	}
+}
+
+// mediaArchiveName builds a safe file name from a workspace-relative source
+// path: original stem, a short stable hash of the source path, then the
+// original extension.
+func mediaArchiveName(sourcePath string, attempt int) string {
+	base := filepath.Base(filepath.Clean(sourcePath))
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		base = "media"
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	stem = safeMediaNamePart(stem)
+	if stem == "" || stem == "." || stem == ".." {
+		stem = "media"
+	}
+	ext = safeMediaNamePart(ext)
+	sum := sha256.Sum256([]byte(sourcePath))
+	suffix := fmt.Sprintf("%x", sum[:4]) // 8 hex chars: short and stable
+	if attempt > 0 {
+		suffix = fmt.Sprintf("%s-%d", suffix, attempt)
+	}
+	return stem + "-" + suffix + ext
+}
+
+// safeMediaNamePart keeps only characters that are safe in a zip entry name.
+func safeMediaNamePart(value string) string {
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	return builder.String()
+}
+
+// copyMediaFile streams one already-opened regular source file into the zip.
+// Media bytes are preserved byte-for-byte and are not run through --sanitize,
+// which only applies safely to text and JSON entries.
+func (b *bundle) copyMediaFile(name string, source *os.File) error {
+	clean, err := zipEntryName(name)
+	if err != nil {
+		return err
+	}
+	writer, err := b.createEntry(clean)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(writer, source); err != nil {
+		return fmt.Errorf("traceexport: copy media %s: %w", source.Name(), err)
+	}
+	b.files++
+	return nil
 }
 
 // filterSessionsForMapping keeps only the selected session's thread mapping.
@@ -826,7 +1012,7 @@ func (b *bundle) readme(m manifest) string {
 	builder.WriteString("This bundle is a portable trace of the agent. It is intentionally self-contained: ")
 	builder.WriteString("a model can read the Markdown directly, without Acolyte or OpenCode.\n\n")
 	if m.ScopedSession != "" {
-		fmt.Fprintf(&builder, "This is a **single-session export** scoped to `%s`: `communication/` holds only that session's inbox/outbox rows, the chats they reference, and the media for those chats (channel settings are omitted); `orchestrator/` keeps only its session mapping (no logs, cron jobs, routes, or settings); and `memory/dreams.json` is omitted. Persona and skills are still included because they are agent identity, not conversation content.\n\n", m.ScopedSession)
+		fmt.Fprintf(&builder, "This is a **single-session export** scoped to `%s`: `communication/` holds only that session's inbox/outbox rows, the chats they reference, and the media for those chats, including byte-for-byte copies under `communication/media/` (channel settings are omitted); `orchestrator/` keeps only its session mapping (no logs, cron jobs, routes, or settings); and `memory/dreams.json` is omitted. Persona and skills are still included because they are agent identity, not conversation content.\n\n", m.ScopedSession)
 	}
 	builder.WriteString("## Contents\n\n")
 	builder.WriteString("- `session-index.md` — every exported session, with links.\n")
@@ -835,6 +1021,7 @@ func (b *bundle) readme(m manifest) string {
 	builder.WriteString("- `persona/` — `AGENTS.md`, `opencode.jsonc`, `.acolyte/*.md`, `.agents/skills/**`, and `.opencode/agents/**`.\n")
 	builder.WriteString("- `orchestrator/` — audit logs, cron jobs, session mappings, delivery routes, and capability settings.\n")
 	builder.WriteString("- `communication/` — Telegram chats, inbox, outbox, media index, and channel settings.\n")
+	builder.WriteString("- `communication/media/` — byte-for-byte copies of the media files referenced by `communication/media.json`. Each file keeps its original base name and extension plus a short stable hash of its workspace-relative source path (`<name>-<hash><ext>`). Sources outside the workspace, paths escaping through `..`, symlinked path components, missing files, and non-regular files are skipped with a warning. `media.json` remains the metadata index and keeps the original source paths.\n")
 	builder.WriteString("- `memory/` — memory-learn (dream) audit rows.\n")
 	builder.WriteString("- `manifest.json` — machine-readable index with counts and warnings.\n\n")
 	builder.WriteString("## Using this as memory\n\n")
@@ -842,6 +1029,8 @@ func (b *bundle) readme(m manifest) string {
 	builder.WriteString("The Markdown files are the primary, human- and model-readable trace; the JSON files preserve exact routing and OpenCode data.\n\n")
 	builder.WriteString("For an OpenCode agent, the native `sessions/<id>.json` files can be imported through the experimental session import API. ")
 	builder.WriteString("The persona and skills can be copied into another workspace under `.acolyte/` and `.agents/skills/`.\n\n")
+	builder.WriteString("Session Markdown keeps each media file's original absolute path as source-workspace provenance. ")
+	builder.WriteString("The portable copies for another machine are the files under `communication/media/` in this bundle.\n\n")
 	builder.WriteString("## Secrets\n\n")
 	builder.WriteString("Raw traces may contain secrets from the source workspace (environment values, tokens, keys) embedded in conversation text and tool output. ")
 	if m.Sanitized {
@@ -849,9 +1038,10 @@ func (b *bundle) readme(m manifest) string {
 	} else {
 		builder.WriteString("This bundle was exported without `--sanitize`, so nothing was redacted. Re-export with `--sanitize` to redact common secret patterns on a best-effort basis — it cannot catch every secret either.\n\n")
 	}
-	fmt.Fprintf(&builder, "## Counts\n\n- Sessions: %d\n- Messages: %d\n- Orchestrator log entries: %d\n- Persona/skill files: %d\n- Communication inbox/outbox: %d/%d\n- Memory dreams: %d\n",
+	builder.WriteString("Media files under `communication/media/` are copied byte-for-byte and are not sanitized, because redaction is only safe for text and JSON entries.\n\n")
+	fmt.Fprintf(&builder, "## Counts\n\n- Sessions: %d\n- Messages: %d\n- Orchestrator log entries: %d\n- Persona/skill files: %d\n- Communication inbox/outbox: %d/%d\n- Copied media files: %d\n- Memory dreams: %d\n",
 		m.Counts.Sessions, m.Counts.Messages, m.Counts.Logs, m.Counts.PersonaFiles,
-		m.Counts.CommInbox, m.Counts.CommOutbox, m.Counts.MemoryDreams)
+		m.Counts.CommInbox, m.Counts.CommOutbox, m.Counts.MediaFiles, m.Counts.MemoryDreams)
 	if len(m.Warnings) > 0 {
 		builder.WriteString("\n## Warnings\n\n")
 		for _, warning := range m.Warnings {

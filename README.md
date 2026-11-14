@@ -201,7 +201,11 @@ acolyte memory export --agent-name valet --out safe.zip --sanitize
 The unzipped folder is self-contained: another agent can read `README.md`,
 `manifest.json`, and `sessions/*.md` as external memory. Native
 `sessions/<id>.json` files are included when the OpenCode service supports the
-experimental session export endpoint. Existing zips are not overwritten unless
+experimental session export endpoint. Referenced Telegram media files are
+copied byte-for-byte into `communication/media/` (named with a short hash of the
+workspace-relative source path); sources outside the workspace, paths escaping
+through `..`, symlinked components, and missing or non-regular files are
+skipped with a manifest warning. Existing zips are not overwritten unless
 `--force` is passed.
 
 `--session-id` scopes the whole bundle to one session so it cannot disclose
