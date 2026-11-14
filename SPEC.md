@@ -715,7 +715,9 @@ admit a synthetic event; output is routed via Communication.
     under `downloads/memory-traces/`.
 29. **Outbound media is one Telegram photo per message in v0.** Triggers are `acolyte notify-user
     --media` and the generated `send_image` OpenCode tool. JPEG/PNG/WebP up to 10 MiB; captions up
-    to 1024 characters. `--session-id` is outbox attribution only, never a session injection.
+    to 1024 characters. The file content is sniffed and must fully decode as JPEG/PNG/WebP matching
+    its extension; decoding is bounded to 50 million pixels. `--session-id` is outbox attribution
+    only, never a session injection.
 30. **Routine jobs are session-isolated.** `prompt`/`shell` jobs may bind to the latest session;
     `routine` jobs use `cron:<job ID>` and reject `--session-id` (§10.1/§10.3).
 31. **`acolyte status` remains a fan-out read** over local stores (identity/activity/jobs plus

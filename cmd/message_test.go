@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,7 +135,11 @@ func TestNotifyUserQueuesPhoto(t *testing.T) {
 	ws := setupCronCLI(t)
 	seedChat(t, ws)
 	source := filepath.Join(ws, "chart.png")
-	if err := os.WriteFile(source, []byte("image-bytes"), 0644); err != nil {
+	var imageData bytes.Buffer
+	if err := png.Encode(&imageData, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatalf("encode image: %v", err)
+	}
+	if err := os.WriteFile(source, imageData.Bytes(), 0644); err != nil {
 		t.Fatalf("write image: %v", err)
 	}
 	var out bytes.Buffer
