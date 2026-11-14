@@ -161,9 +161,12 @@ debugging.
   sessions (`GET /api/session`). `acolyte status` uses the local store's session/job fan-out; the
   OpenCode stats endpoint is `GET /api/experimental/session/stats` (not used by v0 status).
 - **`event.subscribe()` is available** through the thin SSE client (`SubscribeEvents`) and the
-  optional `TurnConfig.OnEvent` turn observer. No production call site supplies `OnEvent` in v0;
-  the hook is tested and ready for future consumers. Telegram partial-text streaming, live status,
-  and learning feeds are deferred (they need message editing, rate limiting, and a consumer design).
+  optional `TurnConfig.OnEvent` turn observer. Both production turn paths attach a turn-activity
+  recorder: the router (real user turns) and the inbox sink (synthetic turns) persist tool activity
+  (`session.tool.called|success|failed`) to the agent's `orch_logs` as IDs-only audit rows, which
+  trace export and learning feeds already consume. Tool input/results, prompts, and
+  text/reasoning deltas are deliberately never persisted. Telegram partial-text streaming and live
+  status remain deferred (they need message editing, rate limiting, and a consumer design).
 - **Long-running daemon ↔ long-running service** (matches autostart). No spawn-per-turn overhead or
   5-minute timeout.
 

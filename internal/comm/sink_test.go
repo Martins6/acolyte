@@ -2,8 +2,10 @@ package comm
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,13 +16,23 @@ import (
 )
 
 type fakeSynthTurn struct {
-	result *opencode.TurnResult
-	err    error
-	calls  int
+	result  *opencode.TurnResult
+	err     error
+	calls   int
+	configs []opencode.TurnConfig
+	events  []opencode.Event
 }
 
-func (f *fakeSynthTurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+func (f *fakeSynthTurn) RunSyntheticTurn(_ context.Context, _ string, _ opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.calls++
+	f.configs = append(f.configs, cfg)
+	for _, event := range f.events {
+		if cfg.OnEvent != nil {
+			if err := cfg.OnEvent(event); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if f.result == nil {
 		f.result = &opencode.TurnResult{SessionID: "ses_synth", InputID: "msg_in", ResponseText: "reply", MessageIDs: []string{"msg_out"}}
 	}
@@ -36,7 +48,12 @@ func newSinkHarness(t *testing.T) (*OutboxSink, *storepool.Pool, registry.Agent,
 	}
 	pool := storepool.New()
 	now := time.Now().UTC().Truncate(time.Second)
-	sink := &OutboxSink{Stores: pool, Turn: &fakeSynthTurn{}, Now: func() time.Time { return now }}
+	sink := &OutboxSink{
+		Stores:   pool,
+		Turn:     &fakeSynthTurn{},
+		Now:      func() time.Time { return now },
+		Activity: &ActivityRecorder{},
+	}
 	return sink, pool, registry.Agent{Name: "valet", Workspace: ws}, func() { _ = pool.CloseAll() }
 }
 
@@ -124,6 +141,61 @@ func TestOutboxSinkInboxWithoutChat(t *testing.T) {
 	}
 	if message == "" {
 		t.Error("expected a no-channel log entry")
+	}
+}
+
+func TestOutboxSinkInboxRecordsToolActivity(t *testing.T) {
+	sink, pool, agent, cleanup := newSinkHarness(t)
+	defer cleanup()
+	fake := sink.Turn.(*fakeSynthTurn)
+	fake.events = []opencode.Event{
+		{ID: "evt_1", Type: "session.tool.success", Data: json.RawMessage(
+			`{"sessionID":"ses_synth","assistantMessageID":"msg_out","id":"tool_1","content":[{"type":"text","text":"secret"}]}`)},
+		{ID: "evt_2", Type: "session.message.content.updated", Data: json.RawMessage(
+			`{"sessionID":"ses_synth","content":[{"type":"text","text":"secret"}]}`)},
+	}
+	if _, _, err := sink.Inbox(context.Background(), agent, "", "ping", nil); err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(fake.configs) != 1 || fake.configs[0].OnEvent == nil {
+		t.Fatalf("turn configs = %+v, want OnEvent wired", fake.configs)
+	}
+	st, release, err := pool.Acquire(agent.Workspace)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	logs, err := st.Orch().ListLogs(0)
+	if err != nil {
+		t.Fatalf("ListLogs() error: %v", err)
+	}
+	var activity []string
+	for _, entry := range logs {
+		if entry.Source == "opencode:valet" {
+			activity = append(activity, entry.Level+"/"+entry.Message+"/"+entry.Meta)
+			if strings.Contains(entry.Meta, "secret") {
+				t.Errorf("meta leaked content: %q", entry.Meta)
+			}
+		}
+	}
+	if len(activity) != 1 {
+		t.Fatalf("activity logs = %v, want one tool row", activity)
+	}
+	if !strings.HasPrefix(activity[0], "info/tool succeeded/") || !strings.Contains(activity[0], `"tool_call_id":"tool_1"`) {
+		t.Errorf("activity log = %q", activity[0])
+	}
+}
+
+func TestOutboxSinkInboxWithoutActivityLeavesOnEventNil(t *testing.T) {
+	sink, _, agent, cleanup := newSinkHarness(t)
+	defer cleanup()
+	sink.Activity = nil
+	if _, _, err := sink.Inbox(context.Background(), agent, "", "ping", nil); err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	fake := sink.Turn.(*fakeSynthTurn)
+	if len(fake.configs) != 1 || fake.configs[0].OnEvent != nil {
+		t.Fatalf("turn configs = %+v, want nil OnEvent", fake.configs)
 	}
 }
 

@@ -30,11 +30,16 @@ type TurnRunner interface {
 // Outbound routes an outbound envelope to the agent's Communication adapter.
 type Outbound func(ctx context.Context, agent registry.Agent, env envelope.Envelope) error
 
+// EventRecorder builds the per-turn event handler for an agent. A nil factory
+// leaves TurnConfig.OnEvent unset.
+type EventRecorder func(agent registry.Agent, st *store.Store) opencode.EventHandler
+
 // RouterOptions configures the inbound turn router.
 type RouterOptions struct {
 	Stores         StoreProvider
 	Turn           TurnRunner
 	Outbound       Outbound
+	EventRecorder  EventRecorder
 	Now            func() time.Time
 	MaxConcurrency int
 }
@@ -46,6 +51,7 @@ type Router struct {
 	stores   StoreProvider
 	turn     TurnRunner
 	outbound Outbound
+	events   EventRecorder
 	now      func() time.Time
 	sem      chan struct{}
 
@@ -76,6 +82,7 @@ func NewRouter(opts RouterOptions) (*Router, error) {
 		stores:   opts.Stores,
 		turn:     opts.Turn,
 		outbound: opts.Outbound,
+		events:   opts.EventRecorder,
 		now:      opts.Now,
 		sem:      make(chan struct{}, opts.MaxConcurrency),
 		locks:    map[string]*threadLock{},
@@ -131,7 +138,11 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 	defer func() { <-r.sem }()
 
-	result, turnErr := r.turn.RunUserTurn(ctx, sessionID, text, opencode.TurnConfig{Workspace: agent.Workspace})
+	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
+	if r.events != nil {
+		cfg.OnEvent = r.events(agent, st)
+	}
+	result, turnErr := r.turn.RunUserTurn(ctx, sessionID, text, cfg)
 	if result != nil && result.SessionID != "" {
 		if _, err := st.Orch().UpsertSession(env.Thread, result.SessionID, r.now()); err != nil && turnErr == nil {
 			turnErr = err

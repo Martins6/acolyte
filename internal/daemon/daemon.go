@@ -115,15 +115,21 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		refreshInterval: opts.RefreshInterval,
 		now:             opts.Now,
 		factory:         opts.CommFactory,
-		sink:            comm.OutboxSink{Stores: opts.Stores, Turn: opts.OpenCode, Now: opts.Now},
-		done:            make(chan struct{}),
-		agents:          map[string]*agentRuntime{},
+		sink: comm.OutboxSink{
+			Stores:   opts.Stores,
+			Turn:     opts.OpenCode,
+			Now:      opts.Now,
+			Activity: &comm.ActivityRecorder{},
+		},
+		done:   make(chan struct{}),
+		agents: map[string]*agentRuntime{},
 	}
 	router, err := comm.NewRouter(comm.RouterOptions{
-		Stores:   opts.Stores,
-		Turn:     opts.OpenCode,
-		Outbound: service.sendOutbound,
-		Now:      opts.Now,
+		Stores:        opts.Stores,
+		Turn:          opts.OpenCode,
+		Outbound:      service.sendOutbound,
+		EventRecorder: comm.ActivityEventRecorder,
+		Now:           opts.Now,
 	})
 	if err != nil {
 		return nil, err
