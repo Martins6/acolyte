@@ -155,6 +155,23 @@ func (s *Store) UpsertSession(thread, opencodeSessionID string, at time.Time) (S
 	return session, nil
 }
 
+// DeleteSession removes the thread mapping. It reports whether a mapping existed.
+func (s *Store) DeleteSession(thread string) (bool, error) {
+	thread = strings.TrimSpace(thread)
+	if thread == "" {
+		return false, fmt.Errorf("orch: session thread is required")
+	}
+	result, err := s.db.Exec(`DELETE FROM orch_sessions WHERE thread = ?`, thread)
+	if err != nil {
+		return false, fmt.Errorf("orch: delete session %q: %w", thread, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: delete session %q: %w", thread, err)
+	}
+	return affected > 0, nil
+}
+
 // TouchSession updates last_active_at for an existing thread.
 func (s *Store) TouchSession(thread string, at time.Time) error {
 	if at.IsZero() {

@@ -27,6 +27,9 @@ type fakeAPI struct {
 	sent          []*bot.SendMessageParams
 	sentPhotos    []*bot.SendPhotoParams
 	sentPhotoData [][]byte
+	sentReactions []*bot.SetMessageReactionParams
+	chatActions   []*bot.SendChatActionParams
+	myCommands    []*bot.SetMyCommandsParams
 	sendErr       error
 	getFileErr    error
 	getFileCalls  int
@@ -70,6 +73,45 @@ func (f *fakeAPI) GetFile(_ context.Context, _ *bot.GetFileParams) (*models.File
 		return nil, f.getFileErr
 	}
 	return &models.File{FilePath: "files/x.jpg"}, nil
+}
+
+func (f *fakeAPI) SendChatAction(_ context.Context, params *bot.SendChatActionParams) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.chatActions = append(f.chatActions, params)
+	if f.sendErr != nil {
+		return false, f.sendErr
+	}
+	return true, nil
+}
+
+func (f *fakeAPI) SetMessageReaction(_ context.Context, params *bot.SetMessageReactionParams) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sentReactions = append(f.sentReactions, params)
+	if f.sendErr != nil {
+		return false, f.sendErr
+	}
+	return true, nil
+}
+
+func (f *fakeAPI) SetMyCommands(_ context.Context, params *bot.SetMyCommandsParams) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.myCommands = append(f.myCommands, params)
+	if f.sendErr != nil {
+		return false, f.sendErr
+	}
+	return true, nil
+}
+
+func (f *fakeAPI) GetMe(_ context.Context) (*models.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
+	return &models.User{ID: 12345, IsBot: true, Username: "acolyte_bot"}, nil
 }
 
 func (f *fakeAPI) Token() string { return "token" }

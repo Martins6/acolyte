@@ -1,8 +1,10 @@
 // Package telegramtest provides an in-process Telegram Bot API emulator for
 // regression tests. It implements the small subset of the Bot API the Acolyte
-// Telegram adapter uses (getMe, getUpdates, sendMessage, getFile and file
-// downloads) over a real HTTP server, so tests exercise the production bot
-// client, polling, retries and media downloads without touching Telegram.
+// Telegram adapter uses (getMe, getUpdates, sendMessage, sendPhoto, getFile,
+// file downloads, setMessageReaction, sendChatAction and setMyCommands) over a
+// real HTTP server, so tests exercise the production bot client, polling,
+// retries, reactions, typing indicators and media downloads without touching
+// Telegram.
 package telegramtest
 
 import (
@@ -44,6 +46,20 @@ type Failure struct {
 	Description string
 }
 
+// SentReaction is one accepted setMessageReaction call. Emoji is the first
+// emoji in the reaction list, or empty when the update only removed reactions.
+type SentReaction struct {
+	ChatID    int64
+	MessageID int
+	Emoji     string
+}
+
+// ChatActionCall is one accepted sendChatAction call.
+type ChatActionCall struct {
+	ChatID int64
+	Action string
+}
+
 // Server is an in-process Telegram Bot API replacement.
 type Server struct {
 	// URL is the base URL to pass to telegram.Options.ServerURL.
@@ -60,6 +76,9 @@ type Server struct {
 	nextMessageID int64
 	messages      []SentMessage
 	messageNotify chan struct{}
+	reactions     []SentReaction
+	chatActions   []ChatActionCall
+	commands      []models.BotCommand
 	files         map[string]fileEntry
 	filesByPath   map[string][]byte
 	failures      map[string][]Failure
@@ -246,6 +265,75 @@ func (s *Server) Calls(method string) int {
 	return s.calls[method]
 }
 
+// Reactions returns every accepted setMessageReaction call in order.
+func (s *Server) Reactions() []SentReaction {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]SentReaction(nil), s.reactions...)
+}
+
+// ChatActions returns every accepted sendChatAction call in order.
+func (s *Server) ChatActions() []ChatActionCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ChatActionCall(nil), s.chatActions...)
+}
+
+// Commands returns the command menu from the most recent setMyCommands call.
+func (s *Server) Commands() []models.BotCommand {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]models.BotCommand(nil), s.commands...)
+}
+
+// WaitForReaction waits until a reaction was accepted for one message in one
+// chat.
+func (s *Server) WaitForReaction(ctx context.Context, chatID int64, messageID int) (SentReaction, error) {
+	for {
+		for _, reaction := range s.Reactions() {
+			if reaction.ChatID == chatID && reaction.MessageID == messageID {
+				return reaction, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return SentReaction{}, fmt.Errorf("telegramtest: waiting for a reaction to message %d in chat %d: %w",
+				messageID, chatID, ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// WaitForChatAction waits until a chat action was accepted for one chat.
+func (s *Server) WaitForChatAction(ctx context.Context, chatID int64) (ChatActionCall, error) {
+	for {
+		for _, action := range s.ChatActions() {
+			if action.ChatID == chatID {
+				return action, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ChatActionCall{}, fmt.Errorf("telegramtest: waiting for a chat action in chat %d: %w", chatID, ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// WaitForCommands waits until a non-empty command menu was registered.
+func (s *Server) WaitForCommands(ctx context.Context) ([]models.BotCommand, error) {
+	for {
+		if commands := s.Commands(); len(commands) > 0 {
+			return commands, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("telegramtest: waiting for a command menu: %w", ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 // WaitForCalls waits until a Bot API method has been requested want times.
 func (s *Server) WaitForCalls(ctx context.Context, method string, want int) error {
 	for {
@@ -313,6 +401,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleSendPhoto(w, form)
 	case "getFile":
 		s.handleGetFile(w, form)
+	case "setMessageReaction":
+		s.handleSetMessageReaction(w, form)
+	case "sendChatAction":
+		s.handleSendChatAction(w, form)
+	case "setMyCommands":
+		s.handleSetMyCommands(w, form)
 	default:
 		writeError(w, http.StatusNotFound, "Not Found: method "+method)
 	}
@@ -448,6 +542,74 @@ func (s *Server) handleGetFile(w http.ResponseWriter, form map[string][]string) 
 		return
 	}
 	writeOK(w, models.File{FileID: fileID, FileUniqueID: fileID, FileSize: int64(len(file.data)), FilePath: file.path})
+}
+
+func (s *Server) handleSetMessageReaction(w http.ResponseWriter, form map[string][]string) {
+	chatID, err := parseChatID(formString(form, "chat_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Bad Request: chat not found")
+		return
+	}
+	messageID := formInt(form, "message_id")
+	if messageID == 0 {
+		writeError(w, http.StatusBadRequest, "Bad Request: message not found")
+		return
+	}
+	emoji := ""
+	if raw := formString(form, "reaction"); raw != "" {
+		var reactions []models.ReactionType
+		if err := json.Unmarshal([]byte(raw), &reactions); err != nil {
+			writeError(w, http.StatusBadRequest, "Bad Request: invalid reaction")
+			return
+		}
+		for _, reaction := range reactions {
+			if reaction.ReactionTypeEmoji != nil && reaction.ReactionTypeEmoji.Emoji != "" {
+				emoji = reaction.ReactionTypeEmoji.Emoji
+				break
+			}
+		}
+	}
+
+	s.mu.Lock()
+	s.reactions = append(s.reactions, SentReaction{ChatID: chatID, MessageID: messageID, Emoji: emoji})
+	s.mu.Unlock()
+
+	writeOK(w, true)
+}
+
+func (s *Server) handleSendChatAction(w http.ResponseWriter, form map[string][]string) {
+	chatID, err := parseChatID(formString(form, "chat_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Bad Request: chat not found")
+		return
+	}
+	action := formString(form, "action")
+	if action == "" {
+		writeError(w, http.StatusBadRequest, "Bad Request: action is empty")
+		return
+	}
+
+	s.mu.Lock()
+	s.chatActions = append(s.chatActions, ChatActionCall{ChatID: chatID, Action: action})
+	s.mu.Unlock()
+
+	writeOK(w, true)
+}
+
+func (s *Server) handleSetMyCommands(w http.ResponseWriter, form map[string][]string) {
+	var commands []models.BotCommand
+	if raw := formString(form, "commands"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &commands); err != nil {
+			writeError(w, http.StatusBadRequest, "Bad Request: invalid commands")
+			return
+		}
+	}
+
+	s.mu.Lock()
+	s.commands = append([]models.BotCommand(nil), commands...)
+	s.mu.Unlock()
+
+	writeOK(w, true)
 }
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {

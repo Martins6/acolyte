@@ -58,6 +58,7 @@ func (a *Adapter) handleUpdate(ctx context.Context, _ *bot.Bot, update *models.U
 	if !inserted {
 		return
 	}
+	a.acknowledge(ctx, msg.Chat.ID, msg.ID)
 	a.processAndAdmit(ctx, env, msg)
 }
 
@@ -75,15 +76,21 @@ func (a *Adapter) baseEnvelope(msg *models.Message, updateID int64) envelope.Env
 		envelope.Party{Kind: envelope.PartyAgent, ID: a.agent.Name, Name: a.agent.Name},
 		content)
 	env.Meta = map[string]any{
-		"telegram_update_id":  updateID,
-		"telegram_message_id": int64(msg.ID),
-		"telegram_chat_id":    msg.Chat.ID,
-		"telegram_user_id":    msg.From.ID,
+		"telegram_update_id":    updateID,
+		"telegram_message_id":   int64(msg.ID),
+		"telegram_chat_id":      msg.Chat.ID,
+		"telegram_user_id":      msg.From.ID,
+		"telegram_bot_username": a.username,
 	}
 	return env
 }
 
 func (a *Adapter) processAndAdmit(ctx context.Context, env envelope.Envelope, msg *models.Message) {
+	// The typing indicator also covers media downloads below, so start it
+	// before any work and stop it when the turn and enqueue are done.
+	stopTyping := a.startTyping(ctx, msg.Chat.ID)
+	defer stopTyping()
+
 	if hasMedia(msg) {
 		text, mediaPath, contentType, err := a.buildContent(ctx, msg)
 		if err != nil {
