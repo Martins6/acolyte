@@ -252,11 +252,12 @@ it produces**, documented in `docs/memory/…`.
   `args.days` days reviews the **last `args.days` days** of sessions and decides whether to distill
   anything into the **persona files** (`.acolyte/*.md`) or a **skill** (`.agents/skills/<id>/SKILL.md`).
   **Conservative:** when in doubt, don't write — only when it's *super extra clear*; and be **super
-  compact** when there are many sessions. The run is prompt-guided and uses its own cron session;
-  every run records a `mem_dreams` audit row (sessions scanned, skills created, dry-run, changed
-  paths). `acolyte cron --dry-run` makes the same prompt proposal-only. Both model phases run under
-  a **session-scoped OpenCode permission ruleset** (`PATCH /api/session/{id}`): the analysis phase is
-  read-only, and the writer phase can edit only `.acolyte/*.md` (never `HEARTBEAT.md`) or
+  compact** when there are many sessions. The run is prompt-guided: the analysis phase uses its own
+  cron session (`cron:<job>`) and the writer phase reuses a persistent `cron:<job>:validator`
+  session; every run records a `mem_dreams` audit row (sessions scanned, skills created, dry-run,
+  changed paths). `acolyte cron --dry-run` makes the same prompt proposal-only. Both model phases run
+  under a **session-scoped OpenCode permission ruleset** (`PATCH /api/session/{id}`): the analysis
+  phase is read-only, and the writer phase can edit only `.acolyte/*.md` (never `HEARTBEAT.md`) or
   `.agents/skills/<id>/SKILL.md`. Edit and shell are denied everywhere else (including
   `external_directory`), so a prompt-injected phase cannot write outside the memory roots or replace
   a root with a symlink; the post-turn snapshot remains as a second, policy-level check.

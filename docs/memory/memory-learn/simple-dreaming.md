@@ -12,10 +12,12 @@ whether anything is worth distilling into the **persona files** or a **skill**. 
    every `days` days. It shows up in `acolyte cron list`.
 2. On fire, it lists the agent's sessions, keeps those updated in the lookback window, and builds a
    compact digest. The digest is fenced as **untrusted data** in the prompt.
-3. It runs **two prompt-guided turns** in its own cron session:
-   - **analysis** — reads only the digest and proposes candidate durable facts/procedures. This turn
-     is **read-only**.
-   - **writer** — independently validates the candidates, then reads `.acolyte/*.md` and
+3. It runs **two prompt-guided turns**, each with its own session:
+   - **analysis** — runs in the routine's cron session (`cron:<job>`), reads only the digest and
+     proposes candidate durable facts/procedures. This turn is **read-only**.
+   - **writer** — runs in a persistent validator session (`cron:<job>:validator`) that the first
+     writer run creates and every later run reuses, so the writer keeps its own conversation
+     across dreams. It independently validates the candidates, then reads `.acolyte/*.md` and
      `.agents/skills/` as needed and updates the persona or creates/updates a skill.
 4. Both turns run under a **session-scoped OpenCode permission ruleset** applied for the turn and
    restored afterwards:
@@ -46,6 +48,10 @@ whether anything is worth distilling into the **persona files** or a **skill**. 
 
 ## Artifacts
 - A **headless cron job** (`orch_cron_jobs`: `owner=memory-learn`, `kind=routine`, `spec` = every N days).
+- **Session mappings** (`orch_sessions`): the analysis turn uses `cron:<job>`; the writer turn reuses
+  the persistent `cron:<job>:validator` session created by its first run (no new `/api/session` on
+  later runs). If that OpenCode session is later deleted, the next run treats the 404 as "no session",
+  creates a new writer session, and replaces the mapping.
 - Output: skills under `.agents/skills/`, persona edits in `.acolyte/*.md`, a `mem_dreams` row with
   the digest summary, dry-run flag, and changed paths.
 
