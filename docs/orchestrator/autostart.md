@@ -49,7 +49,9 @@ anything.
 `acolyte start --log-file <path>` uses the same rotating writer without a
 service manager. All service definitions bake `PATH`, `HOME`, and
 `ACOLYTE_HOME`, because launchd and systemd do not inherit a login shell's
-environment (notably, `opencode` must be findable).
+environment (notably, `opencode` must be findable). When `$SHELL` is set in the
+installing shell, its value is baked in too, so cron `shell` jobs still run with
+the user's login shell under the service.
 
 ## Manual reference
 
@@ -75,6 +77,7 @@ environment (notably, `opencode` must be findable).
     <key>HOME</key><string>/Users/YOU</string>
     <key>ACOLYTE_HOME</key><string>/Users/YOU/.acolyte</string>
     <key>PATH</key><string>/Users/YOU/.opencode/bin:/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>SHELL</key><string>/bin/zsh</string>
   </dict>
   <key>StandardOutPath</key><string>/Users/YOU/.acolyte/logs/daemon.err.log</string>
   <key>StandardErrorPath</key><string>/Users/YOU/.acolyte/logs/daemon.err.log</string>
@@ -107,6 +110,7 @@ Type=simple
 Environment="HOME=/home/you"
 Environment="ACOLYTE_HOME=/home/you/.acolyte"
 Environment="PATH=/home/you/.opencode/bin:/home/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/snap/bin"
+Environment="SHELL=/bin/zsh"
 WorkingDirectory="/home/you/.acolyte"
 ExecStart="/home/you/.local/bin/acolyte" "start"
 Restart=always

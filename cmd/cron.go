@@ -301,10 +301,10 @@ func runCronCreate(w io.Writer, opts cronCreateOptions) error {
 		job.Routine = name
 		job.RoutineArgs = string(raw)
 		if jobMeta.OnSuccess == "" {
-			jobMeta.OnSuccess = "notify-user"
+			jobMeta.OnSuccess = "log"
 		}
 		if jobMeta.OnFailure == "" {
-			jobMeta.OnFailure = "notify-user"
+			jobMeta.OnFailure = "log"
 		}
 	}
 

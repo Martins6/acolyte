@@ -51,6 +51,10 @@ type Options struct {
 	UID int
 	// PATH is the PATH the service should run with.
 	PATH string
+	// Shell is the SHELL exported to the service (optional). It lets cron
+	// shell jobs run with the user's login shell instead of failing because
+	// launchd/systemd do not inherit one.
+	Shell string
 }
 
 // Command is one service-manager command in the install sequence.
@@ -222,6 +226,7 @@ func applyDefaults(opts *Options) error {
 	if strings.TrimSpace(opts.PATH) == "" {
 		opts.PATH = DefaultPath(opts.UserHome)
 	}
+	opts.Shell = strings.TrimSpace(opts.Shell)
 
 	// Unit files are line-oriented: a newline in any value would inject a
 	// directive into systemd units, and control characters are invalid XML in
@@ -232,6 +237,7 @@ func applyDefaults(opts *Options) error {
 		"user home": opts.UserHome,
 		"user name": opts.UserName,
 		"PATH":      opts.PATH,
+		"SHELL":     opts.Shell,
 	} {
 		if err := validateNoControl(name, value); err != nil {
 			return err

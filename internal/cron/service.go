@@ -478,9 +478,15 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 		action = meta.OnFailure
 	}
 	if action == "" {
-		if success && job.Kind == "shell" {
+		switch {
+		case job.Kind == "routine":
+			// Routine output is internal by default. Routines that need to
+			// reach the user deliver through the sink themselves (heartbeat),
+			// and an explicit on_success/on_failure can still opt in.
+			action = "log"
+		case success && job.Kind == "shell":
 			action = "inbox"
-		} else {
+		default:
 			action = "notify-user"
 		}
 	}
