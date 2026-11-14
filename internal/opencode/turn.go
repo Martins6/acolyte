@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/martins6/acolyte/internal/lock"
@@ -34,8 +35,9 @@ type TurnConfig struct {
 	Permissions []PermissionRule
 
 	// OnEvent, when non-nil, receives the session's events (idle, text deltas,
-	// tool activity) while the turn runs. The event stream is best-effort: a
-	// subscription failure never fails or stalls the turn itself.
+	// tool activity) while the turn runs. The event stream is best-effort: the
+	// turn waits a bounded time for the subscription to be established before
+	// admitting the prompt, but a subscription failure never fails the turn.
 	OnEvent EventHandler
 }
 
@@ -232,31 +234,6 @@ var permissionRestoreTimeout = 10 * time.Second
 // not touch session state. A failed restriction aborts the turn (fail closed);
 // a failed restore is surfaced to the caller but leaves the safer rules in
 // place.
-// startEventObserver runs an optional best-effort event subscription for the
-// duration of a turn. It returns a cancel function; callers must always call
-// it (normally with defer).
-func (c *Client) startEventObserver(ctx context.Context, sessionID string, handle EventHandler) func() {
-	if handle == nil {
-		return func() {}
-	}
-	eventCtx, cancel := context.WithCancel(ctx)
-	go func() {
-		_ = c.SubscribeEvents(eventCtx, []string{
-			"session.idle",
-			"session.text.delta",
-			"session.tool.called",
-			"session.tool.success",
-			"session.tool.failed",
-		}, func(event Event) error {
-			if event.SessionID() != sessionID {
-				return nil
-			}
-			return handle(event)
-		})
-	}()
-	return cancel
-}
-
 func (c *Client) restrictSession(ctx context.Context, info *SessionInfo, permissions []PermissionRule) (func() error, error) {
 	if permissions == nil {
 		return func() error { return nil }, nil
@@ -273,6 +250,48 @@ func (c *Client) restrictSession(ctx context.Context, info *SessionInfo, permiss
 		}
 		return nil
 	}, nil
+}
+
+// eventReadyTimeout bounds how long a turn waits for the event stream to be
+// established before admitting the prompt. A var so tests can shorten it.
+var eventReadyTimeout = 2 * time.Second
+
+// startEventObserver runs an optional best-effort event subscription for the
+// duration of a turn. When a handler is set it waits, bounded by
+// eventReadyTimeout, for the stream to be established so events emitted at the
+// start of the turn are not missed; a failure to establish never fails the
+// turn. It returns a cancel function; callers must always call it (normally
+// with defer).
+func (c *Client) startEventObserver(ctx context.Context, sessionID string, handle EventHandler) func() {
+	if handle == nil {
+		return func() {}
+	}
+	eventCtx, cancel := context.WithCancel(ctx)
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	signalReady := func() {
+		readyOnce.Do(func() { close(ready) })
+	}
+	go func() {
+		_ = c.subscribeEvents(eventCtx, []string{
+			"session.idle",
+			"session.text.delta",
+			"session.tool.called",
+			"session.tool.success",
+			"session.tool.failed",
+		}, func(event Event) error {
+			if event.SessionID() != sessionID {
+				return nil
+			}
+			return handle(event)
+		}, signalReady)
+	}()
+	select {
+	case <-ready:
+	case <-ctx.Done():
+	case <-time.After(eventReadyTimeout):
+	}
+	return cancel
 }
 
 // collectTurn waits for the agent loop to go idle and returns the assistant
