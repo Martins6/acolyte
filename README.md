@@ -350,7 +350,7 @@ JPEG, PNG, and WebP are accepted up to 10 MiB; the image is copied under
 | -------------------------------------------- | ---------------------------------------------- |
 | `acolyte new --name <n> --workspace-folder <p> --config '<json>'` | Scaffold, validate, and register an agent |
 | `acolyte config <agent> get\|set\|edit`       | Read or update an agent's runtime capabilities |
-| `acolyte status [name\|workspace]`           | List agents or show one agent's jobs/activity  |
+| `acolyte status [name\|workspace]`           | List agents or show one agent's channels, allowed users, last message, jobs/activity |
 | `acolyte delete <name\|workspace>`           | Remove an agent from the registry (folder kept) |
 | `acolyte cron ...`                           | Manage scheduled prompt/shell/routine jobs     |
 | `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service            |
