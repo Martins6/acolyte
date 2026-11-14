@@ -242,17 +242,63 @@ func TestRouterWithoutEventRecorderLeavesOnEventNil(t *testing.T) {
 	}
 }
 
-func TestRouterMediaPrompt(t *testing.T) {
-	h := newRouterHarness(t, 4)
-	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(11),
-		envelope.Party{Kind: envelope.PartyUser, ID: "11"},
-		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
-		envelope.Content{Type: envelope.ContentMedia, Media: []string{"/tmp/photo.jpg"}})
-	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
-		t.Fatalf("HandleInbound() error: %v", err)
+func TestRouterPromptIncludesMedia(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		media     []string
+		want      string
+		pathLines int
+	}{
+		{
+			name:      "text and media",
+			text:      "look at this",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "look at this\nFile located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "media only",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "File located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "text already names the path",
+			text:      "File located at: /tmp/photo.jpg\nFile type: Photo\n\nUser message: look",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "File located at: /tmp/photo.jpg\nFile type: Photo\n\nUser message: look",
+			pathLines: 1,
+		},
+		{
+			name:      "multiple media files",
+			text:      "see these",
+			media:     []string{"/tmp/a.jpg", "/tmp/b.pdf"},
+			want:      "see these\nFile located at: /tmp/a.jpg\nFile located at: /tmp/b.pdf",
+			pathLines: 2,
+		},
 	}
-	if len(h.turn.prompts) != 1 || !strings.Contains(h.turn.prompts[0], "/tmp/photo.jpg") {
-		t.Errorf("prompts = %v", h.turn.prompts)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRouterHarness(t, 1)
+			env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(11),
+				envelope.Party{Kind: envelope.PartyUser, ID: "11"},
+				envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+				envelope.Content{Type: envelope.ContentMedia, Text: tt.text, Media: tt.media})
+			if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+				t.Fatalf("HandleInbound() error: %v", err)
+			}
+			if len(h.turn.prompts) != 1 {
+				t.Fatalf("prompts = %d, want 1", len(h.turn.prompts))
+			}
+			got := h.turn.prompts[0]
+			if got != tt.want {
+				t.Errorf("prompt = %q, want %q", got, tt.want)
+			}
+			if lines := strings.Count(got, "File located at:"); lines != tt.pathLines {
+				t.Errorf("File located at lines = %d, want %d in %q", lines, tt.pathLines, got)
+			}
+		})
 	}
 }
 
