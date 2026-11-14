@@ -73,15 +73,16 @@ type runOptions struct {
 // agent is resolved, on failure too (with error set and the session id kept
 // whenever OpenCode created one).
 type runResult struct {
-	Agent      string   `json:"agent"`
-	Workspace  string   `json:"workspace"`
-	Thread     string   `json:"thread"`
-	SessionID  string   `json:"session_id"`
-	InputID    string   `json:"input_id,omitempty"`
-	MessageIDs []string `json:"message_ids,omitempty"`
-	Reply      string   `json:"reply"`
-	Error      string   `json:"error,omitempty"`
-	DurationMS int64    `json:"duration_ms"`
+	Agent        string                  `json:"agent"`
+	Workspace    string                  `json:"workspace"`
+	Thread       string                  `json:"thread"`
+	SessionID    string                  `json:"session_id"`
+	InputID      string                  `json:"input_id,omitempty"`
+	MessageIDs   []string                `json:"message_ids,omitempty"`
+	ToolActivity []opencode.ToolActivity `json:"tool_activity,omitempty"`
+	Reply        string                  `json:"reply"`
+	Error        string                  `json:"error,omitempty"`
+	DurationMS   int64                   `json:"duration_ms"`
 }
 
 func runRun(ctx context.Context, stdout, stderr io.Writer, text string, opts runOptions) error {
@@ -138,6 +139,7 @@ func runRun(ctx context.Context, stdout, stderr io.Writer, text string, opts run
 		out.SessionID = result.SessionID
 		out.InputID = result.InputID
 		out.MessageIDs = result.MessageIDs
+		out.ToolActivity = result.ToolActivity
 		out.Reply = result.ResponseText
 	}
 

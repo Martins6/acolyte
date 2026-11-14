@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/store"
 )
 
@@ -202,8 +203,45 @@ func TestRunJSONOutput(t *testing.T) {
 	if got.Error != "" {
 		t.Errorf("error = %q, want empty", got.Error)
 	}
+	if strings.Contains(out.String(), "tool_activity") {
+		t.Errorf("json = %q, want no tool_activity when empty", out.String())
+	}
 	if errOut.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", errOut.String())
+	}
+}
+
+func TestRunJSONToolActivity(t *testing.T) {
+	setupCronCLI(t)
+	fake := &fakeCLITurn{result: &opencode.TurnResult{
+		SessionID:    "ses_cli",
+		InputID:      "msg_in",
+		ResponseText: "reply",
+		MessageIDs:   []string{"msg_out"},
+		ToolActivity: []opencode.ToolActivity{
+			{Name: "bash", Status: "completed", ID: "tool_1"},
+		},
+	}}
+	withFakeTurn(t, fake)
+
+	var out, errOut bytes.Buffer
+	err := runRun(context.Background(), &out, &errOut, "hello", runOptions{
+		AgentName: "valet",
+		JSON:      true,
+	})
+	if err != nil {
+		t.Fatalf("runRun() error: %v", err)
+	}
+	var got runResult
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("json output: %v; raw %q", err, out.String())
+	}
+	want := []opencode.ToolActivity{{Name: "bash", Status: "completed", ID: "tool_1"}}
+	if len(got.ToolActivity) != 1 || got.ToolActivity[0] != want[0] {
+		t.Errorf("tool activity = %+v, want %+v", got.ToolActivity, want)
+	}
+	if !strings.Contains(out.String(), `"tool_activity"`) {
+		t.Errorf("json = %q, want tool_activity key", out.String())
 	}
 }
 

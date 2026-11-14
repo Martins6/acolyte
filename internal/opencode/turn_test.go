@@ -156,7 +156,10 @@ func TestRunSyntheticTurnAppliesAndRestoresPermissions(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x/message":
 			fmt.Fprint(w, `{"data":[
-				{"id":"msg_reply","type":"assistant","time":{"created":2},"content":[{"type":"text","text":"done"}]},
+				{"id":"msg_reply","type":"assistant","time":{"created":2},"content":[
+					{"type":"tool","id":"tool_synth","name":"bash","state":{"status":"completed"}},
+					{"type":"text","text":"done"}
+				]},
 				{"id":"msg_ev","type":"synthetic","time":{"created":1},"text":"event"}
 			],"cursor":{"previous":null,"next":null}}`)
 		default:
@@ -174,6 +177,10 @@ func TestRunSyntheticTurnAppliesAndRestoresPermissions(t *testing.T) {
 	}
 	if result.ResponseText != "done" {
 		t.Errorf("response = %q, want done", result.ResponseText)
+	}
+	wantActivity := []ToolActivity{{Name: "bash", Status: "completed", ID: "tool_synth"}}
+	if !reflect.DeepEqual(result.ToolActivity, wantActivity) {
+		t.Errorf("tool activity = %+v, want %+v", result.ToolActivity, wantActivity)
 	}
 	if len(patches) != 2 {
 		t.Fatalf("permission PATCHes = %d, want restrict+restore: %+v", len(patches), patches)
@@ -263,5 +270,148 @@ func TestRunSyntheticTurnFailsClosedWhenPermissionUpdateFails(t *testing.T) {
 	}
 	if syntheticCalls != 0 {
 		t.Errorf("synthetic calls = %d, want 0 (turn must not run without restrictions)", syntheticCalls)
+	}
+}
+
+func TestRunUserTurnReturnsToolActivity(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x":
+			fmt.Fprint(w, `{"data":{"id":"ses_x","agent":"build"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_x/prompt":
+			fmt.Fprint(w, `{"data":{"id":"msg_in","sessionID":"ses_x","type":"user"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_x/wait":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x/message":
+			fmt.Fprint(w, `{"data":[
+				{"id":"msg_reply","type":"assistant","time":{"created":2},"content":[
+					{"type":"tool","id":"tool_1","name":"bash","state":{"status":"completed"}},
+					{"type":"text","text":"done"},
+					{"type":"tool","id":"tool_2","name":"read","state":{"status":"error"}}
+				]},
+				{"id":"msg_in","type":"user","time":{"created":1},"text":"hello"}
+			],"cursor":{"previous":null,"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	result, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{})
+	if err != nil {
+		t.Fatalf("RunUserTurn() error = %v", err)
+	}
+	want := []ToolActivity{
+		{Name: "bash", Status: "completed", ID: "tool_1"},
+		{Name: "read", Status: "error", ID: "tool_2"},
+	}
+	if !reflect.DeepEqual(result.ToolActivity, want) {
+		t.Errorf("tool activity = %+v, want %+v", result.ToolActivity, want)
+	}
+	if result.ResponseText != "done" {
+		t.Errorf("response = %q, want done", result.ResponseText)
+	}
+	if !reflect.DeepEqual(result.MessageIDs, []string{"msg_reply"}) {
+		t.Errorf("message ids = %v, want [msg_reply]", result.MessageIDs)
+	}
+}
+
+func TestRunUserTurnToleratesMalformedContent(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x":
+			fmt.Fprint(w, `{"data":{"id":"ses_x","agent":"build"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_x/prompt":
+			fmt.Fprint(w, `{"data":{"id":"msg_in","sessionID":"ses_x","type":"user"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_x/wait":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x/message":
+			fmt.Fprint(w, `{"data":[
+				{"id":"msg_tools","type":"assistant","time":{"created":4},"content":[
+					{"type":"tool","id":"tool_1","name":"bash","state":{"status":"completed"}}
+				]},
+				{"id":"msg_bad_part","type":"assistant","time":{"created":3},"content":[
+					{"type":42,"text":"bad"},
+					{"type":"text","text":"ok"},
+					"junk"
+				]},
+				{"id":"msg_bad_content","type":"assistant","time":{"created":2},"content":"not-an-array"},
+				{"id":"msg_in","type":"user","time":{"created":1},"text":"hello"}
+			],"cursor":{"previous":null,"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	result, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{})
+	if err != nil {
+		t.Fatalf("RunUserTurn() error = %v, want malformed content tolerated", err)
+	}
+	if result.ResponseText != "ok" {
+		t.Errorf("response = %q, want ok", result.ResponseText)
+	}
+	want := []ToolActivity{{Name: "bash", Status: "completed", ID: "tool_1"}}
+	if !reflect.DeepEqual(result.ToolActivity, want) {
+		t.Errorf("tool activity = %+v, want %+v", result.ToolActivity, want)
+	}
+}
+
+func TestAssistantToolActivity(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		msgs []Message
+		want []ToolActivity
+	}{
+		{
+			name: "text only",
+			msgs: []Message{
+				{ID: "msg_1", Type: "assistant", Raw: json.RawMessage(`{"id":"msg_1","type":"assistant","content":[{"type":"text","text":"hello"},{"type":"reasoning","text":"thinking"}]}`)},
+			},
+		},
+		{
+			name: "ordered across messages",
+			msgs: []Message{
+				{ID: "msg_1", Type: "assistant", Raw: json.RawMessage(`{"content":[{"type":"tool","id":"tool_1","name":"bash","state":{"status":"completed"}},{"type":"text","text":"a"},{"type":"tool","id":"tool_2","name":"read","state":{"status":"running"}}]}`)},
+				{ID: "msg_user", Type: "user", Raw: json.RawMessage(`{"content":[{"type":"tool","id":"tool_ignored","name":"ignored","state":{"status":"running"}}]}`)},
+				{ID: "msg_idle", Type: "idle", Raw: json.RawMessage(`{"outcome":"succeeded"}`)},
+				{ID: "msg_2", Type: "assistant", Raw: json.RawMessage(`{"content":[{"type":"tool","id":"tool_3","name":"grep","state":{"status":"error"}}]}`)},
+			},
+			want: []ToolActivity{
+				{Name: "bash", Status: "completed", ID: "tool_1"},
+				{Name: "read", Status: "running", ID: "tool_2"},
+				{Name: "grep", Status: "error", ID: "tool_3"},
+			},
+		},
+		{
+			name: "malformed content is ignored",
+			msgs: []Message{
+				{ID: "msg_bad_raw", Type: "assistant", Raw: json.RawMessage(`{"content":`)},
+				{ID: "msg_bad_shape", Type: "assistant", Raw: json.RawMessage(`{"content":"not-an-array"}`)},
+				{ID: "msg_empty", Type: "assistant"},
+				{ID: "msg_1", Type: "assistant", Raw: json.RawMessage(`{"content":[
+					{"type":"tool","id":"tool_bad_name","name":42,"state":{"status":"completed"}},
+					{"type":"tool","id":"tool_bad_state","name":"bad","state":"nope"},
+					{"type":"tool"},
+					{"type":"tool","id":"tool_ok","name":"bash","state":{"status":"completed"}}
+				]}`)},
+			},
+			want: []ToolActivity{{Name: "bash", Status: "completed", ID: "tool_ok"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := assistantToolActivity(tc.msgs); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("assistantToolActivity() = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
