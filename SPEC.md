@@ -506,7 +506,7 @@ from a valid pwd), and `--session-id <id>` (optional; default = latest session f
 | ------- | -------- |
 | `acolyte new --name <name> --workspace-folder <path> --config '<json>'` | **Scaffold + validate + register** a fresh agent with the capabilities chosen in `--config` (full key reference in [`docs/README.md`](docs/README.md)). On an existing folder it validates + adopts. |
 | `acolyte config <agent> get \| set <key> <value> \| edit` | **Runtime capability mutation** (§4): `get` prints the effective config as `--config`-shaped JSON; `set` updates one durable key (`description`, `engine.model/agent`, `communication.*`, `schedule.*`, `memory-*`) with validate-before-write, `--dry-run` diffs, and `--json`; `edit` opens `opencode.jsonc` in `$EDITOR` and re-validates it (invalid edits are rolled back). Reference: [`docs/orchestrator/config.md`](docs/orchestrator/config.md). |
-| `acolyte status [name \| workspace]` | All agents, or one: name, workspace, last active timestamp, job count + next job. Communication settings are available through `acolyte config <agent> get`. |
+| `acolyte status [name \| workspace]` | All agents, or one: name, workspace, channels, allowed Telegram users, last message timestamp, last active timestamp, job count + next job. The last message time is the newest inbound `received_at` or delivered outbound `sent_at`; message text stays in OpenCode/communication history. Full config remains available through `acolyte config <agent> get`. |
 | `acolyte delete <name \| workspace>` | Remove from the registry **only**. Folder untouched. |
 | `acolyte cron --title <t> --datetime <cron> (--prompt <text> \| --shell <path> \| --routine <name>) [--routine-args '<json>'] [--dry-run] [--agent-name\|--workspace-folder] [--session-id] [--timezone <IANA>] [--on-success inbox\|notify-user\|log] [--on-failure inbox\|notify-user\|log]` | Create a job. `--title` unique per agent; `--datetime` cron syntax; actions mutually exclusive; agent-name/workspace-folder mutually exclusive; `--dry-run` only with `--routine`; `--session-id` is rejected for `--routine`. |
 | `acolyte cron list` | Markdown table of **all** jobs: `title \| datetime \| agent \| owner \| kind \| prompt \| shell \| session` (routine jobs show `routine:<name>`; prompt jobs show `prompt:<text>`). |
@@ -715,9 +715,12 @@ admit a synthetic event; output is routed via Communication.
     to 1024 characters. `--session-id` is outbox attribution only, never a session injection.
 30. **Routine jobs are session-isolated.** `prompt`/`shell` jobs may bind to the latest session;
     `routine` jobs use `cron:<job ID>` and reject `--session-id` (§10.1/§10.3).
-31. **`acolyte status` remains a fan-out read** over local stores (identity/activity/jobs). Full
-    communication config is exposed by `acolyte config <agent> get`; the `agent_status` cache and
-    any OpenCode stats integration remain deferred.
+31. **`acolyte status` remains a fan-out read** over local stores (identity/activity/jobs plus
+    communication settings and message timestamps). It shows channels, allowed users, and the
+    newest inbound `received_at` or delivered outbound `sent_at`; message text stays in
+    OpenCode/communication history. Full communication config is exposed by
+    `acolyte config <agent> get`; the `agent_status` cache and any OpenCode stats integration
+    remain deferred.
 
 **[OPEN] forks:**
 None.
