@@ -78,15 +78,58 @@ type Message struct {
 }
 
 // UnmarshalJSON retains the original message alongside the typed fields.
+// Content is decoded tolerantly: a malformed content value or part is skipped
+// instead of failing message collection, because the raw message remains
+// available for consumers that need the original shape.
 func (m *Message) UnmarshalJSON(data []byte) error {
-	type alias Message
-	var value alias
+	var value struct {
+		ID      string          `json:"id"`
+		Type    string          `json:"type"`
+		Time    MessageTime     `json:"time"`
+		Text    string          `json:"text"`
+		Content json.RawMessage `json:"content"`
+		Outcome string          `json:"outcome"`
+		Finish  string          `json:"finish"`
+	}
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-	*m = Message(value)
+	*m = Message{
+		ID:      value.ID,
+		Type:    value.Type,
+		Time:    value.Time,
+		Text:    value.Text,
+		Content: contentParts(value.Content),
+		Outcome: value.Outcome,
+		Finish:  value.Finish,
+	}
 	m.Raw = append(m.Raw[:0], data...)
 	return nil
+}
+
+// contentParts decodes an assistant content array without letting one bad
+// part fail the message. Unknown shapes yield no parts.
+func contentParts(raw json.RawMessage) []ContentPart {
+	if len(raw) == 0 {
+		return nil
+	}
+	var parts []ContentPart
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		return parts
+	}
+	var rawParts []json.RawMessage
+	if err := json.Unmarshal(raw, &rawParts); err != nil {
+		return nil
+	}
+	parts = parts[:0]
+	for _, rawPart := range rawParts {
+		var part ContentPart
+		if err := json.Unmarshal(rawPart, &part); err != nil {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return parts
 }
 
 // MessageTime holds epoch-millisecond timestamps of a message.
@@ -99,6 +142,34 @@ type MessageTime struct {
 type ContentPart struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+}
+
+// UnmarshalJSON tolerates non-string fields and non-object parts. A field
+// with an unexpected type is dropped rather than failing the whole message;
+// a non-object part returns an error so callers can skip just that part.
+func (p *ContentPart) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*p = ContentPart{
+		Type: jsonString(fields["type"]),
+		Text: jsonString(fields["text"]),
+	}
+	return nil
+}
+
+// jsonString decodes a JSON string, returning the zero value for any other
+// shape so a single malformed field cannot fail its parent object.
+func jsonString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
 }
 
 // InboxItem is an admitted input (OpenCode Session.Inbox.User / .Synthetic).

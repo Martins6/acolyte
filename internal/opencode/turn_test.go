@@ -318,6 +318,49 @@ func TestRunUserTurnReturnsToolActivity(t *testing.T) {
 	}
 }
 
+func TestRunUserTurnToleratesMalformedContent(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x":
+			fmt.Fprint(w, `{"data":{"id":"ses_x","agent":"build"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_x/prompt":
+			fmt.Fprint(w, `{"data":{"id":"msg_in","sessionID":"ses_x","type":"user"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_x/wait":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x/message":
+			fmt.Fprint(w, `{"data":[
+				{"id":"msg_tools","type":"assistant","time":{"created":4},"content":[
+					{"type":"tool","id":"tool_1","name":"bash","state":{"status":"completed"}}
+				]},
+				{"id":"msg_bad_part","type":"assistant","time":{"created":3},"content":[
+					{"type":42,"text":"bad"},
+					{"type":"text","text":"ok"},
+					"junk"
+				]},
+				{"id":"msg_bad_content","type":"assistant","time":{"created":2},"content":"not-an-array"},
+				{"id":"msg_in","type":"user","time":{"created":1},"text":"hello"}
+			],"cursor":{"previous":null,"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	result, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{})
+	if err != nil {
+		t.Fatalf("RunUserTurn() error = %v, want malformed content tolerated", err)
+	}
+	if result.ResponseText != "ok" {
+		t.Errorf("response = %q, want ok", result.ResponseText)
+	}
+	want := []ToolActivity{{Name: "bash", Status: "completed", ID: "tool_1"}}
+	if !reflect.DeepEqual(result.ToolActivity, want) {
+		t.Errorf("tool activity = %+v, want %+v", result.ToolActivity, want)
+	}
+}
+
 func TestAssistantToolActivity(t *testing.T) {
 	t.Parallel()
 
