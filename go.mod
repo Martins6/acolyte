@@ -8,6 +8,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cobra v1.8.1
 	github.com/subosito/gotenv v1.6.0
+	golang.org/x/image v0.23.0
 	golang.org/x/sys v0.29.0
 )
 

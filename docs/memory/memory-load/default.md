@@ -17,11 +17,15 @@ native instruction/skill assembly — no custom plumbing.
 ```jsonc
 // opencode.jsonc (seeded at acolyte new)
 {
-  "instructions": [".acolyte/*.md"],
-  "skills": ["./.agents/skills"]
+  "instructions": [".acolyte/*.md"]
 }
 ```
-plus an `AGENTS.md` hub at the workspace root.
+plus an `AGENTS.md` hub at the workspace root. Project `.agents/skills/` is auto-discovered by
+OpenCode, so it does not need a `skills` entry.
+
+An explicit `"memory-load": null` selects the native OpenCode baseline instead: `opencode.jsonc`
+is scaffolded without the `.acolyte/*.md` instruction. `acolyte config <agent> set memory-load`
+toggles exactly that entry in place (`{"mode":"default"}` adds it, `null` removes it).
 
 ## Notes
 This is the baseline loader. Other planned modes (`compact`, `rolling`, `role-sliced`) change *what*

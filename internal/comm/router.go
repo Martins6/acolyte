@@ -30,11 +30,16 @@ type TurnRunner interface {
 // Outbound routes an outbound envelope to the agent's Communication adapter.
 type Outbound func(ctx context.Context, agent registry.Agent, env envelope.Envelope) error
 
+// EventRecorder builds the per-turn event handler for an agent. A nil factory
+// leaves TurnConfig.OnEvent unset.
+type EventRecorder func(agent registry.Agent, st *store.Store) opencode.EventHandler
+
 // RouterOptions configures the inbound turn router.
 type RouterOptions struct {
 	Stores         StoreProvider
 	Turn           TurnRunner
 	Outbound       Outbound
+	EventRecorder  EventRecorder
 	Now            func() time.Time
 	MaxConcurrency int
 }
@@ -46,6 +51,7 @@ type Router struct {
 	stores   StoreProvider
 	turn     TurnRunner
 	outbound Outbound
+	events   EventRecorder
 	now      func() time.Time
 	sem      chan struct{}
 
@@ -76,6 +82,7 @@ func NewRouter(opts RouterOptions) (*Router, error) {
 		stores:   opts.Stores,
 		turn:     opts.Turn,
 		outbound: opts.Outbound,
+		events:   opts.EventRecorder,
 		now:      opts.Now,
 		sem:      make(chan struct{}, opts.MaxConcurrency),
 		locks:    map[string]*threadLock{},
@@ -97,16 +104,7 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	unlock := r.lockThread(env.Thread)
 	defer unlock()
 
-	text := strings.TrimSpace(env.Content.Text)
-	if text == "" && len(env.Content.Media) > 0 {
-		var b strings.Builder
-		for _, path := range env.Content.Media {
-			b.WriteString("File located at: ")
-			b.WriteString(path)
-			b.WriteByte('\n')
-		}
-		text = strings.TrimSpace(b.String())
-	}
+	text := buildInboundPrompt(env.Content.Text, env.Content.Media)
 	if text == "" {
 		return fmt.Errorf("comm: inbound envelope has no text or media")
 	}
@@ -131,7 +129,11 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 	defer func() { <-r.sem }()
 
-	result, turnErr := r.turn.RunUserTurn(ctx, sessionID, text, opencode.TurnConfig{Workspace: agent.Workspace})
+	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
+	if r.events != nil {
+		cfg.OnEvent = r.events(agent, st)
+	}
+	result, turnErr := r.turn.RunUserTurn(ctx, sessionID, text, cfg)
 	if result != nil && result.SessionID != "" {
 		if _, err := st.Orch().UpsertSession(env.Thread, result.SessionID, r.now()); err != nil && turnErr == nil {
 			turnErr = err
@@ -162,6 +164,39 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		_ = st.CommTG().ClearInboundReply(env.ID)
 	}
 	return nil
+}
+
+const mediaPathLinePrefix = "File located at: "
+
+// buildInboundPrompt combines envelope text with resolved media paths. A path
+// already present as an exact marker line (for example the richer prompt built
+// by the Telegram adapter) is not repeated.
+func buildInboundPrompt(text string, media []string) string {
+	text = strings.TrimSpace(text)
+	for _, path := range media {
+		if path == "" || hasMediaPathLine(text, path) {
+			continue
+		}
+		if text != "" {
+			text += "\n"
+		}
+		text += mediaPathLinePrefix + path
+	}
+	return text
+}
+
+// hasMediaPathLine reports whether text contains an exact
+// "File located at: <path>" line for path.
+func hasMediaPathLine(text, path string) bool {
+	if path == "" {
+		return false
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), mediaPathLinePrefix); ok && rest == path {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Router) linkInbound(st *store.Store, env envelope.Envelope, result *opencode.TurnResult) error {

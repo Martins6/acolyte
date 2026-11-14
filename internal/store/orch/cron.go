@@ -140,6 +140,69 @@ func (s *Store) AddCronJob(job CronJob) error {
 	return fmt.Errorf("orch: add cron job %q: %w", job.Title, err)
 }
 
+// UpsertCronJobIfMatch inserts a job, or updates the job with the same title
+// only when its current owner/kind/routine match the expected capability
+// identity. The identity check runs in the same statement as the write, so a
+// user job inserted concurrently under the title can never be overwritten. It
+// reports whether a row was written.
+func (s *Store) UpsertCronJobIfMatch(job CronJob, owner, kind, routine string) (bool, error) {
+	job.Title = strings.TrimSpace(job.Title)
+	job.Kind = strings.TrimSpace(job.Kind)
+	job.Spec = strings.TrimSpace(job.Spec)
+	if job.Title == "" {
+		return false, fmt.Errorf("orch: cron job title is required")
+	}
+	if job.Kind == "" {
+		return false, fmt.Errorf("orch: cron job kind is required")
+	}
+	if job.Spec == "" {
+		return false, fmt.Errorf("orch: cron job spec is required")
+	}
+	if job.Owner != owner || job.Kind != kind || job.Routine != routine {
+		return false, fmt.Errorf("orch: cron job %q identity %q/%q/%q does not match the expected %q/%q/%q",
+			job.Title, job.Owner, job.Kind, job.Routine, owner, kind, routine)
+	}
+	if job.ID == "" {
+		job.ID = newID()
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
+	}
+
+	result, err := s.db.Exec(
+		`INSERT INTO orch_cron_jobs (`+cronColumns+`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(title) DO UPDATE SET
+		   owner = excluded.owner,
+		   kind = excluded.kind,
+		   spec = excluded.spec,
+		   prompt = excluded.prompt,
+		   shell_path = excluded.shell_path,
+		   routine = excluded.routine,
+		   routine_args = excluded.routine_args,
+		   agent_target = excluded.agent_target,
+		   session_id = excluded.session_id,
+		   timezone = excluded.timezone,
+		   enabled = excluded.enabled,
+		   next_run_at = excluded.next_run_at,
+		   meta = excluded.meta
+		 WHERE orch_cron_jobs.owner = ? AND orch_cron_jobs.kind = ? AND orch_cron_jobs.routine = ?`,
+		job.ID, job.Title, job.Owner, job.Kind, job.Spec, job.Prompt, job.ShellPath,
+		job.Routine, defaultString(job.RoutineArgs, "{}"), job.AgentTarget, job.SessionID,
+		job.Timezone, boolInt(job.Enabled), job.LastRunAt, job.NextRunAt, job.CreatedAt,
+		defaultString(job.Meta, "{}"),
+		owner, kind, routine,
+	)
+	if err != nil {
+		return false, fmt.Errorf("orch: upsert cron job %q: %w", job.Title, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: upsert cron job %q: %w", job.Title, err)
+	}
+	return affected > 0, nil
+}
+
 // DeleteCronJob removes a job by title.
 func (s *Store) DeleteCronJob(title string) error {
 	result, err := s.db.Exec(`DELETE FROM orch_cron_jobs WHERE title = ?`, strings.TrimSpace(title))
@@ -154,6 +217,25 @@ func (s *Store) DeleteCronJob(title string) error {
 		return ErrJobNotFound
 	}
 	return nil
+}
+
+// DeleteCronJobIfMatch removes a job by title only when its current
+// owner/kind/routine match the expected capability identity, so a replacement
+// job inserted concurrently under the title is never deleted. It reports
+// whether a row was deleted.
+func (s *Store) DeleteCronJobIfMatch(title, owner, kind, routine string) (bool, error) {
+	result, err := s.db.Exec(
+		`DELETE FROM orch_cron_jobs WHERE title = ? AND owner = ? AND kind = ? AND routine = ?`,
+		strings.TrimSpace(title), owner, kind, routine,
+	)
+	if err != nil {
+		return false, fmt.Errorf("orch: delete cron job %q: %w", title, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: delete cron job %q: %w", title, err)
+	}
+	return affected > 0, nil
 }
 
 // SetCronJobEnabled toggles a job without deleting it.

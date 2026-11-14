@@ -9,6 +9,11 @@ A runtime for a folder of agents, powered by OpenCode. Each agent is a self-cont
 **Both the OpenCode CLI and this binary are required to run the daemon.**
 
 - [OpenCode CLI](https://github.com/anomalyco/opencode) installed (`opencode` command available)
+- Model-provider credentials stored with OpenCode:
+
+  ```bash
+  opencode auth login
+  ```
 
 ### Quick Install (Linux/macOS)
 
@@ -62,7 +67,20 @@ This script builds the binary from local source code instead of downloading from
 2. Send `/newbot` to create a new bot
 3. Follow the instructions and get your bot token
 
-### 2. Create an Agent
+### 2. Authenticate with OpenCode
+
+Acolyte does not store model-provider credentials. It uses OpenCode's auth
+store, so connect your provider once with the OpenCode CLI:
+
+```bash
+opencode auth login
+```
+
+The managed OpenCode service, and every agent it serves, reuses those
+credentials. Prefer this over putting provider keys in Acolyte `.env` files:
+those files are for Acolyte's own secrets, such as `TELEGRAM_BOT_TOKEN`.
+
+### 3. Create an Agent
 
 ```bash
 acolyte new --name valet --workspace-folder ~/agents/valet --config '{
@@ -79,7 +97,7 @@ agent in `$ACOLYTE_HOME/registry.sqlite.db` (`~/.acolyte` by default). Use
 `acolyte status` to inspect registered agents and `acolyte delete` to remove one from
 the registry (the folder is left untouched).
 
-### 3. Configure Secrets
+### 4. Configure Secrets
 
 Acolyte loads secrets from two optional `.env` files:
 
@@ -88,6 +106,9 @@ Acolyte loads secrets from two optional `.env` files:
 
 Precedence is **process environment > workspace `.env` > global `.env`**. Both files
 are gitignored and are never created by `acolyte new`.
+
+These files are not passed to OpenCode. Model-provider credentials belong in
+OpenCode's auth store (`opencode auth login`, step 2).
 
 ```bash
 # Global (shared) secrets
@@ -101,7 +122,7 @@ TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
 EOF
 ```
 
-### 4. Start the Daemon
+### 5. Start the Daemon
 
 ```bash
 acolyte start
@@ -109,8 +130,8 @@ acolyte start
 
 The daemon serves every registered agent:
 
-- Each agent's Telegram adapter reads its token from `<workspace>/.env`, falling
-  back to `$ACOLYTE_HOME/.env` and then the process environment.
+- Each agent's Telegram adapter reads its token from the process environment,
+  falling back to `<workspace>/.env` and then `$ACOLYTE_HOME/.env`.
 - **Each agent needs a distinct bot token.** Two agents sharing a token cannot
   poll Telegram at the same time; the daemon starts one and warns about the rest.
 - Agents without a token, without Telegram in `communication.channels`, or
@@ -118,7 +139,11 @@ The daemon serves every registered agent:
 
 Press `Ctrl+C` to stop gracefully.
 
-### 5. Inspect a Session
+To keep the daemon running after a crash and start it automatically, install it
+as a service: `acolyte install-service` (see
+[Running as a Service](#running-as-a-service)).
+
+### 6. Inspect a Session
 
 `acolyte inspect` merges the OpenCode conversation with the communication
 routing/delivery rows for one session:
@@ -140,7 +165,7 @@ Running `opencode` directly in a folder starts its own server; use
 `acolyte attach` (or `opencode attach <url> --dir <workspace> --session <id>`)
 to share Acolyte's sessions.
 
-### 6. Run Headless (No Telegram, No TUI)
+### 7. Run Headless (No Telegram, No TUI)
 
 `acolyte run` sends one real user turn through the agent's OpenCode session and
 prints the reply. It uses the same managed service as the daemon and never
@@ -156,9 +181,10 @@ The first run creates a session and maps it to the `cli:<agent>` thread.
 `--continue` reuses that session; `--session-id` selects an existing session
 that is already mapped to the agent. Use `acolyte inspect --session-id <id>` to
 read the transcript, or `acolyte attach --agent-name <agent>` to open the latest
-session in the TUI.
+session in the TUI. Pass `--timeout 10m` to bound a turn; without it there is no
+built-in cap, so the turn runs until it finishes or its context is canceled.
 
-### 7. Export a Memory Trace
+### 8. Export a Memory Trace
 
 `acolyte memory export` writes one portable zip containing every OpenCode
 session as a Markdown timeline (messages, reasoning, tool calls, and
@@ -175,7 +201,11 @@ acolyte memory export --agent-name valet --out safe.zip --sanitize
 The unzipped folder is self-contained: another agent can read `README.md`,
 `manifest.json`, and `sessions/*.md` as external memory. Native
 `sessions/<id>.json` files are included when the OpenCode service supports the
-experimental session export endpoint. Existing zips are not overwritten unless
+experimental session export endpoint. Referenced Telegram media files are
+copied byte-for-byte into `communication/media/` (named with a short hash of the
+workspace-relative source path); sources outside the workspace, paths escaping
+through `..`, symlinked components, and missing or non-regular files are
+skipped with a manifest warning. Existing zips are not overwritten unless
 `--force` is passed.
 
 `--session-id` scopes the whole bundle to one session so it cannot disclose
@@ -207,6 +237,54 @@ through OpenCode's import API and maps them to
 skipped unless `--force`. Extraction rejects absolute paths, `..` traversal,
 and symlink entries, and caps sizes at 512 MiB total / 64 MiB per file.
 
+## Running as a Service
+
+`acolyte start` is a foreground process. `acolyte install-service` writes the
+native service definition, starts it, and keeps it alive:
+
+```bash
+acolyte install-service                 # current user, starts at login
+sudo acolyte install-service --system   # whole machine, starts at boot
+acolyte install-service --print         # show the unit and commands, no writes
+```
+
+The service runs the binary that invoked `install-service`. Re-run the command
+after moving or reinstalling the binary. Stop any foreground `acolyte start`
+first: Telegram allows only one long-poller per bot token.
+
+- **Linux (systemd):** user units run at login and log to journald
+  (`journalctl --user -u acolyte -f`). The installer also enables linger so a
+  user service starts at boot without a login; if that fails, run
+  `sudo loginctl enable-linger $USER`. `--system` writes
+  `/etc/systemd/system/acolyte.service`.
+- **macOS (launchd):** a user LaunchAgent starts at login; `--system` writes
+  `/Library/LaunchDaemons/ai.acolyte.daemon.plist` and starts at boot. Normal
+  logs go to `$ACOLYTE_HOME/logs/daemon.log` (rotated at 10 MiB, three
+  backups) and crash output to `daemon.err.log`.
+- **Crash recovery:** launchd uses `KeepAlive`; systemd uses `Restart=always`
+  with `RestartSec=5` and rate limiting disabled.
+
+Remove a user service with:
+
+```bash
+# macOS
+launchctl bootout gui/$(id -u)/ai.acolyte.daemon && rm ~/Library/LaunchAgents/ai.acolyte.daemon.plist
+
+# Linux
+systemctl --user disable --now acolyte.service && rm ~/.config/systemd/user/acolyte.service
+```
+
+Use `sudo launchctl bootout system/ai.acolyte.daemon` and
+`sudo rm /Library/LaunchDaemons/ai.acolyte.daemon.plist` on macOS, or
+`sudo systemctl disable --now acolyte.service` and
+`sudo rm /etc/systemd/system/acolyte.service` on Linux, for `--system`
+installs. Run `systemctl daemon-reload` (or `systemctl --user daemon-reload`)
+after removing a systemd unit.
+
+If `--system` is requested without root, the command prints the exact `sudo`
+command and the generated unit. On an unsupported platform it prints manual
+instructions for both macOS and Linux.
+
 ## Agent Workspace
 
 `acolyte new` creates the SPEC v0 layout:
@@ -224,7 +302,8 @@ and symlink entries, and caps sizes at 512 MiB total / 64 MiB per file.
 │   └── HEARTBEAT.md          #   what to look for on a heartbeat
 ├── .agents/skills/           # learned OpenCode skills
 ├── .opencode/agents/         # optional OpenCode agent overrides
-├── downloads/                # media, transcripts, artifacts
+├── media/                    # inbound/ and outbound/ media
+├── downloads/                # legacy media + memory-trace artifacts
 └── .logs/                    # daily log files
 ```
 
@@ -234,9 +313,13 @@ used; `acolyte new` still rejects a legacy `opencode.json` when adopting a folde
 
 ## Logging
 
-The daemon logs to standard output/error; under launchd or systemd those streams
-go to the service log (`journalctl -u acolyte`, or the `StandardOutPath` /
-`StandardErrorPath` in the launchd plist).
+The daemon logs to standard output/error. Under systemd those streams go to
+journald (`journalctl --user -u acolyte -f` for a user unit, or
+`journalctl -u acolyte -f` for a system unit). Under launchd,
+`acolyte install-service` passes `--log-file $ACOLYTE_HOME/logs/daemon.log`,
+which rotates at 10 MiB and keeps three backups; crash output is written to
+`daemon.err.log` in the same directory. Pass `--log-file <path>` to
+`acolyte start` to use the same rotating file without a service manager.
 
 Per-agent audit events (cron runs, delivery failures, no-channel inbox replies)
 are stored in the `orch_logs` table in `<workspace>/.acolyte.sqlite.db`. Use
@@ -249,24 +332,34 @@ When an allowed Telegram user sends media:
 
 1. The Telegram adapter downloads the file (reusing an existing download when the
    Telegram file ID was seen before).
-2. It saves the file under `<workspace>/downloads/<type>/`.
+2. It saves the file under `<workspace>/media/inbound/<type>/`.
 3. It builds a prompt of the form `File located at: <abs-path>\n\nUser message: <caption-or-empty>`
    and offers it to the agent.
 4. The agent can read or otherwise act on the file via its normal tools.
 
-Photos, documents, audio, voice, and video are all downloaded. Media the agent
-sends back to the user is currently text-only; sender-side media is deferred.
+Photos, documents, audio, voice, and video are all downloaded. The agent can
+send one image back to the user with the `send_image` OpenCode tool or:
+
+```bash
+acolyte notify-user "Here is the chart" --media media/outbound/images/chart.png
+```
+
+JPEG, PNG, and WebP are accepted up to 10 MiB; the image is copied under
+`media/outbound/images/` and delivered as a Telegram photo. Legacy files under
+`<workspace>/downloads/<type>/` are still readable; new writes go to
+`media/inbound/`.
 
 ## CLI Commands
 
 | Command                                      | Description                                    |
 | -------------------------------------------- | ---------------------------------------------- |
 | `acolyte new --name <n> --workspace-folder <p> --config '<json>'` | Scaffold, validate, and register an agent |
-| `acolyte status [name\|workspace]`           | List agents or show one agent's jobs/activity  |
+| `acolyte config <agent> get\|set\|edit`       | Read or update an agent's runtime capabilities |
+| `acolyte status [name\|workspace]`           | List agents or show one agent's channels, allowed users, last message, jobs/activity |
 | `acolyte delete <name\|workspace>`           | Remove an agent from the registry (folder kept) |
 | `acolyte cron ...`                           | Manage scheduled prompt/shell/routine jobs     |
 | `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service            |
-| `acolyte notify-user "<text>"`               | Notify the user only (never the agent)         |
+| `acolyte notify-user "<text>" [--media <path>]` | Notify the user only; optional single photo |
 | `acolyte inbox "<text>"`                     | Deliver a synthetic external event to an agent |
 | `acolyte run "<text>"`                       | Run one headless agent turn (no Telegram/TUI)  |
 | `acolyte memory export --out <zip>`          | Export the full memory trace as a zip          |
@@ -274,6 +367,7 @@ sends back to the user is currently text-only; sender-side media is deferred.
 | `acolyte inspect --session-id <id>`          | Merge OpenCode history with routing events     |
 | `acolyte attach [--agent-name <n>]`          | Attach the OpenCode TUI to the agent session   |
 | `acolyte start`                              | Start the multi-agent daemon                   |
+| `acolyte install-service [--user\|--system]` | Install the daemon as a crash-restarting service |
 | `acolyte update`                             | Check & apply updates                          |
 | `acolyte version`                            | Print binary version                           |
 
@@ -282,8 +376,32 @@ sends back to the user is currently text-only; sender-side media is deferred.
 > dream writer is limited to memory paths, and heartbeat turns are read-only; the routine delivers
 > notifications itself.
 
-> Runtime capability edits are not exposed yet: `acolyte new` preserves existing
-> settings/jobs when adopting an agent. See `FUTURE-IDEAS.md`.
+## Runtime config
+
+`acolyte config <agent> get|set|edit` changes an agent's capabilities in place — no re-running
+`acolyte new`. `<agent>` is an agent name or a workspace path.
+
+```bash
+acolyte config valet get                       # effective config as JSON (same shape as --config)
+acolyte config valet get --json                # one-line JSON for scripts
+acolyte config valet set engine.model minimax-coding-plan/MiniMax-M3
+acolyte config valet set schedule.heartbeat_minutes 60
+acolyte config valet set memory-learn '{"mode":"simple-dreaming","args":{"days":3}}'
+acolyte config valet set communication.telegram.allowed_users '@alice,@bob'
+acolyte config valet set schedule.timezone America/Sao_Paulo --dry-run   # diff only, no writes
+acolyte config valet edit                      # open opencode.jsonc in $EDITOR, then re-validate
+```
+
+Supported `set` keys: `description`, `engine.model`, `engine.agent`,
+`communication.channels`, `communication.telegram.allowed_users`, `schedule.timezone`,
+`schedule.heartbeat_minutes`, `memory-learn`, `memory-load`, `memory-access`,
+`memory-export` (full reference in [`docs/README.md`](docs/README.md) and
+[`docs/orchestrator/config.md`](docs/orchestrator/config.md)).
+
+Everything is validated before anything is written: `--dry-run` prints a unified diff for
+`opencode.jsonc` plus the before/after values for store/cron changes and leaves state untouched,
+and `--json` makes `get`/`set` machine-readable. `opencode.jsonc` edits are targeted (comments and
+unrelated keys are preserved, writes are temp+rename, symlinks are refused).
 
 ## Updating
 

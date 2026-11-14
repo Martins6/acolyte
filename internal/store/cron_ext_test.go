@@ -236,3 +236,116 @@ func TestAppendLog(t *testing.T) {
 		t.Errorf("log count = %d, want 1", count)
 	}
 }
+
+func TestUpsertCronJobIfMatch(t *testing.T) {
+	s, _ := openTest(t)
+	capability := orch.CronJob{
+		Title: "heartbeat", Owner: "heartbeat", Kind: "routine", Routine: "heartbeat",
+		RoutineArgs: `{"interval":60}`, Spec: "@every 60m", Enabled: true,
+	}
+
+	// Insert when the title is free.
+	matched, err := s.Orch().UpsertCronJobIfMatch(capability, "heartbeat", "routine", "heartbeat")
+	if err != nil {
+		t.Fatalf("UpsertCronJobIfMatch(insert) error: %v", err)
+	}
+	if !matched {
+		t.Fatal("UpsertCronJobIfMatch(insert) = false, want true")
+	}
+
+	// Update when the existing row keeps the capability identity.
+	update := capability
+	update.Spec = "@every 30m"
+	update.RoutineArgs = `{"interval":30}`
+	matched, err = s.Orch().UpsertCronJobIfMatch(update, "heartbeat", "routine", "heartbeat")
+	if err != nil {
+		t.Fatalf("UpsertCronJobIfMatch(update) error: %v", err)
+	}
+	if !matched {
+		t.Fatal("UpsertCronJobIfMatch(update) = false, want true")
+	}
+	got, err := s.Orch().GetCronJobByTitle("heartbeat")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if got.Spec != "@every 30m" {
+		t.Errorf("spec = %q, want @every 30m", got.Spec)
+	}
+
+	// A user job that grabbed the title blocks the upsert: no match, row
+	// untouched.
+	if err := s.Orch().DeleteCronJob("heartbeat"); err != nil {
+		t.Fatalf("DeleteCronJob() error: %v", err)
+	}
+	userJob := orch.CronJob{Title: "heartbeat", Owner: "user", Kind: "prompt", Prompt: "hi", Spec: "@every 1h", Enabled: true}
+	if err := s.Orch().AddCronJob(userJob); err != nil {
+		t.Fatalf("AddCronJob(user) error: %v", err)
+	}
+	matched, err = s.Orch().UpsertCronJobIfMatch(capability, "heartbeat", "routine", "heartbeat")
+	if err != nil {
+		t.Fatalf("UpsertCronJobIfMatch(conflict) error: %v", err)
+	}
+	if matched {
+		t.Error("UpsertCronJobIfMatch(conflict) = true, want false")
+	}
+	after, err := s.Orch().GetCronJobByTitle("heartbeat")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if after.Owner != "user" || after.Kind != "prompt" || after.Spec != "@every 1h" {
+		t.Errorf("user job was overwritten: %+v", after)
+	}
+
+	// The job identity must match the expected identity.
+	if matched, err := s.Orch().UpsertCronJobIfMatch(userJob, "heartbeat", "routine", "heartbeat"); err == nil || matched {
+		t.Fatalf("UpsertCronJobIfMatch(mismatched identity) = %v, %v; want false with error", matched, err)
+	}
+}
+
+func TestDeleteCronJobIfMatch(t *testing.T) {
+	s, _ := openTest(t)
+	capability := orch.CronJob{
+		Title: "dream", Owner: "memory-learn", Kind: "routine", Routine: "dream",
+		RoutineArgs: `{"days":3}`, Spec: "@every 72h", Enabled: true,
+	}
+	if err := s.Orch().AddCronJob(capability); err != nil {
+		t.Fatalf("AddCronJob(capability) error: %v", err)
+	}
+
+	// Matching identity deletes.
+	matched, err := s.Orch().DeleteCronJobIfMatch("dream", "memory-learn", "routine", "dream")
+	if err != nil {
+		t.Fatalf("DeleteCronJobIfMatch(match) error: %v", err)
+	}
+	if !matched {
+		t.Fatal("DeleteCronJobIfMatch(match) = false, want true")
+	}
+	if _, err := s.Orch().GetCronJobByTitle("dream"); !errors.Is(err, orch.ErrJobNotFound) {
+		t.Fatalf("GetCronJobByTitle() error = %v, want ErrJobNotFound", err)
+	}
+
+	// A user job with the same title survives a capability delete.
+	userJob := orch.CronJob{Title: "dream", Owner: "user", Kind: "prompt", Prompt: "hi", Spec: "@every 1h", Enabled: true}
+	if err := s.Orch().AddCronJob(userJob); err != nil {
+		t.Fatalf("AddCronJob(user) error: %v", err)
+	}
+	matched, err = s.Orch().DeleteCronJobIfMatch("dream", "memory-learn", "routine", "dream")
+	if err != nil {
+		t.Fatalf("DeleteCronJobIfMatch(conflict) error: %v", err)
+	}
+	if matched {
+		t.Error("DeleteCronJobIfMatch(conflict) = true, want false")
+	}
+	after, err := s.Orch().GetCronJobByTitle("dream")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if after.Owner != "user" || after.Kind != "prompt" {
+		t.Errorf("user job was deleted: %+v", after)
+	}
+
+	// Missing titles report no match instead of an error.
+	if matched, err := s.Orch().DeleteCronJobIfMatch("missing", "memory-learn", "routine", "dream"); err != nil || matched {
+		t.Fatalf("DeleteCronJobIfMatch(missing) = %v, %v; want false, nil", matched, err)
+	}
+}

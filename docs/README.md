@@ -19,7 +19,8 @@ acolyte new --name <name> --workspace-folder <path> --config '<json>'
 | `--config` | JSON object | no | Capability/config selection. Omitted keys take defaults. |
 
 `acolyte new` **bakes** the chosen capabilities as concrete artifacts (OpenCode config + cron jobs +
-skills + persona). Smooth capability updates are deferred (`FUTURE-IDEAS.md`).
+skills + persona). The same keys can later be changed in place with
+`acolyte config <agent> set <key> <value>` — see [Runtime config](#runtime-config).
 
 ---
 
@@ -47,6 +48,11 @@ means *both* instructions-in-context + the `skill` tool.
 | `memory-access` | `{mode,args}` \| null | `native` (= null) | — | [`memory-access/native.md`](memory/memory-access/native.md) |
 | `memory-learn` | `{mode,args}` \| null | `simple-dreaming` | `days:int` | [`memory-learn/simple-dreaming.md`](memory/memory-learn/simple-dreaming.md) |
 | `memory-export` | `{mode,args}` \| null | `opencode-export` | — | [`memory-export/opencode-export.md`](memory/memory-export/opencode-export.md) |
+
+`memory-load` is the only memory key wired into `opencode.jsonc`: omitting it (or setting
+`{"mode":"default"}`) adds `.acolyte/*.md` to the `instructions` array at `acolyte new`; an
+explicit `null` selects the native OpenCode baseline and creates no such instruction. The other
+memory keys only affect `orch_settings` and (for `memory-learn`) the `dream` job.
 
 The `opencode-export` mode is run with `acolyte memory export --out <zip>`; it writes a
 portable Markdown + JSON trace bundle. `acolyte memory import <zip>` moves a bundle into
@@ -77,9 +83,50 @@ acolyte new --name valet --workspace-folder ~/agents/valet --config '{
 }'
 ```
 
-> Capabilities are baked at creation. `acolyte new` adopts and preserves existing settings/jobs;
-> there is currently no CLI to mutate an agent's channels, allowed users, schedule, or engine
-> in place. See `FUTURE-IDEAS.md`.
+> Capabilities are baked at creation, then mutable in place: `acolyte config <agent> set <key>
+> <value>` updates the listed keys (engine, channels, allowed users, schedule, memory) with full
+> validation and a `--dry-run` preview. See [Runtime config](#runtime-config).
+
+---
+
+## Runtime config
+
+```bash
+acolyte config <agent> get|set|edit
+```
+
+`<agent>` is an agent name or a workspace path. `get` prints the effective config as JSON in the
+exact `--config` shape above (engine from `opencode.jsonc`, identity from the registry, comm
+settings from `comm_tg_settings`, schedule/memory from `orch_settings` + the dream/heartbeat
+jobs). `edit` opens `<workspace>/opencode.jsonc` in `$EDITOR` (fallback `vi`) and re-validates it
+as JSONC with sane `model`/`default_agent` values — an invalid edit is rolled back.
+
+`set <key> <value>` supports every `--config` key except nested engine/mode overrides that v0
+does not own:
+
+| Key | Value | Effect |
+| --- | ----- | ------ |
+| `description` | string | registry description |
+| `engine.model` | `provider/model` | `opencode.jsonc` `"model"` (targeted edit) |
+| `engine.agent` | `build`, `plan`, or a defined agent id | `opencode.jsonc` `"default_agent"` (no prompts are invented) |
+| `communication.channels` | JSON array (v0: `telegram` only; `[]` disables) | `comm_tg_settings.channels` |
+| `communication.telegram.allowed_users` | JSON array or comma-separated | normalized to a deduped JSON array |
+| `schedule.timezone` | IANA name | `orch_settings` + re-times the dream/heartbeat jobs and their `next_run_at` |
+| `schedule.heartbeat_minutes` | int | `0` removes the `heartbeat` job; `>0` upserts `@every <n>m` with `{"interval":n}` |
+| `memory-learn` | `{"mode":"simple-dreaming","args":{"days":N}}` or `null` | `null` removes the `dream` job + `memory.learn`; otherwise upserts `@every <N*24>h` with `{"days":N}` |
+| `memory-load` | `{"mode":"default"}` or `null` | `{"mode":"default"}` ensures `.acolyte/*.md` is present in `opencode.jsonc` `instructions` and stores `memory.load`; `null` removes only that instruction entry and deletes the setting (native baseline) |
+| `memory-access`, `memory-export` | JSON object or `null` | `orch_settings` only (`null` clears the setting) |
+
+Rules:
+
+- Everything is validated **before** any write; `--dry-run` prints a unified diff for
+  `opencode.jsonc` and the before/after values for store/cron changes, writing nothing.
+- `--json` makes `get` (one line) and `set` (result object) machine-readable.
+- `opencode.jsonc` writes refuse symlinks and go through temp + rename; comments and unrelated
+  keys are preserved.
+- A timezone is required while heartbeat or dream run (same rule as `acolyte new --config`).
+
+See [`orchestrator/config.md`](orchestrator/config.md) for the full walkthrough.
 
 ---
 
@@ -92,7 +139,8 @@ Acolyte loads two optional `.env` files:
 
 Precedence is **process environment > `<workspace>/.env` > `$ACOLYTE_HOME/.env`**. Both files are
 gitignored and are never scaffolded by `acolyte new`; secrets belong there, never in
-`opencode.jsonc` or any tracked file. Provider credentials may also live in OpenCode's own auth store.
+`opencode.jsonc` or any tracked file. Model-provider credentials are managed by OpenCode, not
+these files: run `opencode auth login` to store them in OpenCode's auth store.
 
 ---
 
@@ -144,16 +192,23 @@ docs/
 │   └── <channel>.md                ← telegram.md
 ├── opencode/
 │   └── v2-contract.md              ← pinned V2 API version + update procedure
+├── ci/
+│   └── review.md                   ← PR #85 review-check failure investigation
 └── orchestrator/
     ├── README.md
     ├── daemon.md                   ← per-agent adapters, routing, inspect/attach
     ├── cron.md                     ← shared cron service (shell + headless agent jobs)
+    ├── config.md                   ← `acolyte config` runtime capability updates
     ├── heartbeat.md                ← the special always-on cron
-    └── autostart.md                ← running always-on (macOS/Linux)
+    ├── autostart.md                ← running always-on (macOS/Linux)
+    └── merge-policy.md             ← merge-red policy + stop-on-red trigger
 ```
 
 **A module `README.md`** covers intent, sub-components/args, and how it plugs into OpenCode. **A mode
 file** covers intent, arguments, how it works, and the OpenCode/cron artifacts it produces.
+
+CI notes live under [`ci/`](ci/): [`ci/review.md`](ci/review.md) records the PR #85 review-check
+failure (an installer network flake) and the re-run remedy.
 
 ## Modules
 | Module | Doc | What it does |

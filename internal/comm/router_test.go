@@ -2,6 +2,7 @@ package comm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -26,9 +27,11 @@ type fakeTurn struct {
 	result    *opencode.TurnResult
 	err       error
 	delay     time.Duration
+	configs   []opencode.TurnConfig
+	events    []opencode.Event
 }
 
-func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, _ opencode.TurnConfig) (*opencode.TurnResult, error) {
+func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.mu.Lock()
 	f.calls++
 	f.active++
@@ -36,6 +39,8 @@ func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, _ op
 		f.maxActive = f.active
 	}
 	f.prompts = append(f.prompts, text)
+	f.configs = append(f.configs, cfg)
+	events := append([]opencode.Event(nil), f.events...)
 	result := f.result
 	err := f.err
 	f.mu.Unlock()
@@ -50,6 +55,13 @@ func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, _ op
 		case <-time.After(f.delay):
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		}
+	}
+	for _, event := range events {
+		if cfg.OnEvent != nil {
+			if err := cfg.OnEvent(event); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if result == nil {
@@ -94,6 +106,7 @@ func newRouterHarness(t *testing.T, maxConcurrency int) *routerHarness {
 		Stores:         pool,
 		Turn:           turn,
 		Outbound:       outbound.send,
+		EventRecorder:  ActivityEventRecorder,
 		MaxConcurrency: maxConcurrency,
 		Now:            func() time.Time { return time.Now().UTC() },
 	})
@@ -163,17 +176,157 @@ func TestRouterInboundPersistsSessionLinksAndRoutes(t *testing.T) {
 	}
 }
 
-func TestRouterMediaPrompt(t *testing.T) {
+func TestRouterTurnRecordsToolActivity(t *testing.T) {
 	h := newRouterHarness(t, 4)
-	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(11),
-		envelope.Party{Kind: envelope.PartyUser, ID: "11"},
+	h.turn.events = []opencode.Event{
+		{ID: "evt_called", Type: "session.tool.called", Data: json.RawMessage(
+			`{"sessionID":"ses_evt","assistantMessageID":"msg_evt","id":"tool_evt","input":{"api_key":"secret"}}`)},
+		{ID: "evt_text", Type: "session.message.content.updated", Data: json.RawMessage(
+			`{"sessionID":"ses_evt","content":[{"type":"text","text":"secret"}]}`)},
+		{ID: "evt_failed", Type: "session.tool.failed", Data: json.RawMessage(
+			`{"sessionID":"ses_evt","assistantMessageID":"msg_evt","id":"tool_evt","error":{"message":"secret"}}`)},
+	}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(60),
+		envelope.Party{Kind: envelope.PartyUser, ID: "60"},
 		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
-		envelope.Content{Type: envelope.ContentMedia, Media: []string{"/tmp/photo.jpg"}})
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+
 	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
 		t.Fatalf("HandleInbound() error: %v", err)
 	}
-	if len(h.turn.prompts) != 1 || !strings.Contains(h.turn.prompts[0], "/tmp/photo.jpg") {
-		t.Errorf("prompts = %v", h.turn.prompts)
+	if len(h.turn.configs) != 1 || h.turn.configs[0].OnEvent == nil {
+		t.Fatalf("turn configs = %+v, want OnEvent wired", h.turn.configs)
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	logs, err := st.Orch().ListLogs(0)
+	if err != nil {
+		t.Fatalf("ListLogs() error: %v", err)
+	}
+	var activity []string
+	for _, entry := range logs {
+		if entry.Source == "opencode:valet" {
+			activity = append(activity, entry.Level+"/"+entry.Message+"/"+entry.Meta)
+			if strings.Contains(entry.Meta, "secret") {
+				t.Errorf("meta leaked content: %q", entry.Meta)
+			}
+		}
+	}
+	if len(activity) != 2 {
+		t.Fatalf("activity logs = %v, want called and failed rows", activity)
+	}
+	if !strings.HasPrefix(activity[0], "info/tool called/") || !strings.Contains(activity[0], `"tool_call_id":"tool_evt"`) {
+		t.Errorf("called log = %q", activity[0])
+	}
+	if !strings.HasPrefix(activity[1], "warn/tool failed/") {
+		t.Errorf("failed log = %q", activity[1])
+	}
+}
+
+func TestRouterWithoutEventRecorderLeavesOnEventNil(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.events = nil
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(61),
+		envelope.Party{Kind: envelope.PartyUser, ID: "61"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if len(h.turn.configs) != 1 || h.turn.configs[0].OnEvent != nil {
+		t.Fatalf("turn configs = %+v, want nil OnEvent without a recorder", h.turn.configs)
+	}
+}
+
+func TestRouterPromptIncludesMedia(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		media     []string
+		want      string
+		pathLines int
+	}{
+		{
+			name:      "text and media",
+			text:      "look at this",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "look at this\nFile located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "media only",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "File located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "text already names the path",
+			text:      "File located at: /tmp/photo.jpg\nFile type: Photo\n\nUser message: look",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "File located at: /tmp/photo.jpg\nFile type: Photo\n\nUser message: look",
+			pathLines: 1,
+		},
+		{
+			name:      "longer path with the same prefix is not the media path",
+			text:      "back up /tmp/dir/photo.jpg.backup first",
+			media:     []string{"/tmp/dir/photo.jpg"},
+			want:      "back up /tmp/dir/photo.jpg.backup first\nFile located at: /tmp/dir/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "sibling path with a plus sign is not the media path",
+			text:      "back up /tmp/photo.jpg+backup first",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "back up /tmp/photo.jpg+backup first\nFile located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "unicode sibling path is not the media path",
+			text:      "back up /tmp/photo.jpgфото first",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "back up /tmp/photo.jpgфото first\nFile located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "prose path mention gets a media marker",
+			text:      "please review /tmp/photo.jpg before sending",
+			media:     []string{"/tmp/photo.jpg"},
+			want:      "please review /tmp/photo.jpg before sending\nFile located at: /tmp/photo.jpg",
+			pathLines: 1,
+		},
+		{
+			name:      "multiple media files",
+			text:      "see these",
+			media:     []string{"/tmp/a.jpg", "/tmp/b.pdf"},
+			want:      "see these\nFile located at: /tmp/a.jpg\nFile located at: /tmp/b.pdf",
+			pathLines: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRouterHarness(t, 1)
+			env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(11),
+				envelope.Party{Kind: envelope.PartyUser, ID: "11"},
+				envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+				envelope.Content{Type: envelope.ContentMedia, Text: tt.text, Media: tt.media})
+			if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+				t.Fatalf("HandleInbound() error: %v", err)
+			}
+			if len(h.turn.prompts) != 1 {
+				t.Fatalf("prompts = %d, want 1", len(h.turn.prompts))
+			}
+			got := h.turn.prompts[0]
+			if got != tt.want {
+				t.Errorf("prompt = %q, want %q", got, tt.want)
+			}
+			if lines := strings.Count(got, "File located at:"); lines != tt.pathLines {
+				t.Errorf("File located at lines = %d, want %d in %q", lines, tt.pathLines, got)
+			}
+		})
 	}
 }
 

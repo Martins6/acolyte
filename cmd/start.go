@@ -11,13 +11,17 @@ import (
 
 	"github.com/martins6/acolyte/internal/cron"
 	"github.com/martins6/acolyte/internal/daemon"
+	"github.com/martins6/acolyte/internal/logging"
 	"github.com/martins6/acolyte/internal/opencode"
+	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/routine"
 	"github.com/martins6/acolyte/internal/storepool"
 	"github.com/martins6/acolyte/internal/updater"
 	"github.com/spf13/cobra"
 )
+
+var startLogFile string
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -35,6 +39,19 @@ Press Ctrl+C to stop gracefully.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+
+		if startLogFile != "" {
+			logPath, err := paths.Abs(startLogFile)
+			if err != nil {
+				return fmt.Errorf("resolve --log-file: %w", err)
+			}
+			writer, err := logging.Open(logPath, logging.DefaultMaxSize, logging.DefaultBackups)
+			if err != nil {
+				return err
+			}
+			defer writer.Close()
+			log.SetOutput(writer)
+		}
 
 		log.Println("Ensuring OpenCode service...")
 		ensureCtx, ensureCancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -88,6 +105,7 @@ Press Ctrl+C to stop gracefully.`,
 }
 
 func init() {
+	startCmd.Flags().StringVar(&startLogFile, "log-file", "", "Write logs to this file instead of stderr (rotates at 10 MiB, keeps 3 backups)")
 	rootCmd.AddCommand(startCmd)
 }
 

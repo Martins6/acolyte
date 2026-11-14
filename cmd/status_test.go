@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/martins6/acolyte/internal/agent"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
+	"github.com/martins6/acolyte/internal/store/commtg"
 )
 
 func setupAgentHome(t *testing.T) string {
@@ -60,8 +62,14 @@ func TestRunStatusList(t *testing.T) {
 	if !strings.Contains(text, "NAME") || !strings.Contains(text, "WORKSPACE") {
 		t.Errorf("table header missing: %q", text)
 	}
+	if !strings.Contains(text, "CHANNELS") || !strings.Contains(text, "LAST MESSAGE") {
+		t.Errorf("table header missing communication columns: %q", text)
+	}
 	if !strings.Contains(text, "valet") || !strings.Contains(text, ws) {
 		t.Errorf("agent row missing: %q", text)
+	}
+	if !strings.Contains(text, "telegram") {
+		t.Errorf("agent row missing default channel: %q", text)
 	}
 }
 
@@ -146,6 +154,34 @@ func TestRunStatusDetail(t *testing.T) {
 		"schedule": { "timezone": "UTC", "heartbeat_minutes": 30 }
 	}`)
 
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	// Deleting the stored channels setting exercises the status default.
+	if err := st.CommTG().DeleteSetting("channels"); err != nil {
+		t.Fatalf("delete channels setting: %v", err)
+	}
+	if err := st.CommTG().SetSetting("telegram.allowed_users", `["@alice", "123"]`); err != nil {
+		t.Fatalf("set allowed users: %v", err)
+	}
+	sentAt := time.Date(2026, 11, 14, 10, 30, 0, 0, time.Local)
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, sentAt); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	item, err := st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+		EnvelopeID: "env_status", ChatID: 10, Text: "hello", CreatedAt: sentAt,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOutbound() error: %v", err)
+	}
+	if err := st.CommTG().MarkOutboundSent(item.ID, 1, 42, sentAt); err != nil {
+		t.Fatalf("MarkOutboundSent() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
 	var out bytes.Buffer
 	if err := runStatus(&out, "valet"); err != nil {
 		t.Fatalf("runStatus() error: %v", err)
@@ -159,6 +195,9 @@ func TestRunStatusDetail(t *testing.T) {
 		"Name:        valet",
 		"Workspace:   " + wantWorkspace,
 		"Description: Personal assistant",
+		"Channels:    telegram",
+		"Allowed:     @alice, 123",
+		"Last message: 2026-11-14 10:30",
 		"Jobs:        2",
 		"dream",
 		"heartbeat",
@@ -166,6 +205,39 @@ func TestRunStatusDetail(t *testing.T) {
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestReadSettingList(t *testing.T) {
+	settings := map[string]string{
+		"bad":   "not-json",
+		"empty": `[]`,
+		"valid": `["telegram"]`,
+		"blank": "   ",
+	}
+	get := func(key string) (string, bool, error) {
+		value, ok := settings[key]
+		return value, ok, nil
+	}
+	tests := []struct {
+		key      string
+		fallback []string
+		want     []string
+	}{
+		{key: "missing", fallback: []string{"telegram"}, want: []string{"telegram"}},
+		{key: "blank", fallback: []string{"telegram"}, want: []string{"telegram"}},
+		{key: "bad", fallback: []string{"telegram"}, want: []string{"telegram"}},
+		{key: "empty", fallback: []string{"telegram"}, want: nil},
+		{key: "valid", fallback: nil, want: []string{"telegram"}},
+	}
+	for _, test := range tests {
+		got, err := readSettingList(get, test.key, test.fallback)
+		if err != nil {
+			t.Fatalf("readSettingList(%q) error: %v", test.key, err)
+		}
+		if strings.Join(got, ",") != strings.Join(test.want, ",") {
+			t.Errorf("readSettingList(%q) = %v, want %v", test.key, got, test.want)
 		}
 	}
 }

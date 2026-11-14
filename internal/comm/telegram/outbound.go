@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +38,9 @@ func (a *Adapter) deliverDue(ctx context.Context) error {
 }
 
 func (a *Adapter) deliverItem(ctx context.Context, item commtg.OutboxItem) error {
+	if item.MediaPath != "" {
+		return a.deliverPhoto(ctx, item)
+	}
 	chunks := splitText(item.Text, a.maxMessageChars)
 	if len(chunks) == 0 {
 		return a.store.CommTG().MarkOutboundFailed(item.ID, "empty outbound text")
@@ -68,6 +73,49 @@ func (a *Adapter) deliverItem(ctx context.Context, item commtg.OutboxItem) error
 		}
 	}
 	return a.store.CommTG().MarkOutboundSent(item.ID, len(chunks), lastMessageID, a.now())
+}
+
+func (a *Adapter) deliverPhoto(ctx context.Context, item commtg.OutboxItem) error {
+	if a.api == nil {
+		return nil
+	}
+	file, err := os.Open(item.MediaPath)
+	if err != nil {
+		_ = a.store.CommTG().MarkOutboundFailed(item.ID, media.RedactToken(err, a.token).Error())
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		if err == nil {
+			err = fmt.Errorf("outbound image is not a regular file")
+		}
+		_ = a.store.CommTG().MarkOutboundFailed(item.ID, media.RedactToken(err, a.token).Error())
+		return err
+	}
+	params := &bot.SendPhotoParams{
+		ChatID: item.ChatID,
+		Photo: &models.InputFileUpload{
+			Filename: filepath.Base(item.MediaPath),
+			Data:     file,
+		},
+		Caption: item.Text,
+	}
+	if item.ReplyTo != nil {
+		params.ReplyParameters = &models.ReplyParameters{
+			MessageID:                int(*item.ReplyTo),
+			AllowSendingWithoutReply: true,
+		}
+	}
+	message, err := a.api.SendPhoto(ctx, params)
+	if err != nil {
+		return a.recordDeliveryFailure(item, err)
+	}
+	messageID := int64(0)
+	if message != nil {
+		messageID = int64(message.ID)
+	}
+	return a.store.CommTG().MarkOutboundSent(item.ID, 1, messageID, a.now())
 }
 
 func (a *Adapter) recordDeliveryFailure(item commtg.OutboxItem, sendErr error) error {

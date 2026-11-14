@@ -169,6 +169,50 @@ func TestRunCronCreatePromptAndRoutine(t *testing.T) {
 	if routineJob.Kind != "routine" || routineJob.Routine != "dream" || !strings.Contains(routineJob.RoutineArgs, "5") {
 		t.Errorf("routine job = %+v", routineJob)
 	}
+	if routineJob.SessionID != "" {
+		t.Errorf("routine job session = %q, want empty", routineJob.SessionID)
+	}
+	var meta cronJobMeta
+	if err := json.Unmarshal([]byte(routineJob.Meta), &meta); err != nil {
+		t.Fatalf("routine meta: %v", err)
+	}
+	if meta.OnSuccess != "log" || meta.OnFailure != "log" {
+		t.Errorf("routine meta = %+v, want log routing", meta)
+	}
+}
+
+func TestRunCronCreateRoutineExplicitRouting(t *testing.T) {
+	ws := setupCronCLI(t)
+	fixedCronNow(t)
+
+	if err := runCronCreate(&bytes.Buffer{}, cronCreateOptions{
+		Title:       "dream-notify",
+		Datetime:    "@every 72h",
+		Routine:     "dream",
+		RoutineArgs: `{"days":5}`,
+		AgentName:   "valet",
+		OnSuccess:   "notify-user",
+		OnFailure:   "notify-user",
+	}); err != nil {
+		t.Fatalf("create routine: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	job, err := st.Orch().GetCronJobByTitle("dream-notify")
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	var meta cronJobMeta
+	if err := json.Unmarshal([]byte(job.Meta), &meta); err != nil {
+		t.Fatalf("meta: %v", err)
+	}
+	if meta.OnSuccess != "notify-user" || meta.OnFailure != "notify-user" {
+		t.Errorf("meta = %+v, want explicit notify-user routing", meta)
+	}
 }
 
 func TestRunCronCreateDryRun(t *testing.T) {
@@ -217,6 +261,7 @@ func TestRunCronCreateValidation(t *testing.T) {
 		{Title: "x", Datetime: "not a cron", Prompt: "p", AgentName: "valet"},
 		{Title: "x", Datetime: "@every 1h", Routine: "missing", AgentName: "valet"},
 		{Title: "x", Datetime: "@every 1h", Routine: "dream", RoutineArgs: `{"weeks":1}`, AgentName: "valet"},
+		{Title: "x", Datetime: "@every 1h", Routine: "dream", AgentName: "valet", SessionID: "ses_x"},
 		{Title: "x", Datetime: "@every 1h", Prompt: "p", AgentName: "valet", Workspace: "/tmp/other"},
 		{Title: "x", Datetime: "@every 1h", Prompt: "p", AgentName: "valet", OnSuccess: "bad"},
 	}

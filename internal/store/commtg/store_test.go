@@ -284,6 +284,28 @@ func TestEnqueueOutboundIdempotent(t *testing.T) {
 	}
 }
 
+func TestEnqueueOutboundMedia(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	item, err := store.EnqueueOutbound(OutboxItem{
+		EnvelopeID: "env_media", ChatID: 10, MediaPath: "media/outbound/images/a.jpg",
+		OpenCodeSessionID: "ses_x", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOutbound() error: %v", err)
+	}
+	if item.MediaPath != "media/outbound/images/a.jpg" || item.Text != "" {
+		t.Errorf("item = %+v", item)
+	}
+	outbox, err := store.ListOutbox(10)
+	if err != nil || len(outbox) != 1 || outbox[0].MediaPath != item.MediaPath {
+		t.Fatalf("outbox = %+v, %v", outbox, err)
+	}
+	if _, err := store.EnqueueOutbound(OutboxItem{EnvelopeID: "env_empty", ChatID: 10}); err == nil {
+		t.Fatal("EnqueueOutbound(empty) error = nil, want error")
+	}
+}
+
 func TestMigrateV7PrefersPendingDuplicate(t *testing.T) {
 	db := openTestDB(t)
 	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
@@ -369,6 +391,52 @@ func TestChats(t *testing.T) {
 	}
 	if _, ok, err := store.GetChat(999); err != nil || ok {
 		t.Errorf("GetChat(missing) = ok:%v err:%v", ok, err)
+	}
+}
+
+func TestLastMessageAt(t *testing.T) {
+	store := migrateTestDB(t)
+	if _, ok, err := store.LastMessageAt(); err != nil || ok {
+		t.Fatalf("LastMessageAt(empty) = ok:%v err:%v, want none", ok, err)
+	}
+
+	inboundAt := time.Now().UTC().Truncate(time.Second).Add(-2 * time.Hour)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID: 500, ChatID: 10, EnvelopeID: "env_last_msg", ReceivedAt: inboundAt,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	// Pending outbound rows have no sent_at and must not count.
+	pending, err := store.EnqueueOutbound(OutboxItem{
+		EnvelopeID: "env_last_msg_pending", ChatID: 10, Text: "later",
+		CreatedAt: inboundAt.Add(30 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOutbound() error: %v", err)
+	}
+	last, ok, err := store.LastMessageAt()
+	if err != nil || !ok || !last.Equal(inboundAt) {
+		t.Fatalf("LastMessageAt(pending) = %v, %v, %v; want %v", last, ok, err, inboundAt)
+	}
+
+	sentAt := inboundAt.Add(time.Hour)
+	if err := store.MarkOutboundSent(pending.ID, 1, 700, sentAt); err != nil {
+		t.Fatalf("MarkOutboundSent() error: %v", err)
+	}
+	last, ok, err = store.LastMessageAt()
+	if err != nil || !ok || !last.Equal(sentAt) {
+		t.Fatalf("LastMessageAt(outbound) = %v, %v, %v; want %v", last, ok, err, sentAt)
+	}
+
+	newerInbound := sentAt.Add(time.Hour)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID: 501, ChatID: 10, EnvelopeID: "env_last_msg_2", ReceivedAt: newerInbound,
+	}); err != nil {
+		t.Fatalf("RecordInbound(newer) error: %v", err)
+	}
+	last, ok, err = store.LastMessageAt()
+	if err != nil || !ok || !last.Equal(newerInbound) {
+		t.Fatalf("LastMessageAt(inbound) = %v, %v, %v; want %v", last, ok, err, newerInbound)
 	}
 }
 

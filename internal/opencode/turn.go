@@ -2,16 +2,15 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/martins6/acolyte/internal/lock"
 )
-
-// turnTimeout matches the retired CLI runner's 5-minute cap.
-const turnTimeout = 5 * time.Minute
 
 // ErrTurnTruncated reports that a turn's marker was delivered but lies older
 // than the newest collection window, so its reply cannot be bounded reliably.
@@ -27,11 +26,20 @@ type TurnConfig struct {
 	Agent     string
 	Provider  string
 	Model     string
+	// Timeout, when positive, bounds the turn with an additional deadline.
+	// Zero leaves the caller's context as the only deadline.
+	Timeout time.Duration
 	// Permissions, when non-nil, temporarily replaces the session-scoped
 	// permission rules for this turn and restores the previous rules
 	// afterwards. Routine turns use it to confine untrusted model output to
 	// memory paths instead of relying on prompt instructions.
 	Permissions []PermissionRule
+
+	// OnEvent, when non-nil, receives the session's events (idle, text deltas,
+	// tool activity) while the turn runs. The event stream is best-effort: the
+	// turn waits a bounded time for the subscription to be established before
+	// admitting the prompt, but a subscription failure never fails the turn.
+	OnEvent EventHandler
 }
 
 // SyntheticEvent is an external/background event admitted to a session
@@ -45,6 +53,15 @@ type SyntheticEvent struct {
 	Delivery string
 }
 
+// ToolActivity is one tool part observed in an assistant message. It is a
+// post-turn summary: tools are reported once the message is collected, not
+// streamed while they run.
+type ToolActivity struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	ID     string `json:"id"`
+}
+
 // TurnResult is the outcome of one agent turn (mirrors the retired
 // runner.RunResult so callers keep their shape).
 type TurnResult struct {
@@ -54,14 +71,20 @@ type TurnResult struct {
 	InputID string
 	// MessageIDs are the assistant message IDs produced after InputID.
 	MessageIDs []string
+	// ToolActivity lists the tool parts of those assistant messages in
+	// message/content order.
+	ToolActivity []ToolActivity
 }
 
 // RunUserTurn drives one real user turn: ensure session, sync agent/model,
 // admit a prompt, wait for the agent loop to go idle, and collect the reply.
 // An empty sessionID creates a fresh session rooted at cfg.Workspace.
 func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg TurnConfig) (result *TurnResult, err error) {
-	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
-	defer cancel()
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
 	sessionID = strings.TrimSpace(sessionID)
 
 	var held *lock.Lock
@@ -107,6 +130,9 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 		}
 	}()
 
+	stopEvents := c.startEventObserver(ctx, info.ID, cfg.OnEvent)
+	defer stopEvents()
+
 	item, err := c.Prompt(ctx, info.ID, text)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
@@ -121,8 +147,11 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 // RunSyntheticTurn admits an external event and collects the agent's reaction.
 // An empty sessionID creates a fresh session rooted at cfg.Workspace.
 func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (result *TurnResult, err error) {
-	ctx, cancel := context.WithTimeout(ctx, turnTimeout)
-	defer cancel()
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
 	sessionID = strings.TrimSpace(sessionID)
 
 	var held *lock.Lock
@@ -163,6 +192,9 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 			err = errors.Join(err, restoreErr)
 		}
 	}()
+
+	stopEvents := c.startEventObserver(ctx, info.ID, cfg.OnEvent)
+	defer stopEvents()
 
 	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
@@ -239,6 +271,48 @@ func (c *Client) restrictSession(ctx context.Context, info *SessionInfo, permiss
 	}, nil
 }
 
+// eventReadyTimeout bounds how long a turn waits for the event stream to be
+// established before admitting the prompt. A var so tests can shorten it.
+var eventReadyTimeout = 2 * time.Second
+
+// startEventObserver runs an optional best-effort event subscription for the
+// duration of a turn. When a handler is set it waits, bounded by
+// eventReadyTimeout, for the stream to be established so events emitted at the
+// start of the turn are not missed; a failure to establish never fails the
+// turn. It returns a cancel function; callers must always call it (normally
+// with defer).
+func (c *Client) startEventObserver(ctx context.Context, sessionID string, handle EventHandler) func() {
+	if handle == nil {
+		return func() {}
+	}
+	eventCtx, cancel := context.WithCancel(ctx)
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	signalReady := func() {
+		readyOnce.Do(func() { close(ready) })
+	}
+	go func() {
+		_ = c.subscribeEvents(eventCtx, []string{
+			"session.idle",
+			"session.text.delta",
+			"session.tool.called",
+			"session.tool.success",
+			"session.tool.failed",
+		}, func(event Event) error {
+			if event.SessionID() != sessionID {
+				return nil
+			}
+			return handle(event)
+		}, signalReady)
+	}()
+	select {
+	case <-ready:
+	case <-ctx.Done():
+	case <-time.After(eventReadyTimeout):
+	}
+	return cancel
+}
+
 // collectTurn waits for the agent loop to go idle and returns the assistant
 // text produced after markerID. A queued input can still be pending when the
 // loop first reports idle, so it re-waits until the marker is delivered or the
@@ -258,6 +332,7 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 				ResponseText: assistantText(msgs),
 				InputID:      markerID,
 				MessageIDs:   assistantMessageIDs(msgs),
+				ToolActivity: assistantToolActivity(msgs),
 			}, nil
 		}
 		if truncated {
@@ -319,6 +394,57 @@ func assistantMessageIDs(msgs []Message) []string {
 		}
 	}
 	return ids
+}
+
+// assistantToolActivity returns the tool parts of the assistant messages in
+// message and content order. Decoding is defensive: malformed or unrecognized
+// payloads are skipped so they can never fail the turn.
+func assistantToolActivity(msgs []Message) []ToolActivity {
+	var activity []ToolActivity
+	for _, m := range msgs {
+		if m.Type != "assistant" {
+			continue
+		}
+		activity = append(activity, messageToolActivity(m.Raw)...)
+	}
+	return activity
+}
+
+// messageToolActivity decodes the tool parts from one raw assistant message.
+func messageToolActivity(raw json.RawMessage) []ToolActivity {
+	if len(raw) == 0 {
+		return nil
+	}
+	var message struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &message); err != nil {
+		return nil
+	}
+	var activity []ToolActivity
+	for _, rawPart := range message.Content {
+		var part struct {
+			Type  string `json:"type"`
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			State struct {
+				Status string `json:"status"`
+			} `json:"state"`
+		}
+		if err := json.Unmarshal(rawPart, &part); err != nil || part.Type != "tool" {
+			continue
+		}
+		entry := ToolActivity{
+			Name:   strings.TrimSpace(part.Name),
+			Status: strings.TrimSpace(part.State.Status),
+			ID:     strings.TrimSpace(part.ID),
+		}
+		if entry.Name == "" && entry.Status == "" && entry.ID == "" {
+			continue
+		}
+		activity = append(activity, entry)
+	}
+	return activity
 }
 
 // modelRef maps the caller's provider/model strings to a Model.Ref, or nil when

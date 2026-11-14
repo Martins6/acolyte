@@ -11,12 +11,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// PersonaInstruction is the OpenCode instructions glob that keeps the
+// persona bundle (.acolyte/*.md) always in context (memory-load default).
+const PersonaInstruction = ".acolyte/*.md"
+
 // AgentOptions carries the values baked into a new agent workspace.
 type AgentOptions struct {
 	Name        string
 	Description string
 	Agent       string
 	Model       string
+	// PersonaInstructions wires the persona bundle into OpenCode's
+	// instructions array. It is the resolved memory-load choice: omitted or
+	// mode "default" enables it, an explicit null leaves the native baseline.
+	PersonaInstructions bool
 }
 
 // ScaffoldAgent creates the SPEC §3 workspace layout. It only creates missing
@@ -37,13 +45,15 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 	}
 
 	dirs := []string{
-		"downloads/images",
-		"downloads/audio",
-		"downloads/documents",
-		"downloads/videos",
+		"media/inbound/images",
+		"media/inbound/audio",
+		"media/inbound/documents",
+		"media/inbound/videos",
+		"media/outbound/images",
 		".acolyte",
 		".agents/skills",
 		".opencode/agents",
+		".opencode/tools",
 		".logs",
 	}
 	for _, dir := range dirs {
@@ -60,14 +70,15 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 	}
 
 	files := map[string]string{
-		"AGENTS.md":             agentAgentsContent(opts),
-		"opencode.jsonc":        opencode,
-		".acolyte/CONFIG.md":    agentConfigContent,
-		".acolyte/SOUL.md":      agentSoulContent,
-		".acolyte/TOOLS.md":     agentToolsContent,
-		".acolyte/USER.md":      agentUserContent,
-		".acolyte/HEARTBEAT.md": agentHeartbeatContent,
-		".gitignore":            agentGitignore,
+		"AGENTS.md":                     agentAgentsContent(opts),
+		"opencode.jsonc":                opencode,
+		".acolyte/CONFIG.md":            agentConfigContent,
+		".acolyte/SOUL.md":              agentSoulContent,
+		".acolyte/TOOLS.md":             agentToolsContent,
+		".acolyte/USER.md":              agentUserContent,
+		".acolyte/HEARTBEAT.md":         agentHeartbeatContent,
+		".opencode/tools/send_image.ts": agentSendImageTool,
+		".gitignore":                    agentGitignore,
 	}
 	for name, content := range files {
 		if err := filesystem.createFileIfMissing(name, content); err != nil {
@@ -84,6 +95,7 @@ var requiredGitignore = []string{
 	".acolyte.sqlite.db-wal",
 	".logs/",
 	"downloads/",
+	"media/",
 }
 
 // ensureGitignore merges the agent-state patterns into an existing .gitignore
@@ -177,12 +189,13 @@ type openCodeConfigFile struct {
 	Model        string                   `json:"model,omitempty"`
 	Instructions []string                 `json:"instructions,omitempty"`
 	DefaultAgent string                   `json:"default_agent,omitempty"`
-	Agent        map[string]openCodeAgent `json:"agent,omitempty"`
+	Agents       map[string]openCodeAgent `json:"agents,omitempty"`
 }
 
 type openCodeAgent struct {
 	Description string `json:"description,omitempty"`
-	Prompt      string `json:"prompt,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+	System      string `json:"system,omitempty"`
 }
 
 func openCodeConfig(opts AgentOptions) (string, error) {
@@ -194,10 +207,14 @@ func openCodeConfig(opts AgentOptions) (string, error) {
 	config := openCodeConfigFile{
 		Schema:       "https://opencode.ai/config.json",
 		Model:        strings.TrimSpace(opts.Model),
-		Instructions: []string{".acolyte/*.md"},
 		DefaultAgent: agentID,
 	}
-	if agentID != "build" {
+	if opts.PersonaInstructions {
+		config.Instructions = []string{PersonaInstruction}
+	}
+	// build and plan are OpenCode built-ins: selecting one as default_agent
+	// must not invent a custom definition for it.
+	if agentID != "build" && agentID != "plan" {
 		name := strings.TrimSpace(opts.Name)
 		if name == "" {
 			name = "acolyte"
@@ -206,10 +223,11 @@ func openCodeConfig(opts AgentOptions) (string, error) {
 		if description == "" {
 			description = "Acolyte agent"
 		}
-		config.Agent = map[string]openCodeAgent{
+		config.Agents = map[string]openCodeAgent{
 			agentID: {
 				Description: description,
-				Prompt:      fmt.Sprintf("You are %s, an Acolyte agent powered by OpenCode. Follow the persona in .acolyte/.", name),
+				Mode:        "primary",
+				System:      fmt.Sprintf("You are %s, an Acolyte agent powered by OpenCode. Follow the persona in .acolyte/.", name),
 			},
 		}
 	}

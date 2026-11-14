@@ -108,6 +108,45 @@ func (s *Store) ListChats() ([]Chat, error) {
 	return chats, nil
 }
 
+// LastMessageAt returns the newest communication timestamp: the latest inbound
+// received_at or the latest delivered outbound sent_at. Pending, failed, or
+// otherwise unsent outbound rows do not count. ok is false when neither table
+// holds a timestamp.
+func (s *Store) LastMessageAt() (time.Time, bool, error) {
+	inbound, inboundOK, err := s.lastTimestamp(`SELECT received_at FROM comm_tg_inbox
+		ORDER BY julianday(received_at) DESC LIMIT 1`)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("comm_tg: last inbound message: %w", err)
+	}
+	outbound, outboundOK, err := s.lastTimestamp(`SELECT sent_at FROM comm_tg_outbox
+		WHERE sent_at IS NOT NULL ORDER BY julianday(sent_at) DESC LIMIT 1`)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("comm_tg: last outbound message: %w", err)
+	}
+	switch {
+	case !inboundOK && !outboundOK:
+		return time.Time{}, false, nil
+	case !inboundOK:
+		return outbound.UTC(), true, nil
+	case !outboundOK || !outbound.After(inbound):
+		return inbound.UTC(), true, nil
+	default:
+		return outbound.UTC(), true, nil
+	}
+}
+
+func (s *Store) lastTimestamp(query string) (time.Time, bool, error) {
+	var value time.Time
+	err := s.db.QueryRow(query).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return value, true, nil
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1

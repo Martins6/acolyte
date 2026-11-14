@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/martins6/acolyte/internal/envelope"
+	"github.com/martins6/acolyte/internal/media"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
@@ -26,6 +27,10 @@ type OutboxSink struct {
 	Stores StoreProvider
 	Turn   SyntheticTurnRunner
 	Now    func() time.Time
+	// Activity, when non-nil, records tool activity for synthetic turns. An
+	// empty Agent is filled from the agent passed to Inbox, so one sink can
+	// serve every registered agent.
+	Activity *ActivityRecorder
 }
 
 // DeliveryError carries the final delivery payload when an outbox enqueue
@@ -57,10 +62,36 @@ func (e *DeliveryError) Unwrap() error {
 }
 
 // NotifyUser enqueues a user-only message to the agent's latest allowed chat.
-func (s OutboxSink) NotifyUser(_ context.Context, agent registry.Agent, text string) error {
+func (s OutboxSink) NotifyUser(ctx context.Context, agent registry.Agent, text string) error {
+	return s.notifyUser(ctx, agent, text, "", "")
+}
+
+// NotifyUserAttributed enqueues a user-only text message with an optional
+// session id recorded for attribution only. It never injects a message into
+// that session.
+func (s OutboxSink) NotifyUserAttributed(ctx context.Context, agent registry.Agent, text, sessionID string) error {
+	return s.notifyUser(ctx, agent, text, "", strings.TrimSpace(sessionID))
+}
+
+// NotifyUserMedia enqueues one user-only photo. The caption is optional; the
+// media path must already be validated/canonicalized by the caller. sessionID
+// is attribution only and never injects a message into that session.
+func (s OutboxSink) NotifyUserMedia(ctx context.Context, agent registry.Agent, text, mediaPath, sessionID string) error {
 	text = strings.TrimSpace(text)
-	if text == "" {
-		return fmt.Errorf("comm: notification text is required")
+	mediaPath = strings.TrimSpace(mediaPath)
+	if mediaPath == "" {
+		return fmt.Errorf("comm: media path is required")
+	}
+	if err := media.ValidateOutboundCaption(text); err != nil {
+		return err
+	}
+	return s.notifyUser(ctx, agent, text, mediaPath, strings.TrimSpace(sessionID))
+}
+
+func (s OutboxSink) notifyUser(_ context.Context, agent registry.Agent, text, mediaPath, sessionID string) error {
+	text = strings.TrimSpace(text)
+	if text == "" && mediaPath == "" {
+		return fmt.Errorf("comm: notification text or media is required")
 	}
 	st, release, err := s.Stores.Acquire(agent.Workspace)
 	if err != nil {
@@ -75,18 +106,24 @@ func (s OutboxSink) NotifyUser(_ context.Context, agent registry.Agent, text str
 	if !ok {
 		return fmt.Errorf("comm: agent %q has no private Telegram chat; message the bot first", agent.Name)
 	}
+	contentType := envelope.ContentText
+	if mediaPath != "" {
+		contentType = envelope.ContentMedia
+	}
 	env := envelope.New(envelope.DirectionOut, "telegram", envelope.TelegramThread(chat.ChatID),
 		envelope.Party{Kind: envelope.PartyAgent, ID: agent.Name, Name: agent.Name},
 		envelope.Party{Kind: envelope.PartyUser, ID: fmt.Sprintf("%d", chat.ChatID), Name: chat.Username},
-		envelope.Content{Type: envelope.ContentText, Text: text})
+		envelope.Content{Type: contentType, Text: text})
 	_, err = st.CommTG().EnqueueOutbound(commtg.OutboxItem{
-		EnvelopeID: env.ID,
-		ChatID:     chat.ChatID,
-		Text:       text,
-		CreatedAt:  s.now(),
+		EnvelopeID:        env.ID,
+		ChatID:            chat.ChatID,
+		Text:              text,
+		MediaPath:         mediaPath,
+		OpenCodeSessionID: sessionID,
+		CreatedAt:         s.now(),
 	})
 	if err != nil {
-		return &DeliveryError{EnvelopeID: env.ID, ChatID: chat.ChatID, Text: text, Err: err}
+		return &DeliveryError{EnvelopeID: env.ID, ChatID: chat.ChatID, Text: text, OpenCodeSessionID: sessionID, Err: err}
 	}
 	return nil
 }
@@ -111,12 +148,20 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 			sessionID = session.OpenCodeSessionID
 		}
 	}
+	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
+	if s.Activity != nil {
+		recorder := *s.Activity
+		if strings.TrimSpace(recorder.Agent) == "" {
+			recorder.Agent = agent.Name
+		}
+		cfg.OnEvent = recorder.Handler(st)
+	}
 	result, err := s.Turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        text,
 		Description: "Inbox event",
 		Metadata:    meta,
 		Delivery:    "queue",
-	}, opencode.TurnConfig{Workspace: agent.Workspace})
+	}, cfg)
 	if err != nil {
 		if result == nil {
 			return "", "", err

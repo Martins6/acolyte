@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/store"
 )
 
@@ -52,6 +53,9 @@ func TestRunCreatesSessionAndPrintsReply(t *testing.T) {
 	}
 	if fake.userConfig.Workspace != canonicalWorkspace(t, ws) {
 		t.Errorf("workspace = %q, want %q", fake.userConfig.Workspace, canonicalWorkspace(t, ws))
+	}
+	if fake.userConfig.Timeout != 0 {
+		t.Errorf("timeout = %v, want no additional deadline", fake.userConfig.Timeout)
 	}
 	if out.String() != "reply\n" {
 		t.Errorf("stdout = %q, want reply", out.String())
@@ -199,8 +203,45 @@ func TestRunJSONOutput(t *testing.T) {
 	if got.Error != "" {
 		t.Errorf("error = %q, want empty", got.Error)
 	}
+	if strings.Contains(out.String(), "tool_activity") {
+		t.Errorf("json = %q, want no tool_activity when empty", out.String())
+	}
 	if errOut.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", errOut.String())
+	}
+}
+
+func TestRunJSONToolActivity(t *testing.T) {
+	setupCronCLI(t)
+	fake := &fakeCLITurn{result: &opencode.TurnResult{
+		SessionID:    "ses_cli",
+		InputID:      "msg_in",
+		ResponseText: "reply",
+		MessageIDs:   []string{"msg_out"},
+		ToolActivity: []opencode.ToolActivity{
+			{Name: "bash", Status: "completed", ID: "tool_1"},
+		},
+	}}
+	withFakeTurn(t, fake)
+
+	var out, errOut bytes.Buffer
+	err := runRun(context.Background(), &out, &errOut, "hello", runOptions{
+		AgentName: "valet",
+		JSON:      true,
+	})
+	if err != nil {
+		t.Fatalf("runRun() error: %v", err)
+	}
+	var got runResult
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("json output: %v; raw %q", err, out.String())
+	}
+	want := []opencode.ToolActivity{{Name: "bash", Status: "completed", ID: "tool_1"}}
+	if len(got.ToolActivity) != 1 || got.ToolActivity[0] != want[0] {
+		t.Errorf("tool activity = %+v, want %+v", got.ToolActivity, want)
+	}
+	if !strings.Contains(out.String(), `"tool_activity"`) {
+		t.Errorf("json = %q, want tool_activity key", out.String())
 	}
 }
 
@@ -266,12 +307,48 @@ func TestRunValidation(t *testing.T) {
 	}
 	if err := runRun(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, "hello", runOptions{
 		Timeout: -time.Second,
-	}); err == nil || !strings.Contains(err.Error(), "greater than zero") {
+	}); err == nil || !strings.Contains(err.Error(), "must not be negative") {
 		t.Errorf("negative timeout error = %v", err)
 	}
-	if err := runRun(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, "hello", runOptions{
-		Timeout: 6 * time.Minute,
-	}); err == nil || !strings.Contains(err.Error(), "cannot exceed") {
-		t.Errorf("long timeout error = %v", err)
+}
+
+func TestRunAcceptsTimeoutOverFiveMinutes(t *testing.T) {
+	setupCronCLI(t)
+	fake := &fakeCLITurn{}
+	withFakeTurn(t, fake)
+
+	err := runRun(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, "hello", runOptions{
+		AgentName: "valet",
+		Timeout:   10 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("runRun() error: %v", err)
+	}
+	if fake.userConfig.Timeout != 10*time.Minute {
+		t.Errorf("turn timeout = %v, want 10m", fake.userConfig.Timeout)
+	}
+}
+
+func TestRunTimeoutFlag(t *testing.T) {
+	flag := runCmd.Flags().Lookup("timeout")
+	if flag == nil {
+		t.Fatal("--timeout flag is not registered")
+	}
+	if flag.DefValue != "0s" {
+		t.Errorf("--timeout default = %q, want 0s", flag.DefValue)
+	}
+
+	t.Cleanup(func() { runTimeout = 0 })
+	if err := runCmd.Flags().Set("timeout", "10m"); err != nil {
+		t.Fatalf("parse --timeout 10m: %v", err)
+	}
+	if runTimeout != 10*time.Minute {
+		t.Errorf("--timeout 10m = %v, want 10m", runTimeout)
+	}
+	if err := runCmd.Flags().Set("timeout", "-1s"); err != nil {
+		t.Fatalf("parse --timeout -1s: %v", err)
+	}
+	if runTimeout != -time.Second {
+		t.Errorf("--timeout -1s = %v, want -1s", runTimeout)
 	}
 }

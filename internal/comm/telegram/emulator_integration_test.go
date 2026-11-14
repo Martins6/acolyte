@@ -156,6 +156,37 @@ func TestEmulatedTelegramInboundAndOutbound(t *testing.T) {
 	}
 }
 
+func TestEmulatedTelegramSendsPhoto(t *testing.T) {
+	h := newEmulatedHarness(t, "42")
+	h.start(t, func(context.Context, envelope.Envelope) error { return nil })
+
+	imagePath := filepath.Join(h.adapter.agent.Workspace, "media", "outbound", "images", "chart.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	payload := []byte("emulated-photo-bytes")
+	if err := os.WriteFile(imagePath, payload, 0644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	env := envelope.New(envelope.DirectionOut, Channel, envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Content{Type: envelope.ContentMedia, Text: "chart", Media: []string{imagePath}})
+	if err := h.adapter.Send(env); err != nil {
+		t.Fatalf("Send() error: %v", err)
+	}
+	messages, err := h.server.WaitForMessages(testContext(t), 1)
+	if err != nil {
+		t.Fatalf("wait messages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Text != "chart" || string(messages[0].Media) != string(payload) {
+		t.Fatalf("messages = %+v", messages)
+	}
+	if h.server.Calls("sendPhoto") != 1 {
+		t.Errorf("sendPhoto calls = %d, want 1", h.server.Calls("sendPhoto"))
+	}
+}
+
 func TestEmulatedTelegramDeniesUnauthorizedUser(t *testing.T) {
 	h := newEmulatedHarness(t, "@alice")
 	var sinkCalls atomic.Int32

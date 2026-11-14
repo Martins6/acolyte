@@ -59,3 +59,43 @@ func TestSessionMessagesTruncated(t *testing.T) {
 		t.Errorf("messages = %+v", messages)
 	}
 }
+
+func TestSessionMessagesToleratesMalformedContent(t *testing.T) {
+	t.Parallel()
+
+	const (
+		badNonArray = `{"id":"m3","type":"assistant","content":"not-an-array"}`
+		badPart     = `{"id":"m2","type":"assistant","content":[{"type":42,"text":7},{"type":"text","text":"ok"},"junk"]}`
+	)
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"data":[%s,%s,{"id":"m1","type":"user","text":"hello"}],"cursor":{"previous":null,"next":null}}`, badNonArray, badPart)
+	})
+
+	messages, truncated, err := client.SessionMessages(context.Background(), "ses_x", 10)
+	if err != nil {
+		t.Fatalf("SessionMessages() error: %v", err)
+	}
+	if truncated {
+		t.Error("truncated = true, want false")
+	}
+	if len(messages) != 3 {
+		t.Fatalf("messages = %+v, want 3 messages", messages)
+	}
+	if messages[0].ID != "m1" || messages[0].Text != "hello" {
+		t.Errorf("user message = %+v, want m1/hello", messages[0])
+	}
+	if len(messages[1].Content) != 2 ||
+		messages[1].Content[0] != (ContentPart{}) ||
+		messages[1].Content[1] != (ContentPart{Type: "text", Text: "ok"}) {
+		t.Errorf("content = %+v, want tolerant decode of bad fields and skipped scalar part", messages[1].Content)
+	}
+	if string(messages[1].Raw) != badPart {
+		t.Errorf("raw = %q, want %q", messages[1].Raw, badPart)
+	}
+	if messages[2].Content != nil {
+		t.Errorf("content = %+v, want nil for non-array content", messages[2].Content)
+	}
+	if string(messages[2].Raw) != badNonArray {
+		t.Errorf("raw = %q, want %q", messages[2].Raw, badNonArray)
+	}
+}

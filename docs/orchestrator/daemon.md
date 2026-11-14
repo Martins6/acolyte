@@ -31,6 +31,16 @@ persist, even when no channel can deliver the reply; delivery is a separate, dur
 `cli:<agent>`, and never starts an adapter or queues a delivery. `--continue` reuses that CLI
 session; the reply is printed directly (plain or `--json`).
 
+## Turn event activity
+
+Both turn paths subscribe to the OpenCode event stream for the duration of a turn. A best-effort
+recorder writes one `orch_logs` row per `session.tool.called`/`session.tool.success`/
+`session.tool.failed` event: `info` for called/succeeded, `warn` for failed, with source
+`opencode:<agent>`. The meta JSON only carries the event, session, assistant-message, and
+tool-call IDs; tool input/results, prompts, and text/reasoning deltas are never stored. Trace export
+reads `orch_logs`, so tool activity is available to memory/learning feeds. Recording failures are
+ignored and never fail or stall a turn.
+
 ## Sessions and inspection
 
 OpenCode owns the conversation history. Acolyte stores only routing/delivery metadata plus the
@@ -38,7 +48,7 @@ OpenCode session/message IDs needed to join the two.
 
 - `acolyte inspect --session-id <id>` reads the session from OpenCode and the matching
   `comm_tg_inbox`/`comm_tg_outbox` rows, then prints a timestamp-ordered JSON event stream with
-  message-ID links.
+  message-ID links. Outbound media rows include the `media_path` attribution when available.
 - `acolyte attach` runs `opencode attach <service-url> --dir <workspace> [--session <id>]` with the
   service credentials in the environment. Running `opencode` directly starts a separate server and
   will not see Acolyte's sessions.
@@ -53,6 +63,7 @@ OpenCode session/message IDs needed to join the two.
 
 ## Runtime config
 
-Capabilities are baked by `acolyte new`. There is currently no CLI to change an agent's channels,
-allowed users, schedule, or engine in place; `acolyte new` preserves existing settings. This is
-tracked in `FUTURE-IDEAS.md`.
+Capabilities are baked by `acolyte new` and can be changed in place with
+`acolyte config <agent> get|set|edit` (channels, allowed users, schedule, engine, memory keys; see
+[`config.md`](config.md)). `acolyte new` still preserves existing settings/jobs when it adopts a
+folder. New modes/channels remain deferred in [`FUTURE-IDEAS.md`](../../FUTURE-IDEAS.md).

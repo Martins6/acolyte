@@ -18,7 +18,7 @@ workspace.
   already-linked OpenCode message) clears the payload and marks the row processed. Failed/aborted
   admissions stay pending and are replayed on start and every 30s.
 - Resolves `chat_id` in `comm_tg_chats` and records the last-seen time.
-- **Media:** downloads the file into `<workspace>/downloads/<type>/`, reusing the existing path when
+- **Media:** downloads the file into `<workspace>/media/inbound/<type>/`, reusing the existing path when
   the Telegram `file_id` was seen before. If a download fails, the pending row keeps the raw update
   and media is retried by replay. The Envelope carries the absolute path and a prompt of the form
   `File located at: <path>\n\nUser message: <caption>`.
@@ -29,6 +29,11 @@ workspace.
 - `Send(Envelope)` resolves the chat from the Envelope thread/`to` and enqueues a row in
   `comm_tg_outbox`.
 - The adapter attempts delivery immediately and again from a 5s retry loop.
+- Outbound media is one image per message in v0: `notify-user --media <path>` validates and copies
+  the file under `media/outbound/images/`, then sends it with `sendPhoto` and an optional caption.
+  JPEG, PNG, and WebP are accepted up to 10 MiB; captions are capped at 1024 characters. The file
+  content is sniffed and must fully decode as JPEG/PNG/WebP matching its extension; decoding is
+  bounded to 50 million pixels.
 - Long text is split by UTF-16 units while preserving rune boundaries (Telegram's limit is 4096
   UTF-16 units).
 - Chunk progress is persisted, so a retry resumes after the last delivered chunk.
@@ -36,13 +41,33 @@ workspace.
   marked `failed`. Successful/failed rows clear their text; only routing/delivery metadata remains.
 - Bot tokens are redacted from logged/persisted errors.
 
+### Delivery semantics
+
+v0 never merges the photo and the turn's reply into one Telegram message:
+
+- `send_image` / `acolyte notify-user --media` queues the photo immediately when the tool or
+  command runs, sending the explicit caption when one is provided.
+- Telegram turns (daemon router) and `acolyte inbox` turns (through `OutboxSink.Inbox`) deliver the
+  agent's final assistant text as a separate Telegram message. `acolyte inbox` also prints the
+  reply to stdout.
+- `acolyte run` prints the final reply to stdout only; the photo is still sent immediately.
+
+This is deliberately immediate and deterministic: it works from the CLI runner, routines, and any
+harness that does not go through the router's reply path, and it does not depend on the turn
+finishing. Merging the two would require suppressing the tool-side send and holding the image until
+the turn ends.
+
+To merge later, extend `TurnResult` with images extracted from `send_image` tool calls and send one
+photo whose caption is the final reply. See `FUTURE-IDEAS.md` → Communication → *Merged image +
+final text*.
+
 ## State (`.acolyte.sqlite.db`, prefix `comm_tg_`)
 
 | Table | Holds |
 | ----- | ----- |
 | `comm_tg_chats` | chat_id, username, allowed, first/last seen |
 | `comm_tg_inbox` | unique tg_update_id, chat_id, envelope_id, media_path, pending replay payload/reply, processed_at, attempts, OpenCode session/message IDs |
-| `comm_tg_outbox` | envelope_id, chat_id, text (pending only), reply_to, chunk progress, attempts, delivery, tg_message_id, source message |
+| `comm_tg_outbox` | envelope_id, chat_id, text/caption (pending only), media_path, reply_to, chunk progress, attempts, delivery, tg_message_id, source message |
 | `comm_tg_media` | tg_file_id, file_path, type, chat_id, saved_at |
 | `comm_tg_settings` | non-secret channel settings (`channels`, `telegram.allowed_users`) |
 
@@ -79,5 +104,11 @@ The bot **token** is a secret read from the layered `.env` files:
 `<workspace>/.env` overrides `$ACOLYTE_HOME/.env`; the process environment overrides both. Neither
 file is ever committed or scaffolded. See `SPEC.md` §4.
 
-Runtime config mutation (changing allowed users/channels without re-running `acolyte new`) is not
-exposed yet; see `FUTURE-IDEAS.md`.
+Runtime config mutation is available without re-running `acolyte new`:
+
+```bash
+acolyte config valet set communication.channels '["telegram"]'
+acolyte config valet set communication.telegram.allowed_users '@alice,@bob'
+```
+
+See `docs/orchestrator/config.md` for validation, `--dry-run`, and the full key list.

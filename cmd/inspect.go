@@ -262,7 +262,7 @@ func communicationEvents(st *store.Store, chatID int64, sessionID string) ([]ins
 			if item.SentAt != nil {
 				timestamp = *item.SentAt
 			}
-			events = append(events, inspectEvent{
+			event := inspectEvent{
 				Timestamp:       timestamp,
 				Source:          "communication",
 				Kind:            "outbound",
@@ -274,7 +274,11 @@ func communicationEvents(st *store.Store, chatID int64, sessionID string) ([]ins
 				TGMessageID:     item.TGMessageID,
 				LinkedMessageID: item.SourceMessageID,
 				Error:           item.LastError,
-			})
+			}
+			if item.MediaPath != "" {
+				event.Media = []string{item.MediaPath}
+			}
+			events = append(events, event)
 		}
 	}
 	return events, warnings

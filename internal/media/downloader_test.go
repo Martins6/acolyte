@@ -183,22 +183,37 @@ func TestGetMediaType_Empty(t *testing.T) {
 	}
 }
 
-func TestGetFilePath(t *testing.T) {
+func TestGetInboundFilePath(t *testing.T) {
 	ws := t.TempDir()
-	path := GetFilePath(ws, MediaTypePhoto, ".jpg")
-	dir := filepath.Join(ws, "downloads", "images")
+	path := GetInboundFilePath(ws, MediaTypePhoto, ".jpg")
+	dir := filepath.Join(ws, "media", "inbound", "images")
 	if !strings.HasPrefix(path, dir+string(filepath.Separator)) {
-		t.Errorf("GetFilePath = %q, want prefix %q", path, dir)
+		t.Errorf("GetInboundFilePath = %q, want prefix %q", path, dir)
 	}
 	if !strings.HasSuffix(path, ".jpg") {
-		t.Errorf("GetFilePath = %q, want suffix .jpg", path)
+		t.Errorf("GetInboundFilePath = %q, want suffix .jpg", path)
 	}
 	re := regexp.MustCompile(`\d{8}_\d{6}\.jpg$`)
 	if !re.MatchString(path) {
-		t.Errorf("GetFilePath = %q, want to match timestamp pattern", path)
+		t.Errorf("GetInboundFilePath = %q, want to match timestamp pattern", path)
 	}
 	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("downloads/images directory was not created: %v", err)
+		t.Errorf("media/inbound/images directory was not created: %v", err)
+	}
+}
+
+func TestGetOutboundFilePath(t *testing.T) {
+	ws := t.TempDir()
+	path := GetOutboundFilePath(ws, ".png")
+	dir := filepath.Join(ws, "media", "outbound", "images")
+	if !strings.HasPrefix(path, dir+string(filepath.Separator)) {
+		t.Errorf("GetOutboundFilePath = %q, want prefix %q", path, dir)
+	}
+	if !strings.HasSuffix(path, ".png") {
+		t.Errorf("GetOutboundFilePath = %q, want suffix .png", path)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("media/outbound/images directory was not created: %v", err)
 	}
 }
 

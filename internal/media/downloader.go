@@ -25,6 +25,14 @@ const (
 	MediaTypeVideo    MediaType = "videos"
 )
 
+// Direction selects the inbound or outbound media tree.
+type Direction string
+
+const (
+	DirectionInbound  Direction = "inbound"
+	DirectionOutbound Direction = "outbound"
+)
+
 type MediaMetadata struct {
 	Kind         string
 	FileSize     int64
@@ -61,10 +69,28 @@ func GetMediaType(message *models.Message) (MediaType, string, error) {
 	}
 }
 
+// GetInboundFilePath returns a path under <workspace>/media/inbound/<type>/.
+func GetInboundFilePath(workspace string, mediaType MediaType, ext string) string {
+	return getMediaFilePath(workspace, DirectionInbound, mediaType, ext)
+}
+
+// GetOutboundFilePath returns a path under <workspace>/media/outbound/images/.
+func GetOutboundFilePath(workspace, ext string) string {
+	return getMediaFilePath(workspace, DirectionOutbound, MediaTypePhoto, ext)
+}
+
+// GetFilePath is kept for callers that predate the direction split. New code
+// should use GetInboundFilePath or GetOutboundFilePath explicitly.
+//
+// Deprecated: use GetInboundFilePath.
 func GetFilePath(workspace string, mediaType MediaType, ext string) string {
-	downloadsDir := filepath.Join(workspace, "downloads", string(mediaType))
-	os.MkdirAll(downloadsDir, 0755)
-	return filepath.Join(downloadsDir, GenerateTimestampedFilename(downloadsDir, ext))
+	return GetInboundFilePath(workspace, mediaType, ext)
+}
+
+func getMediaFilePath(workspace string, direction Direction, mediaType MediaType, ext string) string {
+	dir := filepath.Join(workspace, "media", string(direction), string(mediaType))
+	os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, GenerateTimestampedFilename(dir, ext))
 }
 
 // FileAPI is the Telegram file-download surface used by the adapter.

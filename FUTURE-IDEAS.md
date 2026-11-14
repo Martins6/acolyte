@@ -9,6 +9,12 @@
     `agent-post` (social / internal-reddit style).
   - Reuse the Envelope (`channel`, `from/to.kind = "agent"`); only routing/discovery is new.
   - Internal CLI for agent-to-agent mail/notify.
+- **Merged image + final text** — deliver `send_image` output as one photo whose caption is the
+  turn's final reply, instead of today's two messages. Deferred: it would require capturing
+  `send_image` tool calls from the session timeline into a future `TurnResult.Images` field,
+  suppressing the tool-side send, and holding the image until the turn ends. v0 deliberately keeps
+  immediate tool-side delivery plus a separate final message (deterministic, works outside the
+  router reply path, no dependency on turn completion). See `docs/communication/telegram.md`.
 - **More human channels** — Discord, Slack, WhatsApp, email, etc. (new `Communication` adapters).
 
 ## Memory
@@ -23,16 +29,16 @@
   see OpenCode skill catalogs).
 
 ## Capabilities
-- **Smooth runtime capability updates** — change an agent's capabilities in place (switch a memory
-  mode, add/remove a channel, update Telegram allowed users, schedule, or engine) without re-running
-  `acolyte new`. v0 bakes capabilities at creation, and `acolyte new` only adopts/preserves existing
-  settings; there is currently **no CLI to mutate an agent's baked config**. Potential surface:
-  `acolyte config <agent> set <key> <value>` / `acolyte config <agent> edit` with validation,
-  diffing, and a dry-run mode. Promote to Phase 3/4 once the per-agent daemon config surface is
-  stable.
+- **More runtime-editable keys** — `acolyte config <agent> get|set|edit` already mutates
+  `description`, `engine.model/agent`, `communication.channels`,
+  `communication.telegram.allowed_users`, `schedule.timezone`, `schedule.heartbeat_minutes`, and
+  the four `memory-*` keys in place (SPEC §10.5, `docs/orchestrator/config.md`). Still deferred:
+  modes/channels that do not exist in v0 yet (so nothing to switch *to*), editing an agent's
+  prompt/persona through the CLI (define the agent in `opencode.jsonc` / `.opencode/agents/`
+  first, then `set engine.agent`), and hot-reloading a running daemon's comm settings without
+  its normal config refresh.
 
 ## Orchestrator
-- **`acolyte install-service`** — write the launchd plist / systemd unit for auto-start automatically.
 - **Status cache** — maintain an `agent_status` snapshot in the registry for fast `acolyte status`
   vs. fan-out reads.
 - **Per-agent isolation hardening** — one daemon already serves all registered agents; harden

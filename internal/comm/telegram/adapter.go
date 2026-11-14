@@ -39,6 +39,7 @@ const (
 // API is the Telegram surface the adapter uses. *bot.Bot implements it.
 type API interface {
 	SendMessage(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error)
+	SendPhoto(ctx context.Context, params *bot.SendPhotoParams) (*models.Message, error)
 	GetFile(ctx context.Context, params *bot.GetFileParams) (*models.File, error)
 	Token() string
 }
@@ -249,8 +250,15 @@ func (a *Adapter) Send(env envelope.Envelope) error {
 		return err
 	}
 	text := strings.TrimSpace(env.Content.Text)
-	if text == "" {
-		return fmt.Errorf("telegram: outbound text is required")
+	if len(env.Content.Media) > 1 {
+		return fmt.Errorf("telegram: one outbound image per envelope is supported")
+	}
+	mediaPath := ""
+	if len(env.Content.Media) == 1 {
+		mediaPath = strings.TrimSpace(env.Content.Media[0])
+	}
+	if text == "" && mediaPath == "" {
+		return fmt.Errorf("telegram: outbound text or media is required")
 	}
 
 	// Hold the delivery lock across enqueue and the inline attempt so the
@@ -258,7 +266,9 @@ func (a *Adapter) Send(env envelope.Envelope) error {
 	a.deliverMu.Lock()
 	defer a.deliverMu.Unlock()
 
-	item, err := a.store.CommTG().EnqueueOutbound(commItem(env, chatID, text, a.now()))
+	item := commItem(env, chatID, text, a.now())
+	item.MediaPath = mediaPath
+	item, err = a.store.CommTG().EnqueueOutbound(item)
 	if err != nil {
 		return err
 	}
