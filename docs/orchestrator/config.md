@@ -21,7 +21,8 @@ Prints the effective config as JSON in the `acolyte new --config` shape:
 | ----- | ------ |
 | `description` | registry (`$ACOLYTE_HOME/registry.sqlite.db`) |
 | `engine.model`, `engine.agent` | `<workspace>/opencode.jsonc` (`model`, `default_agent`), JSONC-aware |
-| `memory-load/access/learn/export` | `orch_settings` (`memory.*`); the `dream` job is the source of truth for `memory-learn` when present |
+| `memory-load` | `orch_settings.memory.load`; the matching `.acolyte/*.md` entry in `opencode.jsonc` `instructions` is the actual wiring |
+| `memory-access/learn/export` | `orch_settings` (`memory.*`); the `dream` job is the source of truth for `memory-learn` when present |
 | `communication.channels`, `communication.telegram.allowed_users` | `comm_tg_settings` |
 | `schedule.timezone` | `orch_settings.schedule.timezone`, falling back to the dream/heartbeat job timezone |
 | `schedule.heartbeat_minutes` | the `heartbeat` job (`args.interval`, then its `@every <n>m` spec) |
@@ -44,7 +45,8 @@ Supported keys and their values:
 | `schedule.timezone` | IANA name (or empty to clear) | `orch_settings.schedule.timezone`; existing `dream`/`heartbeat` jobs get the new timezone and a recomputed `next_run_at` |
 | `schedule.heartbeat_minutes` | integer `>= 0` | `0` deletes the `heartbeat` job; `>0` upserts it as `@every <n>m` with `args {"interval": n}` |
 | `memory-learn` | `{"mode":"simple-dreaming","args":{"days":N}}` or `null` | `null` deletes the `dream` job and `memory.learn`; otherwise upserts `dream` as `@every <N*24>h` with `args {"days": N}` and stores `memory.learn` |
-| `memory-load`, `memory-access`, `memory-export` | JSON object or `null` | `orch_settings` only; `null` deletes the setting (native baseline) |
+| `memory-load` | `{"mode":"default"}` or `null` | `{"mode":"default"}` ensures exactly `.acolyte/*.md` is present in the `opencode.jsonc` `instructions` array and stores `memory.load`; `null` removes only that entry and deletes the setting (native baseline) |
+| `memory-access`, `memory-export` | JSON object or `null` | `orch_settings` only; `null` deletes the setting (native baseline) |
 
 Guarantees:
 
@@ -52,11 +54,14 @@ Guarantees:
   *whole* effective config is validated (including "timezone required while heartbeat/dream run")
   before a single byte or row changes. Unknown keys and values fail with the list of supported
   keys.
-- **`--dry-run` writes nothing.** It prints a unified diff for `opencode.jsonc` and the
-  before/after values plus the planned setting/job changes.
+- **`--dry-run` writes nothing.** It prints a unified diff for `opencode.jsonc` (including the
+  `memory-load` instructions edit) and the before/after values plus the planned setting/job changes.
 - **Targeted `opencode.jsonc` edits.** Comments, formatting, and unrelated keys are preserved;
   a missing key is inserted before the final `}`; missing keys with non-string values are
-  rejected instead of duplicated. Writes refuse a symlinked file and go temp-file + rename.
+  rejected instead of duplicated. `memory-load` edits only the exact `.acolyte/*.md` entry:
+  duplicate/ambiguous `instructions` keys and non-array `instructions` values are rejected, and
+  other instruction entries and comments survive. Writes refuse a symlinked file and go
+  temp-file + rename.
 - **Idempotent.** Re-setting the same value reports `no changes` and does not reset a job's
   `next_run_at`.
 - **Capability titles are not trusted.** Cron titles are not reserved: `set` verifies that an
@@ -96,6 +101,10 @@ acolyte config valet set schedule.heartbeat_minutes 30
 # Turn learning on/off
 acolyte config valet set memory-learn '{"mode":"simple-dreaming","args":{"days":7}}'
 acolyte config valet set memory-learn null
+
+# Turn the always-in-context persona bundle on/off
+acolyte config valet set memory-load '{"mode":"default"}'
+acolyte config valet set memory-load null
 
 # Telegram access
 acolyte config valet set communication.telegram.allowed_users '@alice, @bob'

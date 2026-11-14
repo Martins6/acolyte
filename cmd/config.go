@@ -62,8 +62,8 @@ Supported set keys:
   schedule.timezone                    IANA timezone (required while heartbeat/dream run)
   schedule.heartbeat_minutes           minutes; 0 removes the heartbeat job, >0 upserts it
   memory-learn                         {"mode":"simple-dreaming","args":{"days":N}} or null
-  memory-load / memory-access / memory-export
-                                       JSON object or null (store setting only)
+  memory-load                          {"mode":"default"} or null (adds/removes .acolyte/*.md)
+  memory-access / memory-export        JSON object or null (store setting only)
 
 Flags:
   --json      machine-readable JSON output

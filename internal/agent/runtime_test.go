@@ -14,6 +14,7 @@ import (
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
 	"github.com/martins6/acolyte/internal/store/orch"
+	"github.com/martins6/acolyte/internal/workspace"
 )
 
 // createRuntimeAgent scaffolds + registers "valet" with the given --config.
@@ -58,6 +59,18 @@ func readOpencode(t *testing.T, ws string) string {
 		t.Fatalf("read opencode.jsonc: %v", err)
 	}
 	return string(raw)
+}
+
+// instructionsOf decodes the top-level instructions array (nil when absent).
+func instructionsOf(t *testing.T, ws string) []string {
+	t.Helper()
+	var doc struct {
+		Instructions []string `json:"instructions"`
+	}
+	if err := parseJSONC(readOpencode(t, ws), &doc); err != nil {
+		t.Fatalf("parse opencode.jsonc: %v", err)
+	}
+	return doc.Instructions
 }
 
 func TestLoadConfigFreshDefaults(t *testing.T) {
@@ -270,6 +283,138 @@ func TestSetMemoryLearnRequiresTimezone(t *testing.T) {
 	_, err := SetConfig(st, runtimeAgent(t, "valet"), SetOptions{Key: "memory-learn", Value: `{"args":{"days":3}}`})
 	if err == nil || !strings.Contains(err.Error(), "timezone is required") {
 		t.Fatalf("error = %v, want timezone-required error", err)
+	}
+}
+
+func TestSetMemoryLoadTogglesPersonaInstructions(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	custom := `// top comment survives
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    ".acolyte/*.md",
+    "extra.md" // keep this entry
+  ],
+  "default_agent": "build"
+}
+`
+	if err := os.WriteFile(filepath.Join(ws, "opencode.jsonc"), []byte(custom), 0644); err != nil {
+		t.Fatalf("write opencode.jsonc: %v", err)
+	}
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+
+	// null selects the native baseline: only the persona entry is removed.
+	res, err := SetConfig(st, target, SetOptions{Key: "memory-load", Value: "null"})
+	if err != nil {
+		t.Fatalf("SetConfig(memory-load null) error: %v", err)
+	}
+	if !res.Changed || !strings.Contains(res.OpencodeDiff, "-") || !strings.Contains(res.OpencodeDiff, workspace.PersonaInstruction) {
+		t.Errorf("result = %+v, want a changed diff removing the persona entry", res)
+	}
+	removed := readOpencode(t, ws)
+	for _, want := range []string{"// top comment survives", `"$schema"`, `"extra.md"`, "// keep this entry"} {
+		if !strings.Contains(removed, want) {
+			t.Errorf("removed config missing %q:\n%s", want, removed)
+		}
+	}
+	if strings.Contains(removed, workspace.PersonaInstruction) {
+		t.Errorf("persona instruction survived null:\n%s", removed)
+	}
+	if instructions := instructionsOf(t, ws); len(instructions) != 1 || instructions[0] != "extra.md" {
+		t.Errorf("instructions = %v, want [extra.md]", instructions)
+	}
+	if _, ok, err := st.Orch().GetSetting("memory.load"); err != nil || ok {
+		t.Errorf("memory.load setting present = %v, %v; want deleted", ok, err)
+	}
+
+	// default restores it without disturbing the other entry or comments.
+	res, err = SetConfig(st, target, SetOptions{Key: "memory-load", Value: `{"mode":"default"}`})
+	if err != nil {
+		t.Fatalf("SetConfig(memory-load default) error: %v", err)
+	}
+	if !res.Changed || !strings.Contains(res.OpencodeDiff, "+") || !strings.Contains(res.OpencodeDiff, workspace.PersonaInstruction) {
+		t.Errorf("result = %+v, want a changed diff adding the persona entry", res)
+	}
+	restored := readOpencode(t, ws)
+	for _, want := range []string{"// top comment survives", `"extra.md"`, "// keep this entry"} {
+		if !strings.Contains(restored, want) {
+			t.Errorf("restored config missing %q:\n%s", want, restored)
+		}
+	}
+	instructions := instructionsOf(t, ws)
+	if len(instructions) != 2 || instructions[0] != "extra.md" || instructions[1] != workspace.PersonaInstruction {
+		t.Errorf("instructions = %v, want extra.md + persona", instructions)
+	}
+	setting, ok, err := st.Orch().GetSetting("memory.load")
+	var stored MemoryConfig
+	if err != nil || !ok || json.Unmarshal([]byte(setting), &stored) != nil || stored.Mode != "default" {
+		t.Errorf("memory.load = %q, %v, %v; want mode default", setting, ok, err)
+	}
+
+	// Re-setting the same value is a no-op and does not rewrite the file.
+	res, err = SetConfig(st, target, SetOptions{Key: "memory-load", Value: `{"mode":"default"}`})
+	if err != nil {
+		t.Fatalf("SetConfig(memory-load default again) error: %v", err)
+	}
+	if res.Changed {
+		t.Errorf("second set Changed = true, want false")
+	}
+	if again := readOpencode(t, ws); again != restored {
+		t.Errorf("second set rewrote opencode.jsonc:\n%s", again)
+	}
+}
+
+func TestSetMemoryLoadDryRunPreviewsDiffWithoutWriting(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	before := readOpencode(t, ws)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+	settingsBefore, err := st.Orch().ListSettings()
+	if err != nil {
+		t.Fatalf("ListSettings(): %v", err)
+	}
+
+	res, err := SetConfig(st, target, SetOptions{Key: "memory-load", Value: "null", DryRun: true})
+	if err != nil {
+		t.Fatalf("SetConfig(memory-load null dry-run) error: %v", err)
+	}
+	if !res.DryRun || !res.Changed || res.OpencodeDiff == "" {
+		t.Fatalf("result = %+v, want dry-run changed with diff", res)
+	}
+	if !strings.Contains(res.OpencodeDiff, "-") || !strings.Contains(res.OpencodeDiff, workspace.PersonaInstruction) {
+		t.Errorf("dry-run diff does not show the persona removal:\n%s", res.OpencodeDiff)
+	}
+	if after := readOpencode(t, ws); after != before {
+		t.Errorf("dry-run rewrote opencode.jsonc:\n%s", after)
+	}
+	settingsAfter, err := st.Orch().ListSettings()
+	if err != nil {
+		t.Fatalf("ListSettings(): %v", err)
+	}
+	if !reflect.DeepEqual(settingsBefore, settingsAfter) {
+		t.Errorf("dry-run changed settings: %v -> %v", settingsBefore, settingsAfter)
+	}
+}
+
+func TestSetMemoryAccessLeavesInstructions(t *testing.T) {
+	ws := createRuntimeAgent(t, `{"memory-load": null}`)
+	before := readOpencode(t, ws)
+	st := openRuntimeStore(t, ws)
+
+	if _, err := SetConfig(st, runtimeAgent(t, "valet"), SetOptions{Key: "memory-access", Value: `{"mode":"native"}`}); err != nil {
+		t.Fatalf("SetConfig(memory-access) error: %v", err)
+	}
+	if after := readOpencode(t, ws); after != before {
+		t.Errorf("memory-access changed opencode.jsonc:\n%s", after)
+	}
+	if setting, ok, err := st.Orch().GetSetting("memory.access"); err != nil || !ok {
+		t.Errorf("memory.access = %q, %v, %v", setting, ok, err)
+	} else {
+		var stored MemoryConfig
+		if err := json.Unmarshal([]byte(setting), &stored); err != nil || stored.Mode != "native" {
+			t.Errorf("memory.access = %q: mode = %q, %v", setting, stored.Mode, err)
+		}
 	}
 }
 

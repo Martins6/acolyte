@@ -49,6 +49,11 @@ means *both* instructions-in-context + the `skill` tool.
 | `memory-learn` | `{mode,args}` \| null | `simple-dreaming` | `days:int` | [`memory-learn/simple-dreaming.md`](memory/memory-learn/simple-dreaming.md) |
 | `memory-export` | `{mode,args}` \| null | `opencode-export` | — | [`memory-export/opencode-export.md`](memory/memory-export/opencode-export.md) |
 
+`memory-load` is the only memory key wired into `opencode.jsonc`: omitting it (or setting
+`{"mode":"default"}`) adds `.acolyte/*.md` to the `instructions` array at `acolyte new`; an
+explicit `null` selects the native OpenCode baseline and creates no such instruction. The other
+memory keys only affect `orch_settings` and (for `memory-learn`) the `dream` job.
+
 The `opencode-export` mode is run with `acolyte memory export --out <zip>`; it writes a
 portable Markdown + JSON trace bundle. `acolyte memory import <zip>` moves a bundle into
 another agent (extract + index, and/or replay its sessions).
@@ -109,7 +114,8 @@ does not own:
 | `schedule.timezone` | IANA name | `orch_settings` + re-times the dream/heartbeat jobs and their `next_run_at` |
 | `schedule.heartbeat_minutes` | int | `0` removes the `heartbeat` job; `>0` upserts `@every <n>m` with `{"interval":n}` |
 | `memory-learn` | `{"mode":"simple-dreaming","args":{"days":N}}` or `null` | `null` removes the `dream` job + `memory.learn`; otherwise upserts `@every <N*24>h` with `{"days":N}` |
-| `memory-load`, `memory-access`, `memory-export` | JSON object or `null` | `orch_settings` only (`null` clears the setting) |
+| `memory-load` | `{"mode":"default"}` or `null` | `{"mode":"default"}` ensures `.acolyte/*.md` is present in `opencode.jsonc` `instructions` and stores `memory.load`; `null` removes only that instruction entry and deletes the setting (native baseline) |
+| `memory-access`, `memory-export` | JSON object or `null` | `orch_settings` only (`null` clears the setting) |
 
 Rules:
 

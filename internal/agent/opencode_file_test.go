@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/martins6/acolyte/internal/workspace"
 )
 
 // jsonUEscape builds a JSON unicode escape (backslash + u + code) without
@@ -124,6 +126,170 @@ func TestEditOpencodeRejectsNonObjectAndRollsBack(t *testing.T) {
 	}
 	if got := readOpencode(t, ws); got != original {
 		t.Errorf("original not restored:\n%s", got)
+	}
+}
+
+func TestSetOpencodeInstructionPreservesCommentsAndEntries(t *testing.T) {
+	raw := `// top comment
+{
+  "instructions": [
+    // persona entry
+    ".acolyte/*.md",
+    "extra.md" // keep this entry
+  ]
+}
+`
+	removed, err := setOpencodeInstruction(raw, workspace.PersonaInstruction, false)
+	if err != nil {
+		t.Fatalf("setOpencodeInstruction(remove) error: %v", err)
+	}
+	for _, want := range []string{"// top comment", "// persona entry", "// keep this entry", `"extra.md"`, `"instructions"`} {
+		if !strings.Contains(removed, want) {
+			t.Errorf("removed document missing %q:\n%s", want, removed)
+		}
+	}
+	if strings.Contains(removed, workspace.PersonaInstruction) {
+		t.Errorf("persona entry survived removal:\n%s", removed)
+	}
+	var doc struct {
+		Instructions []string `json:"instructions"`
+	}
+	if err := parseJSONC(removed, &doc); err != nil {
+		t.Fatalf("removed document is not valid JSONC: %v\n%s", err, removed)
+	}
+	if len(doc.Instructions) != 1 || doc.Instructions[0] != "extra.md" {
+		t.Errorf("instructions = %v, want [extra.md]", doc.Instructions)
+	}
+
+	restored, err := setOpencodeInstruction(removed, workspace.PersonaInstruction, true)
+	if err != nil {
+		t.Fatalf("setOpencodeInstruction(add) error: %v", err)
+	}
+	for _, want := range []string{"// top comment", "// persona entry", "// keep this entry", `"extra.md"`} {
+		if !strings.Contains(restored, want) {
+			t.Errorf("restored document missing %q:\n%s", want, restored)
+		}
+	}
+	var restoredDoc struct {
+		Instructions []string `json:"instructions"`
+	}
+	if err := parseJSONC(restored, &restoredDoc); err != nil {
+		t.Fatalf("restored document is not valid JSONC: %v\n%s", err, restored)
+	}
+	if len(restoredDoc.Instructions) != 2 ||
+		restoredDoc.Instructions[0] != "extra.md" ||
+		restoredDoc.Instructions[1] != workspace.PersonaInstruction {
+		t.Errorf("instructions = %v, want extra.md + persona", restoredDoc.Instructions)
+	}
+}
+
+func TestSetOpencodeInstructionInsertsMissingKey(t *testing.T) {
+	raw := "// top comment\n{\n  \"model\": \"acme/model-1\" // keep\n}\n"
+	updated, err := setOpencodeInstruction(raw, workspace.PersonaInstruction, true)
+	if err != nil {
+		t.Fatalf("setOpencodeInstruction(add) error: %v", err)
+	}
+	for _, want := range []string{"// top comment", "// keep", `"model": "acme/model-1"`, `"instructions": [".acolyte/*.md"]`} {
+		if !strings.Contains(updated, want) {
+			t.Errorf("updated document missing %q:\n%s", want, updated)
+		}
+	}
+	var doc struct {
+		Instructions []string `json:"instructions"`
+	}
+	if err := parseJSONC(updated, &doc); err != nil {
+		t.Fatalf("updated document is not valid JSONC: %v\n%s", err, updated)
+	}
+	if len(doc.Instructions) != 1 || doc.Instructions[0] != workspace.PersonaInstruction {
+		t.Errorf("instructions = %v", doc.Instructions)
+	}
+
+	// Removing from an absent array is a no-op.
+	without, err := setOpencodeInstruction(`{"model": "acme/model-1"}`, workspace.PersonaInstruction, false)
+	if err != nil {
+		t.Fatalf("setOpencodeInstruction(remove absent) error: %v", err)
+	}
+	if without != `{"model": "acme/model-1"}` {
+		t.Errorf("remove on absent key changed the document:\n%s", without)
+	}
+
+	// A trailing comma before the root brace is legal JSONC and must be
+	// reused rather than doubled.
+	trailing := "{\n  \"model\": \"acme/model-1\",\n}\n"
+	inserted, err := setOpencodeInstruction(trailing, workspace.PersonaInstruction, true)
+	if err != nil {
+		t.Fatalf("setOpencodeInstruction(trailing comma) error: %v", err)
+	}
+	if strings.Contains(inserted, ",,") {
+		t.Errorf("insertion doubled the trailing comma:\n%s", inserted)
+	}
+	if err := parseJSONC(inserted, &doc); err != nil {
+		t.Fatalf("trailing-comma document is not valid JSONC: %v\n%s", err, inserted)
+	}
+	if len(doc.Instructions) != 1 || doc.Instructions[0] != workspace.PersonaInstruction {
+		t.Errorf("instructions = %v", doc.Instructions)
+	}
+}
+
+func TestSetOpencodeInstructionRejectsAmbiguousShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "duplicate key",
+			raw:  `{"instructions": [".acolyte/*.md"], "instructions": ["extra.md"]}`,
+			want: "duplicate top-level key",
+		},
+		{
+			name: "escaped duplicate key",
+			raw:  `{"instructions": [".acolyte/*.md"], "instructi` + jsonUEscape("006f") + `ns": []}`,
+			want: "duplicate top-level key",
+		},
+		{
+			name: "string value",
+			raw:  `{"instructions": ".acolyte/*.md"}`,
+			want: "is not an array",
+		},
+		{
+			name: "object value",
+			raw:  `{"instructions": {".acolyte/*.md": true}}`,
+			want: "is not an array",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, present := range []bool{true, false} {
+				if _, err := setOpencodeInstruction(tc.raw, workspace.PersonaInstruction, present); err == nil ||
+					!strings.Contains(err.Error(), tc.want) {
+					t.Errorf("present=%v error = %v, want containing %q", present, err, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestSetOpencodeInstructionRemovesSoleEntry(t *testing.T) {
+	cases := []string{
+		`{"instructions": [".acolyte/*.md"]}`,
+		"{\n  \"instructions\": [\n    \".acolyte/*.md\"\n  ]\n}\n",
+		`{"instructions": [".acolyte/*.md",]}`,
+	}
+	for _, raw := range cases {
+		removed, err := setOpencodeInstruction(raw, workspace.PersonaInstruction, false)
+		if err != nil {
+			t.Fatalf("setOpencodeInstruction(%s) error: %v", raw, err)
+		}
+		var doc struct {
+			Instructions []string `json:"instructions"`
+		}
+		if err := parseJSONC(removed, &doc); err != nil {
+			t.Fatalf("removed document is not valid JSONC: %v\n%s", err, removed)
+		}
+		if len(doc.Instructions) != 0 {
+			t.Errorf("instructions = %v, want empty\n%s", doc.Instructions, removed)
+		}
 	}
 }
 

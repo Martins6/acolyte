@@ -11,12 +11,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// PersonaInstruction is the OpenCode instructions glob that keeps the
+// persona bundle (.acolyte/*.md) always in context (memory-load default).
+const PersonaInstruction = ".acolyte/*.md"
+
 // AgentOptions carries the values baked into a new agent workspace.
 type AgentOptions struct {
 	Name        string
 	Description string
 	Agent       string
 	Model       string
+	// PersonaInstructions wires the persona bundle into OpenCode's
+	// instructions array. It is the resolved memory-load choice: omitted or
+	// mode "default" enables it, an explicit null leaves the native baseline.
+	PersonaInstructions bool
 }
 
 // ScaffoldAgent creates the SPEC §3 workspace layout. It only creates missing
@@ -198,8 +206,10 @@ func openCodeConfig(opts AgentOptions) (string, error) {
 	config := openCodeConfigFile{
 		Schema:       "https://opencode.ai/config.json",
 		Model:        strings.TrimSpace(opts.Model),
-		Instructions: []string{".acolyte/*.md"},
 		DefaultAgent: agentID,
+	}
+	if opts.PersonaInstructions {
+		config.Instructions = []string{PersonaInstruction}
 	}
 	if agentID != "build" {
 		name := strings.TrimSpace(opts.Name)

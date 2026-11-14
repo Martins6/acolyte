@@ -19,10 +19,11 @@ func scaffoldTest(t *testing.T, opts AgentOptions) string {
 
 func TestScaffoldAgent(t *testing.T) {
 	ws := scaffoldTest(t, AgentOptions{
-		Name:        "valet",
-		Description: "Personal assistant",
-		Agent:       "build",
-		Model:       "minimax-coding-plan/MiniMax-M3",
+		Name:                "valet",
+		Description:         "Personal assistant",
+		Agent:               "build",
+		Model:               "minimax-coding-plan/MiniMax-M3",
+		PersonaInstructions: true,
 	})
 
 	for _, name := range []string{
@@ -83,6 +84,27 @@ func TestScaffoldAgent(t *testing.T) {
 	}
 	if !strings.Contains(string(tool), "notify-user") || !strings.Contains(string(tool), "--media") {
 		t.Errorf("send_image tool does not call notify-user --media")
+	}
+}
+
+func TestScaffoldAgentWithoutPersonaInstructions(t *testing.T) {
+	ws := scaffoldTest(t, AgentOptions{Name: "valet"})
+
+	raw, err := os.ReadFile(filepath.Join(ws, "opencode.jsonc"))
+	if err != nil {
+		t.Fatalf("read opencode.jsonc: %v", err)
+	}
+	if strings.Contains(string(raw), `"instructions"`) {
+		t.Errorf("opencode.jsonc carries instructions for the native baseline:\n%s", raw)
+	}
+	var config struct {
+		Instructions []string `json:"instructions"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("opencode.jsonc is not valid JSON: %v", err)
+	}
+	if len(config.Instructions) != 0 {
+		t.Errorf("instructions = %v, want none", config.Instructions)
 	}
 }
 
