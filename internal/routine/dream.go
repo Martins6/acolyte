@@ -2,7 +2,9 @@ package routine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -132,7 +134,7 @@ func (dreamRoutine) Run(ctx context.Context, env Env, args map[string]any) (stri
 	if len([]rune(analysisText)) > 8000 {
 		claims += "\n[claims truncated]"
 	}
-	validatorSessionID, err := dreamValidatorSessionID(env)
+	validatorSessionID, err := dreamValidatorSessionID(ctx, env)
 	if err != nil {
 		return "", err
 	}
@@ -210,8 +212,10 @@ func persistDreamResult(env Env, result *opencode.TurnResult, writer bool) error
 
 // dreamValidatorSessionID returns the persisted writer session so runs reuse
 // one conversation instead of creating a new session each time. It returns ""
-// only before the first writer run has recorded a validator session.
-func dreamValidatorSessionID(env Env) (string, error) {
+// when no validator session has been recorded yet or the mapped OpenCode
+// session no longer exists, so the writer creates a fresh session and
+// persistDreamResult replaces the stale mapping.
+func dreamValidatorSessionID(ctx context.Context, env Env) (string, error) {
 	if env.Store == nil || strings.TrimSpace(env.Thread) == "" {
 		return "", nil
 	}
@@ -221,6 +225,16 @@ func dreamValidatorSessionID(env Env) (string, error) {
 	}
 	if !ok {
 		return "", nil
+	}
+	if _, err := env.OpenCode.GetSession(ctx, session.OpenCodeSessionID); err != nil {
+		var apiErr *opencode.APIError
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+			env.Log("warn", "dream validator session is gone; creating a new one", map[string]any{
+				"session": session.OpenCodeSessionID,
+			})
+			return "", nil
+		}
+		return "", fmt.Errorf("routine: dream validator session probe: %w", err)
 	}
 	return session.OpenCodeSessionID, nil
 }

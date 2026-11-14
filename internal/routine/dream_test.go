@@ -276,12 +276,145 @@ func TestDreamRoutineReusesValidatorSession(t *testing.T) {
 	if sessionCreates != 1 {
 		t.Errorf("session creates after second run = %d, want 1 (validator reused)", sessionCreates)
 	}
-	if validatorFetches != 1 {
-		t.Errorf("validator session fetches = %d, want 1", validatorFetches)
+	if validatorFetches != 2 {
+		t.Errorf("validator session fetches = %d, want 2 (probe + writer turn)", validatorFetches)
 	}
 	validator, ok, err = st.Orch().GetSessionByThread("cron:dream:validator")
 	if err != nil || !ok || validator.OpenCodeSessionID != "ses_validator_1" {
 		t.Errorf("validator session after second run = %+v, %v, %v; want ses_validator_1", validator, ok, err)
+	}
+}
+
+func TestDreamRoutineRecoversStaleValidatorSession(t *testing.T) {
+	ws := t.TempDir()
+	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "SOUL.md"), "old soul")
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Now().UTC()
+	if _, err := st.Orch().UpsertSession("cron:dream:validator", "ses_stale", now); err != nil {
+		t.Fatalf("seed stale validator mapping: %v", err)
+	}
+
+	var sessionCreates int
+	var writerPrompt string
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
+			fmt.Fprintf(w, `{"data":[{"id":"ses_user","time":{"updated":%d},"location":{"directory":%q}}]}`, now.UnixMilli(), ws)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_user/message":
+			fmt.Fprint(w, `{"data":[{"id":"m1","type":"user","text":"remember this"}],"cursor":{"next":null}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_dream":
+			fmt.Fprint(w, `{"data":{"id":"ses_dream"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_dream/synthetic":
+			writeRoutineFile(t, filepath.Join(ws, ".acolyte", "SOUL.md"), "analysis violation")
+			fmt.Fprint(w, `{"data":{"id":"msg_analysis","sessionID":"ses_dream","type":"synthetic"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_dream/wait":
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_dream/message":
+			fmt.Fprint(w, `{"data":[{"id":"msg_analysis_reply","type":"assistant","content":[{"type":"text","text":"User prefers concise answers."}]},{"id":"msg_analysis","type":"synthetic","text":"prompt"}],"cursor":{"next":null}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_stale":
+			http.Error(w, "session not found", http.StatusNotFound)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			sessionCreates++
+			fmt.Fprint(w, `{"data":{"id":"ses_validator_new"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_validator_new/synthetic":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			writerPrompt, _ = body["text"].(string)
+			writeRoutineFile(t, filepath.Join(ws, ".acolyte", "SOUL.md"), "new soul")
+			fmt.Fprint(w, `{"data":{"id":"msg_writer","sessionID":"ses_validator_new","type":"synthetic"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_validator_new/wait":
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_validator_new/message":
+			fmt.Fprint(w, `{"data":[{"id":"msg_writer_reply","type":"assistant","content":[{"type":"text","text":"updated soul"}]},{"id":"msg_writer","type":"synthetic","text":"prompt"}],"cursor":{"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	env := Env{
+		Agent: registry.Agent{Name: "valet", Workspace: ws}, Workspace: ws,
+		Thread: "cron:dream", SessionID: "ses_dream", Meta: map[string]any{},
+		Now: func() time.Time { return now }, Store: st, OpenCode: client,
+		Log: func(string, string, map[string]any) {},
+	}
+	if _, err := (dreamRoutine{}).Run(context.Background(), env, map[string]any{"days": 3}); err != nil {
+		t.Fatalf("dream Run() error: %v", err)
+	}
+
+	if sessionCreates != 1 {
+		t.Errorf("session creates = %d, want 1 (stale validator replaced)", sessionCreates)
+	}
+	if !strings.Contains(writerPrompt, "independent memory writer") {
+		t.Errorf("writer prompt = %s, want writer turn in the new session", writerPrompt)
+	}
+	validator, ok, err := st.Orch().GetSessionByThread("cron:dream:validator")
+	if err != nil || !ok || validator.OpenCodeSessionID != "ses_validator_new" {
+		t.Errorf("validator session = %+v, %v, %v; want stale mapping replaced with ses_validator_new", validator, ok, err)
+	}
+}
+
+func TestDreamRoutinePropagatesValidatorProbeErrors(t *testing.T) {
+	ws := t.TempDir()
+	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "SOUL.md"), "old soul")
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	now := time.Now().UTC()
+	if _, err := st.Orch().UpsertSession("cron:dream:validator", "ses_stale", now); err != nil {
+		t.Fatalf("seed stale validator mapping: %v", err)
+	}
+
+	var sessionCreates int
+	var permissions permissionRecorder
+	client := routineTestClientWithPermissions(t, &permissions, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session":
+			fmt.Fprintf(w, `{"data":[{"id":"ses_user","time":{"updated":%d},"location":{"directory":%q}}]}`, now.UnixMilli(), ws)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_user/message":
+			fmt.Fprint(w, `{"data":[{"id":"m1","type":"user","text":"remember this"}],"cursor":{"next":null}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_dream":
+			fmt.Fprint(w, `{"data":{"id":"ses_dream"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_dream/synthetic":
+			fmt.Fprint(w, `{"data":{"id":"msg_analysis","sessionID":"ses_dream","type":"synthetic"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/experimental/session/ses_dream/wait":
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_dream/message":
+			fmt.Fprint(w, `{"data":[{"id":"msg_analysis_reply","type":"assistant","content":[{"type":"text","text":"User prefers concise answers."}]},{"id":"msg_analysis","type":"synthetic","text":"prompt"}],"cursor":{"next":null}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_stale":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			sessionCreates++
+			fmt.Fprint(w, `{"data":{"id":"ses_unexpected"}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	env := Env{
+		Agent: registry.Agent{Name: "valet", Workspace: ws}, Workspace: ws,
+		Thread: "cron:dream", SessionID: "ses_dream", Meta: map[string]any{},
+		Now: func() time.Time { return now }, Store: st, OpenCode: client,
+		Log: func(string, string, map[string]any) {},
+	}
+	_, err = (dreamRoutine{}).Run(context.Background(), env, map[string]any{"days": 3})
+	if err == nil || !strings.Contains(err.Error(), "validator session probe") || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("dream Run() error = %v, want propagated probe error", err)
+	}
+	if sessionCreates != 0 {
+		t.Errorf("session creates = %d, want 0 on probe error", sessionCreates)
+	}
+	validator, ok, err := st.Orch().GetSessionByThread("cron:dream:validator")
+	if err != nil || !ok || validator.OpenCodeSessionID != "ses_stale" {
+		t.Errorf("validator session = %+v, %v, %v; want stale mapping retained after probe error", validator, ok, err)
 	}
 }
 

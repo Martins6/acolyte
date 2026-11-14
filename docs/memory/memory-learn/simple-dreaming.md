@@ -50,7 +50,8 @@ whether anything is worth distilling into the **persona files** or a **skill**. 
 - A **headless cron job** (`orch_cron_jobs`: `owner=memory-learn`, `kind=routine`, `spec` = every N days).
 - **Session mappings** (`orch_sessions`): the analysis turn uses `cron:<job>`; the writer turn reuses
   the persistent `cron:<job>:validator` session created by its first run (no new `/api/session` on
-  later runs).
+  later runs). If that OpenCode session is later deleted, the next run treats the 404 as "no session",
+  creates a new writer session, and replaces the mapping.
 - Output: skills under `.agents/skills/`, persona edits in `.acolyte/*.md`, a `mem_dreams` row with
   the digest summary, dry-run flag, and changed paths.
 
