@@ -83,6 +83,42 @@ func TestOutboxSinkNotifyUser(t *testing.T) {
 	if err != nil || len(outbox) != 1 || outbox[0].Text != "hello" {
 		t.Fatalf("outbox = %+v, %v", outbox, err)
 	}
+	if outbox[0].OpenCodeSessionID != "" {
+		t.Errorf("session id = %q, want empty", outbox[0].OpenCodeSessionID)
+	}
+}
+
+func TestOutboxSinkNotifyUserAttributed(t *testing.T) {
+	sink, pool, agent, cleanup := newSinkHarness(t)
+	defer cleanup()
+	st, release, err := pool.Acquire(agent.Workspace)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, time.Now().UTC()); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	release()
+
+	if err := sink.NotifyUserAttributed(context.Background(), agent, "hello", "  ses_x  "); err != nil {
+		t.Fatalf("NotifyUserAttributed() error: %v", err)
+	}
+	st, release, err = pool.Acquire(agent.Workspace)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	outbox, err := st.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Fatalf("outbox = %+v, %v", outbox, err)
+	}
+	item := outbox[0]
+	if item.Text != "hello" || item.OpenCodeSessionID != "ses_x" || item.MediaPath != "" {
+		t.Errorf("item = %+v", item)
+	}
+	if fake := sink.Turn.(*fakeSynthTurn); fake.calls != 0 {
+		t.Errorf("turn calls = %d, want none", fake.calls)
+	}
 }
 
 func TestOutboxSinkNotifyUserMedia(t *testing.T) {

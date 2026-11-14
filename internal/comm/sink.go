@@ -66,6 +66,13 @@ func (s OutboxSink) NotifyUser(ctx context.Context, agent registry.Agent, text s
 	return s.notifyUser(ctx, agent, text, "", "")
 }
 
+// NotifyUserAttributed enqueues a user-only text message with an optional
+// session id recorded for attribution only. It never injects a message into
+// that session.
+func (s OutboxSink) NotifyUserAttributed(ctx context.Context, agent registry.Agent, text, sessionID string) error {
+	return s.notifyUser(ctx, agent, text, "", strings.TrimSpace(sessionID))
+}
+
 // NotifyUserMedia enqueues one user-only photo. The caption is optional; the
 // media path must already be validated/canonicalized by the caller. sessionID
 // is attribution only and never injects a message into that session.
