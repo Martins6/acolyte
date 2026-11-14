@@ -104,16 +104,7 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	unlock := r.lockThread(env.Thread)
 	defer unlock()
 
-	text := strings.TrimSpace(env.Content.Text)
-	if text == "" && len(env.Content.Media) > 0 {
-		var b strings.Builder
-		for _, path := range env.Content.Media {
-			b.WriteString("File located at: ")
-			b.WriteString(path)
-			b.WriteByte('\n')
-		}
-		text = strings.TrimSpace(b.String())
-	}
+	text := buildInboundPrompt(env.Content.Text, env.Content.Media)
 	if text == "" {
 		return fmt.Errorf("comm: inbound envelope has no text or media")
 	}
@@ -173,6 +164,39 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		_ = st.CommTG().ClearInboundReply(env.ID)
 	}
 	return nil
+}
+
+const mediaPathLinePrefix = "File located at: "
+
+// buildInboundPrompt combines envelope text with resolved media paths. A path
+// already present as an exact marker line (for example the richer prompt built
+// by the Telegram adapter) is not repeated.
+func buildInboundPrompt(text string, media []string) string {
+	text = strings.TrimSpace(text)
+	for _, path := range media {
+		if path == "" || hasMediaPathLine(text, path) {
+			continue
+		}
+		if text != "" {
+			text += "\n"
+		}
+		text += mediaPathLinePrefix + path
+	}
+	return text
+}
+
+// hasMediaPathLine reports whether text contains an exact
+// "File located at: <path>" line for path.
+func hasMediaPathLine(text, path string) bool {
+	if path == "" {
+		return false
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), mediaPathLinePrefix); ok && rest == path {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Router) linkInbound(st *store.Store, env envelope.Envelope, result *opencode.TurnResult) error {
