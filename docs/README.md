@@ -186,6 +186,8 @@ docs/
 │   └── <channel>.md                ← telegram.md
 ├── opencode/
 │   └── v2-contract.md              ← pinned V2 API version + update procedure
+├── ci/
+│   └── review.md                   ← PR #85 review-check failure investigation
 └── orchestrator/
     ├── README.md
     ├── daemon.md                   ← per-agent adapters, routing, inspect/attach
@@ -198,6 +200,9 @@ docs/
 
 **A module `README.md`** covers intent, sub-components/args, and how it plugs into OpenCode. **A mode
 file** covers intent, arguments, how it works, and the OpenCode/cron artifacts it produces.
+
+CI notes live under [`ci/`](ci/): [`ci/review.md`](ci/review.md) records the PR #85 review-check
+failure (an installer network flake) and the re-run remedy.
 
 ## Modules
 | Module | Doc | What it does |
