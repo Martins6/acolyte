@@ -43,11 +43,14 @@ workspace.
 
 ### Delivery semantics
 
-v0 keeps image delivery and the turn's reply as **two messages**:
+For turns routed through the daemon's inbound router (Telegram and inbox turns), v0 keeps image
+delivery and the turn's reply as **two messages**:
 
 - `send_image` / `acolyte notify-user --media` queues the photo immediately when the tool or
   command runs, sending the explicit caption when one is provided.
-- The agent's final assistant text is delivered as a separate message.
+- The agent's final assistant text is delivered as a separate Telegram message.
+- Headless callers such as `acolyte run` print the final reply to stdout instead of Telegram; the
+  photo is still sent immediately. The two-message guarantee applies only to router-routed turns.
 
 This is deliberately immediate and deterministic: it works from the CLI runner, routines, and any
 harness that does not go through the router's reply path, and it does not depend on the turn

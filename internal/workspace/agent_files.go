@@ -57,7 +57,7 @@ const execFileAsync = promisify(execFile)
 
 export default tool({
   description:
-    "Send exactly one image to the user on Telegram. The image is copied into media/outbound/images and delivered immediately as a photo; your final reply is a separate message.",
+    "Send exactly one image to the user on Telegram. The image is copied into media/outbound/images and delivered immediately as a photo. When this turn is routed through the Acolyte daemon, your final reply arrives as a separate Telegram message; headless runs print it to stdout.",
   args: {
     path: tool.schema
       .string()

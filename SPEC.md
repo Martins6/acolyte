@@ -497,8 +497,9 @@ Two ways to move a message (both target an agent/session like the CLI below):
   `--media <path>` sends one image (JPEG/PNG/WebP, ≤10 MiB); `--session-id <id>` is optional
   attribution only. The image is copied under `media/outbound/images/` and delivered with
   `sendPhoto`. The agent can also call the generated `send_image` OpenCode tool. In v0 the photo is
-  delivered immediately and the agent's final reply is a separate message
-  ([`docs/communication/telegram.md`](docs/communication/telegram.md#delivery-semantics)).
+  delivered immediately; for turns routed through the daemon's inbound router the agent's final
+  reply is a separate Telegram message, while headless callers such as `acolyte run` print the reply
+  to stdout ([`docs/communication/telegram.md`](docs/communication/telegram.md#delivery-semantics)).
 
 ### 10.5 CLI
 Common targeting flags: `--agent-name <name>` **xor** `--workspace-folder <path>` (if neither, infer
