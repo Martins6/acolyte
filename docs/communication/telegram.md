@@ -39,6 +39,23 @@ workspace.
   marked `failed`. Successful/failed rows clear their text; only routing/delivery metadata remains.
 - Bot tokens are redacted from logged/persisted errors.
 
+### Delivery semantics
+
+v0 keeps image delivery and the turn's reply as **two messages**:
+
+- `send_image` / `acolyte notify-user --media` queues the photo immediately when the tool or
+  command runs, sending the explicit caption when one is provided.
+- The agent's final assistant text is delivered as a separate message.
+
+This is deliberately immediate and deterministic: it works from the CLI runner, routines, and any
+harness that does not go through the router's reply path, and it does not depend on the turn
+finishing. Merging the two would require suppressing the tool-side send and holding the image until
+the turn ends.
+
+To merge later, extend `TurnResult` with images extracted from `send_image` tool calls and send one
+photo whose caption is the final reply. See `FUTURE-IDEAS.md` → Communication → *Merged image +
+final text*.
+
 ## State (`.acolyte.sqlite.db`, prefix `comm_tg_`)
 
 | Table | Holds |
