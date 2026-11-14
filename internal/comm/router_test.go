@@ -2,6 +2,7 @@ package comm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -26,9 +27,11 @@ type fakeTurn struct {
 	result    *opencode.TurnResult
 	err       error
 	delay     time.Duration
+	configs   []opencode.TurnConfig
+	events    []opencode.Event
 }
 
-func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, _ opencode.TurnConfig) (*opencode.TurnResult, error) {
+func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.mu.Lock()
 	f.calls++
 	f.active++
@@ -36,6 +39,8 @@ func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, _ op
 		f.maxActive = f.active
 	}
 	f.prompts = append(f.prompts, text)
+	f.configs = append(f.configs, cfg)
+	events := append([]opencode.Event(nil), f.events...)
 	result := f.result
 	err := f.err
 	f.mu.Unlock()
@@ -50,6 +55,13 @@ func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, _ op
 		case <-time.After(f.delay):
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		}
+	}
+	for _, event := range events {
+		if cfg.OnEvent != nil {
+			if err := cfg.OnEvent(event); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if result == nil {
@@ -94,6 +106,7 @@ func newRouterHarness(t *testing.T, maxConcurrency int) *routerHarness {
 		Stores:         pool,
 		Turn:           turn,
 		Outbound:       outbound.send,
+		EventRecorder:  ActivityEventRecorder,
 		MaxConcurrency: maxConcurrency,
 		Now:            func() time.Time { return time.Now().UTC() },
 	})
@@ -160,6 +173,72 @@ func TestRouterInboundPersistsSessionLinksAndRoutes(t *testing.T) {
 	inbox, ok, err := st.CommTG().GetInboxByEnvelope(env.ID)
 	if err != nil || !ok || inbox.OpenCodeMessageID != "msg_in" || inbox.OpenCodeSessionID != "ses_fake" {
 		t.Errorf("inbox = %+v, %v, %v", inbox, ok, err)
+	}
+}
+
+func TestRouterTurnRecordsToolActivity(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.turn.events = []opencode.Event{
+		{ID: "evt_called", Type: "session.tool.called", Data: json.RawMessage(
+			`{"sessionID":"ses_evt","assistantMessageID":"msg_evt","id":"tool_evt","input":{"api_key":"secret"}}`)},
+		{ID: "evt_text", Type: "session.message.content.updated", Data: json.RawMessage(
+			`{"sessionID":"ses_evt","content":[{"type":"text","text":"secret"}]}`)},
+		{ID: "evt_failed", Type: "session.tool.failed", Data: json.RawMessage(
+			`{"sessionID":"ses_evt","assistantMessageID":"msg_evt","id":"tool_evt","error":{"message":"secret"}}`)},
+	}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(60),
+		envelope.Party{Kind: envelope.PartyUser, ID: "60"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if len(h.turn.configs) != 1 || h.turn.configs[0].OnEvent == nil {
+		t.Fatalf("turn configs = %+v, want OnEvent wired", h.turn.configs)
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	logs, err := st.Orch().ListLogs(0)
+	if err != nil {
+		t.Fatalf("ListLogs() error: %v", err)
+	}
+	var activity []string
+	for _, entry := range logs {
+		if entry.Source == "opencode:valet" {
+			activity = append(activity, entry.Level+"/"+entry.Message+"/"+entry.Meta)
+			if strings.Contains(entry.Meta, "secret") {
+				t.Errorf("meta leaked content: %q", entry.Meta)
+			}
+		}
+	}
+	if len(activity) != 2 {
+		t.Fatalf("activity logs = %v, want called and failed rows", activity)
+	}
+	if !strings.HasPrefix(activity[0], "info/tool called/") || !strings.Contains(activity[0], `"tool_call_id":"tool_evt"`) {
+		t.Errorf("called log = %q", activity[0])
+	}
+	if !strings.HasPrefix(activity[1], "warn/tool failed/") {
+		t.Errorf("failed log = %q", activity[1])
+	}
+}
+
+func TestRouterWithoutEventRecorderLeavesOnEventNil(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.events = nil
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(61),
+		envelope.Party{Kind: envelope.PartyUser, ID: "61"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if len(h.turn.configs) != 1 || h.turn.configs[0].OnEvent != nil {
+		t.Fatalf("turn configs = %+v, want nil OnEvent without a recorder", h.turn.configs)
 	}
 }
 

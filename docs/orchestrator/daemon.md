@@ -31,6 +31,16 @@ persist, even when no channel can deliver the reply; delivery is a separate, dur
 `cli:<agent>`, and never starts an adapter or queues a delivery. `--continue` reuses that CLI
 session; the reply is printed directly (plain or `--json`).
 
+## Turn event activity
+
+Both turn paths subscribe to the OpenCode event stream for the duration of a turn. A best-effort
+recorder writes one `orch_logs` row per `session.tool.called`/`session.tool.success`/
+`session.tool.failed` event: `info` for called/succeeded, `warn` for failed, with source
+`opencode:<agent>`. The meta JSON only carries the event, session, assistant-message, and
+tool-call IDs; tool input/results, prompts, and text/reasoning deltas are never stored. Trace export
+reads `orch_logs`, so tool activity is available to memory/learning feeds. Recording failures are
+ignored and never fail or stall a turn.
+
 ## Sessions and inspection
 
 OpenCode owns the conversation history. Acolyte stores only routing/delivery metadata plus the

@@ -27,6 +27,10 @@ type OutboxSink struct {
 	Stores StoreProvider
 	Turn   SyntheticTurnRunner
 	Now    func() time.Time
+	// Activity, when non-nil, records tool activity for synthetic turns. An
+	// empty Agent is filled from the agent passed to Inbox, so one sink can
+	// serve every registered agent.
+	Activity *ActivityRecorder
 }
 
 // DeliveryError carries the final delivery payload when an outbox enqueue
@@ -137,12 +141,20 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 			sessionID = session.OpenCodeSessionID
 		}
 	}
+	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
+	if s.Activity != nil {
+		recorder := *s.Activity
+		if strings.TrimSpace(recorder.Agent) == "" {
+			recorder.Agent = agent.Name
+		}
+		cfg.OnEvent = recorder.Handler(st)
+	}
 	result, err := s.Turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        text,
 		Description: "Inbox event",
 		Metadata:    meta,
 		Delivery:    "queue",
-	}, opencode.TurnConfig{Workspace: agent.Workspace})
+	}, cfg)
 	if err != nil {
 		if result == nil {
 			return "", "", err
