@@ -87,11 +87,21 @@ func ParseConfig(raw string) (Config, error) {
 	}
 	// The struct decode cannot tell an omitted key from an explicit null, so
 	// check the raw object for the key's presence before defaults apply.
+	// encoding/json matches struct fields case-insensitively, so the
+	// presence check must fold case too: {"Memory-Load": null} decodes to a
+	// nil MemoryLoad and must still count as an explicit null.
 	var rawKeys map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &rawKeys); err != nil {
 		return Config{}, fmt.Errorf("config: parse: %w", err)
 	}
-	_, config.memoryLoadSet = rawKeys["memory-load"]
+	for key := range rawKeys {
+		if strings.EqualFold(key, "memory-load") {
+			// Multiple spellings that differ only by case count as present;
+			// the decoded value (last key wins) still decides null vs. mode.
+			config.memoryLoadSet = true
+			break
+		}
+	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
 	}

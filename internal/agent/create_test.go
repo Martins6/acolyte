@@ -151,6 +151,11 @@ func TestCreateMemoryLoadInstructions(t *testing.T) {
 		{name: "explicit default", raw: `{"memory-load": {"mode": "default"}}`, wantPersona: true, wantSetting: true},
 		{name: "empty mode defaults", raw: `{"memory-load": {}}`, wantPersona: true, wantSetting: true},
 		{name: "explicit null is native baseline", raw: `{"memory-load": null}`, wantPersona: false},
+		// encoding/json accepts case-insensitive field spellings; an explicit
+		// null must be honored however the key is cased.
+		{name: "case variant null is native baseline", raw: `{"Memory-Load": null}`, wantPersona: false},
+		{name: "upper case default", raw: `{"MEMORY-LOAD": {"mode": "default"}}`, wantPersona: true, wantSetting: true},
+		{name: "unrelated case variant keeps memory-load default", raw: `{"MEMORY-ACCESS": null}`, wantPersona: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

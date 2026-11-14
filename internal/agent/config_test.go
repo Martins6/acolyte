@@ -71,6 +71,14 @@ func TestParseConfigMemoryLoadPresence(t *testing.T) {
 		{name: "explicit default", raw: `{"memory-load": {"mode": "default"}}`, want: true},
 		{name: "empty mode defaults", raw: `{"memory-load": {}}`, want: true},
 		{name: "explicit null is native", raw: `{"memory-load": null}`, want: false},
+		// encoding/json matches struct fields case-insensitively, so the
+		// presence check must fold case with it.
+		{name: "case variant explicit null", raw: `{"Memory-Load": null}`, want: false},
+		{name: "upper case default", raw: `{"MEMORY-LOAD": {"mode": "default"}}`, want: true},
+		{name: "mixed case explicit null", raw: `{"mEmOrY-lOaD": null}`, want: false},
+		// Case variants that differ only by spelling are treated as present
+		// (safe); the last decoded value still wins.
+		{name: "case variant duplicate is present", raw: `{"memory-load": null, "Memory-Load": null}`, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
