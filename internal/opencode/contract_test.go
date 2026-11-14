@@ -69,6 +69,31 @@ func TestPinnedOpenAPIContract(t *testing.T) {
 	requirePathOps(t, spec,
 		"/api/experimental/session/import", "post")
 
+	// Request-body properties the thin client sends. Guarding them keeps a
+	// refreshed spec from silently dropping a field the client depends on.
+	requireRequestBodyProperties(t, spec,
+		"/api/session", "post", "location", "agent", "model")
+	requireRequestBodyProperties(t, spec,
+		"/api/session/{sessionID}/prompt", "post", "text")
+	requireRequestBodyProperties(t, spec,
+		"/api/session/{sessionID}/synthetic", "post", "text", "description", "metadata", "delivery")
+	requireRequestBodyProperties(t, spec,
+		"/api/session/{sessionID}", "patch", "permissions")
+	requireRequestBodyProperties(t, spec,
+		"/api/session/{sessionID}/agent", "post", "agent")
+	requireRequestBodyProperties(t, spec,
+		"/api/session/{sessionID}/model", "post", "model")
+	requireRequestBodyProperties(t, spec,
+		"/api/experimental/session/import", "post", "info", "messages", "location")
+
+	// Query parameters the thin client uses (or may use) on list/stream reads.
+	requireQueryParameters(t, spec,
+		"/api/session", "get", "limit", "order", "cursor")
+	requireQueryParameters(t, spec,
+		"/api/session/{sessionID}/message", "get", "limit", "order", "cursor")
+	requireQueryParameters(t, spec,
+		"/api/event", "get", "types")
+
 	requireSchema(t, spec, "Session.Info")
 	requireSchemaProperties(t, spec, "Session.Info", "id", "time", "location")
 	requireSchema(t, spec, "Session.Message.User")
@@ -121,6 +146,68 @@ func requireSchema(t *testing.T, spec openAPISpec, name string) {
 	t.Helper()
 	if _, ok := spec.Components.Schemas[name]; !ok {
 		t.Fatalf("pinned OpenAPI spec is missing schema %s", name)
+	}
+}
+
+// openAPIOperation is the subset of a path operation the contract test
+// inspects.
+type openAPIOperation struct {
+	Parameters []struct {
+		Name string `json:"name"`
+		In   string `json:"in"`
+	} `json:"parameters"`
+	RequestBody *struct {
+		Content map[string]struct {
+			Schema struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+			} `json:"schema"`
+		} `json:"content"`
+	} `json:"requestBody"`
+}
+
+func requireOperation(t *testing.T, spec openAPISpec, path, method string) openAPIOperation {
+	t.Helper()
+	raw, ok := spec.Paths[path][method]
+	if !ok {
+		t.Fatalf("pinned OpenAPI spec is missing %s %s", method, path)
+	}
+	var op openAPIOperation
+	if err := json.Unmarshal(raw, &op); err != nil {
+		t.Fatalf("decode %s %s: %v", method, path, err)
+	}
+	return op
+}
+
+func requireRequestBodyProperties(t *testing.T, spec openAPISpec, path, method string, properties ...string) {
+	t.Helper()
+	op := requireOperation(t, spec, path, method)
+	if op.RequestBody == nil {
+		t.Fatalf("%s %s has no request body", method, path)
+	}
+	media, ok := op.RequestBody.Content["application/json"]
+	if !ok {
+		t.Fatalf("%s %s has no application/json request body", method, path)
+	}
+	for _, property := range properties {
+		if _, ok := media.Schema.Properties[property]; !ok {
+			t.Errorf("%s %s request body is missing property %s", method, path, property)
+		}
+	}
+}
+
+func requireQueryParameters(t *testing.T, spec openAPISpec, path, method string, names ...string) {
+	t.Helper()
+	op := requireOperation(t, spec, path, method)
+	params := make(map[string]bool, len(op.Parameters))
+	for _, param := range op.Parameters {
+		if param.In == "query" {
+			params[param.Name] = true
+		}
+	}
+	for _, name := range names {
+		if !params[name] {
+			t.Errorf("%s %s is missing query parameter %s", method, path, name)
+		}
 	}
 }
 

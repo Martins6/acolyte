@@ -130,8 +130,8 @@ acolyte start
 
 The daemon serves every registered agent:
 
-- Each agent's Telegram adapter reads its token from `<workspace>/.env`, falling
-  back to `$ACOLYTE_HOME/.env` and then the process environment.
+- Each agent's Telegram adapter reads its token from the process environment,
+  falling back to `<workspace>/.env` and then `$ACOLYTE_HOME/.env`.
 - **Each agent needs a distinct bot token.** Two agents sharing a token cannot
   poll Telegram at the same time; the daemon starts one and warns about the rest.
 - Agents without a token, without Telegram in `communication.channels`, or

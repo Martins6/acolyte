@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,6 +96,39 @@ func TestValidateEnginePathsRejectEscapedDuplicateKeys(t *testing.T) {
 	if err := validateEngineAgent(ws, "build"); err == nil ||
 		!strings.Contains(err.Error(), `duplicate top-level key "default_agent"`) {
 		t.Fatalf("validateEngineAgent() error = %v, want escaped duplicate-key error", err)
+	}
+}
+
+// TestResolveDefinedAgentsReadsLegacyAndCanonicalBlocks pins backward
+// compatibility: existing workspaces may still carry the legacy singular
+// "agent" map, while new scaffolds emit the canonical "agents" map.
+func TestResolveDefinedAgentsReadsLegacyAndCanonicalBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{name: "legacy agent block", raw: `{"agent":{"custom":{"prompt":"legacy"}}}`},
+		{name: "canonical agents block", raw: `{"agents":{"custom":{"system":"canonical"}}}`},
+	}
+	want := []string{"build", "custom", "plan"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := t.TempDir()
+			if err := os.WriteFile(filepath.Join(ws, opencodeConfigName), []byte(tc.raw), 0644); err != nil {
+				t.Fatalf("write opencode.jsonc: %v", err)
+			}
+			doc, err := parseEngineDoc(tc.raw)
+			if err != nil {
+				t.Fatalf("parseEngineDoc() error: %v", err)
+			}
+			got, err := resolveDefinedAgents(ws, doc)
+			if err != nil {
+				t.Fatalf("resolveDefinedAgents() error: %v", err)
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("resolveDefinedAgents() = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
