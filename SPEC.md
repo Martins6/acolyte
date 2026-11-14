@@ -165,8 +165,11 @@ debugging.
   recorder: the router (real user turns) and the inbox sink (synthetic turns) persist tool activity
   (`session.tool.called|success|failed`) to the agent's `orch_logs` as IDs-only audit rows, which
   trace export and learning feeds already consume. Tool input/results, prompts, and
-  text/reasoning deltas are deliberately never persisted. Telegram partial-text streaming and live
-  status remain deferred (they need message editing, rate limiting, and a consumer design).
+  text/reasoning deltas are deliberately never persisted. Turn results also expose a post-turn
+  `ToolActivity` summary (name, status, id) parsed from the collected assistant messages;
+  `acolyte run --json` prints it as `tool_activity` when non-empty. This is not streaming.
+  Telegram partial-text streaming and live status remain deferred (they need message editing,
+  rate limiting, and a consumer design).
 - **Long-running daemon ↔ long-running service** (matches autostart). No spawn-per-turn overhead or
   5-minute timeout.
 

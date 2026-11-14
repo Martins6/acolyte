@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -52,6 +53,15 @@ type SyntheticEvent struct {
 	Delivery string
 }
 
+// ToolActivity is one tool part observed in an assistant message. It is a
+// post-turn summary: tools are reported once the message is collected, not
+// streamed while they run.
+type ToolActivity struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	ID     string `json:"id"`
+}
+
 // TurnResult is the outcome of one agent turn (mirrors the retired
 // runner.RunResult so callers keep their shape).
 type TurnResult struct {
@@ -61,6 +71,9 @@ type TurnResult struct {
 	InputID string
 	// MessageIDs are the assistant message IDs produced after InputID.
 	MessageIDs []string
+	// ToolActivity lists the tool parts of those assistant messages in
+	// message/content order.
+	ToolActivity []ToolActivity
 }
 
 // RunUserTurn drives one real user turn: ensure session, sync agent/model,
@@ -319,6 +332,7 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 				ResponseText: assistantText(msgs),
 				InputID:      markerID,
 				MessageIDs:   assistantMessageIDs(msgs),
+				ToolActivity: assistantToolActivity(msgs),
 			}, nil
 		}
 		if truncated {
@@ -380,6 +394,57 @@ func assistantMessageIDs(msgs []Message) []string {
 		}
 	}
 	return ids
+}
+
+// assistantToolActivity returns the tool parts of the assistant messages in
+// message and content order. Decoding is defensive: malformed or unrecognized
+// payloads are skipped so they can never fail the turn.
+func assistantToolActivity(msgs []Message) []ToolActivity {
+	var activity []ToolActivity
+	for _, m := range msgs {
+		if m.Type != "assistant" {
+			continue
+		}
+		activity = append(activity, messageToolActivity(m.Raw)...)
+	}
+	return activity
+}
+
+// messageToolActivity decodes the tool parts from one raw assistant message.
+func messageToolActivity(raw json.RawMessage) []ToolActivity {
+	if len(raw) == 0 {
+		return nil
+	}
+	var message struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &message); err != nil {
+		return nil
+	}
+	var activity []ToolActivity
+	for _, rawPart := range message.Content {
+		var part struct {
+			Type  string `json:"type"`
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			State struct {
+				Status string `json:"status"`
+			} `json:"state"`
+		}
+		if err := json.Unmarshal(rawPart, &part); err != nil || part.Type != "tool" {
+			continue
+		}
+		entry := ToolActivity{
+			Name:   strings.TrimSpace(part.Name),
+			Status: strings.TrimSpace(part.State.Status),
+			ID:     strings.TrimSpace(part.ID),
+		}
+		if entry.Name == "" && entry.Status == "" && entry.ID == "" {
+			continue
+		}
+		activity = append(activity, entry)
+	}
+	return activity
 }
 
 // modelRef maps the caller's provider/model strings to a Model.Ref, or nil when
