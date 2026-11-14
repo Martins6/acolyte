@@ -16,7 +16,10 @@ Run order:
    the commands and results in the PR body.
 4. After opening a PR, wait for **two** CI results: the `unit` and `telegram` checks. Do **not**
    wait for the third `review` check. As soon as those two checks have completed, merge the PR even
-   if either one is red. Use `--admin` only if branch protection blocks the merge.
+   if either one is red. Use `--admin` only if branch protection blocks the merge. This merge-red
+   latitude applies **only while `dev` has no required status checks**; if required checks are
+   enabled, stop on red and never use `--admin` (see
+   [`docs/orchestrator/merge-policy.md`](docs/orchestrator/merge-policy.md)).
 5. If one of the two checks never appears, wait at most 10 minutes, record that in the PR, and merge
    anyway.
 6. At the end, append a `# Next Steps` section at the bottom of this file with comments,
