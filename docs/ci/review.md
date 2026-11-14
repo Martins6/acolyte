@@ -74,7 +74,8 @@ reported `1.19.5`; only the opencode.ai download was reset.
 **Infrastructure flake** — a transient outbound-network failure in the third-party composite
 action's installer download, before anything project-specific ran.
 
-It is not reproducible from repository state, and it would clear on a plain re-run of the job.
+It is not reproducible from repository state. A plain re-run of the job may clear the transient
+failure, but recovery is not guaranteed and must be confirmed from the subsequent check.
 
 ## What it is NOT
 
