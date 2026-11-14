@@ -60,7 +60,7 @@ func TestScaffoldAgent(t *testing.T) {
 		Model        string         `json:"model"`
 		Instructions []string       `json:"instructions"`
 		DefaultAgent string         `json:"default_agent"`
-		Agent        map[string]any `json:"agent"`
+		Agents       map[string]any `json:"agents"`
 	}
 	if err := json.Unmarshal(raw, &config); err != nil {
 		t.Fatalf("opencode.jsonc is not valid JSON: %v", err)
@@ -74,8 +74,8 @@ func TestScaffoldAgent(t *testing.T) {
 	if config.DefaultAgent != "build" {
 		t.Errorf("default_agent = %q, want build", config.DefaultAgent)
 	}
-	if len(config.Agent) != 0 {
-		t.Errorf("agent block = %v, want empty for build", config.Agent)
+	if len(config.Agents) != 0 {
+		t.Errorf("agents block = %v, want empty for build", config.Agents)
 	}
 
 	tool, err := os.ReadFile(filepath.Join(ws, ".opencode/tools/send_image.ts"))
@@ -121,10 +121,12 @@ func TestScaffoldCustomAgent(t *testing.T) {
 	}
 	var config struct {
 		DefaultAgent string `json:"default_agent"`
-		Agent        map[string]struct {
+		Agents       map[string]struct {
 			Description string `json:"description"`
+			Mode        string `json:"mode"`
+			System      string `json:"system"`
 			Prompt      string `json:"prompt"`
-		} `json:"agent"`
+		} `json:"agents"`
 	}
 	if err := json.Unmarshal(raw, &config); err != nil {
 		t.Fatalf("opencode.jsonc is not valid JSON: %v", err)
@@ -132,12 +134,51 @@ func TestScaffoldCustomAgent(t *testing.T) {
 	if config.DefaultAgent != "acolyte" {
 		t.Errorf("default_agent = %q, want acolyte", config.DefaultAgent)
 	}
-	agent, ok := config.Agent["acolyte"]
+	agent, ok := config.Agents["acolyte"]
 	if !ok {
-		t.Fatal("agent.acolyte block is missing")
+		t.Fatal("agents.acolyte block is missing")
 	}
-	if agent.Description != "Personal assistant" || !strings.Contains(agent.Prompt, "valet") {
+	if agent.Description != "Personal assistant" || !strings.Contains(agent.System, "valet") {
 		t.Errorf("agent block = %+v", agent)
+	}
+	if agent.Mode != "primary" {
+		t.Errorf("agents.acolyte.mode = %q, want primary", agent.Mode)
+	}
+	if agent.Prompt != "" {
+		t.Errorf("agents.acolyte.prompt = %q, want the canonical system field", agent.Prompt)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("opencode.jsonc is not valid JSON: %v", err)
+	}
+	if _, ok := top["agent"]; ok {
+		t.Error("opencode.jsonc carries the legacy singular agent block")
+	}
+}
+
+func TestScaffoldBuiltinAgentsHaveNoDefinition(t *testing.T) {
+	for _, agentID := range []string{"build", "plan"} {
+		t.Run(agentID, func(t *testing.T) {
+			ws := scaffoldTest(t, AgentOptions{Name: "valet", Agent: agentID})
+
+			raw, err := os.ReadFile(filepath.Join(ws, "opencode.jsonc"))
+			if err != nil {
+				t.Fatalf("read opencode.jsonc: %v", err)
+			}
+			var config struct {
+				DefaultAgent string                     `json:"default_agent"`
+				Agents       map[string]json.RawMessage `json:"agents"`
+			}
+			if err := json.Unmarshal(raw, &config); err != nil {
+				t.Fatalf("opencode.jsonc is not valid JSON: %v", err)
+			}
+			if config.DefaultAgent != agentID {
+				t.Errorf("default_agent = %q, want %s", config.DefaultAgent, agentID)
+			}
+			if len(config.Agents) != 0 {
+				t.Errorf("agents block = %v, want no definition for built-in %s", config.Agents, agentID)
+			}
+		})
 	}
 }
 

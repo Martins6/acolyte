@@ -189,12 +189,13 @@ type openCodeConfigFile struct {
 	Model        string                   `json:"model,omitempty"`
 	Instructions []string                 `json:"instructions,omitempty"`
 	DefaultAgent string                   `json:"default_agent,omitempty"`
-	Agent        map[string]openCodeAgent `json:"agent,omitempty"`
+	Agents       map[string]openCodeAgent `json:"agents,omitempty"`
 }
 
 type openCodeAgent struct {
 	Description string `json:"description,omitempty"`
-	Prompt      string `json:"prompt,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+	System      string `json:"system,omitempty"`
 }
 
 func openCodeConfig(opts AgentOptions) (string, error) {
@@ -211,7 +212,9 @@ func openCodeConfig(opts AgentOptions) (string, error) {
 	if opts.PersonaInstructions {
 		config.Instructions = []string{PersonaInstruction}
 	}
-	if agentID != "build" {
+	// build and plan are OpenCode built-ins: selecting one as default_agent
+	// must not invent a custom definition for it.
+	if agentID != "build" && agentID != "plan" {
 		name := strings.TrimSpace(opts.Name)
 		if name == "" {
 			name = "acolyte"
@@ -220,10 +223,11 @@ func openCodeConfig(opts AgentOptions) (string, error) {
 		if description == "" {
 			description = "Acolyte agent"
 		}
-		config.Agent = map[string]openCodeAgent{
+		config.Agents = map[string]openCodeAgent{
 			agentID: {
 				Description: description,
-				Prompt:      fmt.Sprintf("You are %s, an Acolyte agent powered by OpenCode. Follow the persona in .acolyte/.", name),
+				Mode:        "primary",
+				System:      fmt.Sprintf("You are %s, an Acolyte agent powered by OpenCode. Follow the persona in .acolyte/.", name),
 			},
 		}
 	}
