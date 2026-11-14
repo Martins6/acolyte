@@ -132,8 +132,12 @@ func (dreamRoutine) Run(ctx context.Context, env Env, args map[string]any) (stri
 	if len([]rune(analysisText)) > 8000 {
 		claims += "\n[claims truncated]"
 	}
+	validatorSessionID, err := dreamValidatorSessionID(env)
+	if err != nil {
+		return "", err
+	}
 	writerPrompt := buildDreamWriterPrompt(env.Agent.Name, claims)
-	writerResult, writerErr := env.OpenCode.RunSyntheticTurn(ctx, "", opencode.SyntheticEvent{
+	writerResult, writerErr := env.OpenCode.RunSyntheticTurn(ctx, validatorSessionID, opencode.SyntheticEvent{
 		Text:        writerPrompt,
 		Description: "Dream memory validation and write",
 		Metadata: map[string]any{
@@ -202,6 +206,23 @@ func persistDreamResult(env Env, result *opencode.TurnResult, writer bool) error
 		return persistSessionFor(env, env.Thread+":validator", result.SessionID)
 	}
 	return persistSession(env, result.SessionID)
+}
+
+// dreamValidatorSessionID returns the persisted writer session so runs reuse
+// one conversation instead of creating a new session each time. It returns ""
+// only before the first writer run has recorded a validator session.
+func dreamValidatorSessionID(env Env) (string, error) {
+	if env.Store == nil || strings.TrimSpace(env.Thread) == "" {
+		return "", nil
+	}
+	session, ok, err := env.Store.Orch().GetSessionByThread(env.Thread + ":validator")
+	if err != nil {
+		return "", fmt.Errorf("routine: dream validator session: %w", err)
+	}
+	if !ok {
+		return "", nil
+	}
+	return session.OpenCodeSessionID, nil
 }
 
 func finishDream(env Env, now time.Time, sessions, skills int, dryRun bool, analysis, writer, extra string, changed, reverted []string) error {
