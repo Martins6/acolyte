@@ -120,3 +120,166 @@ merge-red decision, the stop-on-red trigger, the no-`--admin` rule, and an enabl
   job (push-only) remains green.
 - Keep the sbeads epics `sb-8d6b`, `sb-070f`, `sb-f29e`, `sb-71a2`, `sb-b091`, `sb-5a3b`, `sb-9985`
   closed; this file supersedes them as the durable backlog.
+
+# Remaining work from the SPEC v0 suggested-order fixes
+
+Based on PRs #98–#108, these are the next steps left after the nine SPEC v0 suggested-order items:
+turn timeout, dream validator sessions, inbound text+media, notify-user attribution, memory-load
+wiring, export media, turn tool activity, routine routing/SHELL, and V2 agent config/contract/docs.
+
+## 1. Turn timeout (PR #101)
+
+**Landed.** The hard five-minute cap is gone from `RunUserTurn`/`RunSyntheticTurn`; callers can set
+`TurnConfig.Timeout`, and `acolyte run --timeout 0` means no limit.
+
+**Next steps.**
+- **No implicit bound remains for daemon/cron turns.** A wedged provider call can hold a session and
+  worker forever unless the caller's context is canceled. Decide whether the daemon/router should
+  set a per-agent or per-job default and expose it through config.
+- **Live long-turn coverage.** Unit tests prove deadline presence/absence but do not run a turn past
+  five minutes; add an opt-in E2E or a clock-injected harness.
+- **Document caller responsibility.** Make it explicit that `Timeout: 0` inherits only the caller
+  context and is not a liveness guarantee.
+
+## 2. Dream validator sessions (PR #99)
+
+**Landed.** The writer reuses `cron:<job>:validator`, recovers from a deleted session with a 404
+probe, propagates other probe errors, and records `mem_dreams` on probe failure.
+
+**Next steps.**
+- **Feedback loop.** The persistent validator session is itself a recent workspace session, so later
+  dream digests can include prior writer conversation. Exclude validator sessions from the dream
+  lookback or explicitly accept the self-review feedback.
+- **Probe cost.** Each writer run adds one `GET /api/session/{id}` before the turn, on top of the
+  turn's own fetch. Cache liveness or tolerate a failed fetch inside `RunSyntheticTurn` with a
+  one-shot recreate if latency matters.
+- **Cleanup.** Reusing the mapping stops per-run leaks, but validator sessions for deleted agents or
+  workspaces still need a retention/cleanup policy.
+
+## 3. Inbound text + media (PR #100)
+
+**Landed.** The router appends media paths even when text is present, and suppresses only an exact
+`File located at: <path>` marker line.
+
+**Next steps.**
+- **Prose mentions now get a marker line.** That is safe but can be redundant. If prompts become
+  noisy, parse the media block structurally instead of using a text marker.
+- **OpenCode file attachments.** The router still sends media as text paths. Native file/attachment
+  parts would let vision-capable models use images without a shell read.
+- **Multiple media.** One path per marker is supported; consider a compact list and per-file type
+  metadata instead of repeating the line.
+
+## 4. `notify-user` attribution (PR #98)
+
+**Landed.** Text-only notifications now persist `--session-id` in
+`comm_tg_outbox.opencode_session_id`; media already did.
+
+**Next steps.**
+- **Cron sink parity.** `internal/cron.Sink` still exposes only `NotifyUser` (no attribution). Add a
+  session-aware method if cron/routine notifications should link to conversations.
+- **Interface consistency.** `comm.OutboxSink` has `NotifyUser`, `NotifyUserAttributed`, and
+  `NotifyUserMedia`; consider one options struct so new notification kinds cannot forget
+  attribution.
+- **Attribution validation.** `--session-id` is intentionally not ownership-checked for
+  notify-user; document that it is free-form metadata and can point at a deleted/foreign session.
+
+## 5. `memory-load` wiring (PR #107)
+
+**Landed.** Omitted/default config wires `.acolyte/*.md`; explicit `null` selects the native
+baseline. `acolyte config set memory-load` edits the `instructions` array with a targeted JSONC edit,
+and case-insensitive config keys are honored.
+
+**Next steps.**
+- **`config get` still reports `memory-load: null`** when the setting is absent even if the default
+  instructions are wired. Report the effective mode (`default` vs `null`) or document the difference.
+- **Adoption is non-destructive.** Passing a different memory-load choice to `acolyte new` on an
+  existing workspace does not rewrite `opencode.jsonc`; use `config set` and document that.
+- **Array edit ergonomics.** Restoring the default appends the entry rather than restoring its
+  original position. The JSONC array helper is now large; keep dedicated tests for comments,
+  trailing commas, duplicate keys, and non-array values.
+- **Other memory keys remain setting-only.** `memory-access`/`memory-export` have no OpenCode
+  artifact; either keep that explicit or add future modes with real artifacts.
+
+## 6. Export media (PR #104)
+
+**Landed.** Media files are copied byte-for-byte under `communication/media/` with collision-safe
+names, workspace containment, no-follow path walking, and a `media_files` count. Scoped exports copy
+only the selected chats' media.
+
+**Next steps.**
+- **`--sanitize` does not touch media bytes.** Document this clearly (already noted) and consider a
+  separate opt-in metadata-only mode for sensitive bundles.
+- **Import caps still apply.** Export can produce a bundle larger than the 512 MiB/64 MiB import
+  limits; warn at export time or add matching export caps.
+- **Containment is textual.** Canonical aliases outside the configured workspace are rejected
+  conservatively; if agents use symlinked media roots, add a canonical-root policy instead of
+  silently skipping.
+- **Media provenance.** `media.json` keeps original paths while the zip stores hashed copies; a
+  machine-readable mapping from entry to original path would make external readers simpler.
+
+## 7. Turn tool activity (PR #105)
+
+**Landed.** `TurnResult.ToolActivity` summarizes assistant tool parts; `acolyte run --json` exposes
+`tool_activity`; malformed message content no longer fails turn collection.
+
+**Next steps.**
+- **Post-turn only.** This is a summary, not streaming. Telegram partial-text/tool streaming and
+  live status remain deferred.
+- **Names vs event IDs.** The event-stream activity recorder (PR #95) can log tool call IDs without
+  names; joining those rows to `TurnResult.ToolActivity` or the owning message would make audit logs
+  readable without exposing inputs.
+- **Retention.** Activity rows in `orch_logs` still have no pruning or per-agent cap.
+- **Privacy/opt-out.** Tool names/statuses are safe, but users may want a per-agent switch to
+  disable activity logging.
+
+## 8. Routine routing/session and service SHELL (PR #102)
+
+**Landed.** Routine output defaults to `log`, routines always execute in `cron:<job ID>`, stored
+session IDs are ignored with a warning, and generated launchd/systemd units export `SHELL` when the
+installer has one.
+
+**Next steps.**
+- **Sudo shell resolution.** Under `sudo`, `SHELL` is taken from the sudo environment; resolve the
+  target user's login shell explicitly if the service must match it.
+- **Surface ignored sessions.** A stored routine session is ignored only in the daemon log; add an
+  `orch_logs` warning or reject/migrate the row during config validation.
+- **Fallback shell.** If `$SHELL` is empty at install time, units omit it and shell jobs still fail
+  with `$SHELL is not set`; derive a safe fallback or fail the install with guidance.
+- **Routine delivery knobs.** Explicit `--on-success/--on-failure notify-user` still works; document
+  that custom routines default to internal logging and must opt into user delivery.
+
+## 9. V2 config, contract coverage, docs (PR #108)
+
+**Landed.** The scaffold emits canonical V2 `agents` entries with `system` + `mode: primary`;
+`build`/`plan` stay built-in with no invented definition. Contract tests guard client request-body
+properties and query params; README/telegram docs use `process > workspace > global` secret
+precedence; cron docs describe routine session isolation. Legacy `agent`/`prompt` blocks remain
+readable for existing workspaces.
+
+**Next steps.**
+- **Contract coverage can go further:** guard response schemas used by `Prompt`/`Synthetic` and every
+  client-used `Session.Info`/`Message` property; request-body guards are now in place.
+- **Legacy migration.** New scaffolds are V2, but existing workspace `opencode.jsonc` files may still
+  use `agent`/`prompt`. Add a config migration or document that OpenCode performs the migration.
+- **Unused endpoints.** `/api/agent` and `/api/experimental/session/stats` are listed in SPEC but
+  have no v0 consumer; decide whether to add clients or mark them explicitly unused.
+- **Status docs.** PR #96 changed `acolyte status` to show channels/last message; keep SPEC §10.5
+  and orchestrator docs aligned with that behavior.
+
+## Cross-cutting follow-ups
+
+- **`acolyte cron tick` still requires OpenCode even for shell-only jobs.** It calls
+  `openCodeEnsure` before inspecting due jobs; make the client optional for shell-only ticks.
+- **`Communication.Send` has no production call site.** The daemon writes the durable outbox
+  directly; either wire `Send` or update the §8/§14 lifecycle wording to match the outbox design.
+- **Envelope shape drift.** IDs are `env_<hex>`, not UUIDs; empty `meta` is omitted; `Validate` does
+  not enforce the documented channel enum. Align the spec or the envelope.
+- **Shared migration helper.** Each store module duplicates `schemaVersion`/`Migrate`; extract the
+  helper promised by SPEC §9 or soften the claim.
+- **`downloads/` is not scaffolded.** SPEC §3 lists it; `acolyte new` creates it only on first
+  memory import. Either scaffold it or mark it lazy/legacy.
+- **`engine.model` validation asymmetry.** `acolyte new` accepts a model without `provider/model`;
+  `acolyte config set engine.model` rejects it. Share the validator.
+- **Deferred by design:** agent-to-agent channels, more human channels, extra memory modes, live
+  Telegram streaming/status feeds, `agent_status` cache/OpenCode stats, per-agent isolation
+  hardening, folder-portable identity, synthetic `resume`, and inbox item-level PATCH/DELETE.
