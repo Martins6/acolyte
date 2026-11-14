@@ -11,10 +11,11 @@ with a bounded 2s `eventReadyTimeout`; `RunUserTurn` and `RunSyntheticTurn` shar
 regression tests cover both the ordering and the stalled-stream fallback.
 
 **Next steps.**
-- **Reconnect gaps remain best-effort.** The handshake guarantees the first connection only. If the
-  stream drops mid-turn, `SubscribeEvents` reconnects with backoff and events emitted during the gap
-  are lost. Consider an event ID/resume cursor, or state the best-effort semantics explicitly in
-  `SPEC.md` §5.1.
+- **Reconnect gaps remain best-effort.** The handshake waits for the first connection for at most
+  `eventReadyTimeout` (2s) and then proceeds even if the stream is still unavailable, so it cannot
+  guarantee that connection. If the stream drops mid-turn, `SubscribeEvents` reconnects with backoff
+  and events emitted during the gap are lost. Consider an event ID/resume cursor, or state the
+  best-effort semantics explicitly in `SPEC.md` §5.1.
 - **Tune the readiness timeout.** A slow OpenCode service can still lose early events after the 2s
   cap. Measure startup latency and consider a configurable timeout or a longer first-connect budget.
 - **Do not block the SSE reader.** `OnEvent` runs synchronously on the stream reader; a slow handler
