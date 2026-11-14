@@ -798,35 +798,29 @@ const mediaZipDir = "communication/media"
 // exportMedia copies every referenced media file into the bundle so the trace
 // is self-contained. The metadata index (communication/media.json) keeps the
 // original source paths as provenance; the copies under communication/media/
-// are the portable form. Missing, symlinked, or non-regular sources are
-// skipped with a manifest warning rather than failing the export.
+// are the portable form. Sources outside the workspace, paths escaping through
+// `..`, symlinked components, missing files, and non-regular files are skipped
+// with a manifest warning rather than failing the export.
 func (b *bundle) exportMedia(media []commtg.MediaItem) error {
 	for _, item := range media {
-		source := b.mediaSourcePath(item.FilePath)
-		if source == "" {
-			b.warn("skipped media %s: empty file path", item.TGFileID)
+		rel, err := mediaRelPath(b.request.Agent.Workspace, item.FilePath)
+		if err != nil {
+			b.warn("skipped media %s (%s): %v", item.TGFileID, item.FilePath, err)
 			continue
 		}
-		info, err := os.Lstat(source)
-		switch {
-		case os.IsNotExist(err):
-			b.warn("skipped media %s (%s): source file is missing", item.TGFileID, item.FilePath)
-			continue
-		case err != nil:
-			b.warn("skipped media %s (%s): stat source: %v", item.TGFileID, item.FilePath, err)
-			continue
-		case info.Mode()&os.ModeSymlink != 0:
-			b.warn("skipped media %s (%s): source is a symlink", item.TGFileID, item.FilePath)
-			continue
-		case !info.Mode().IsRegular():
-			b.warn("skipped media %s (%s): source is non-regular", item.TGFileID, item.FilePath)
+		source, err := openMediaSource(b.request.Agent.Workspace, rel)
+		if err != nil {
+			b.warn("skipped media %s (%s): %v", item.TGFileID, item.FilePath, err)
 			continue
 		}
-		name, copyFile := b.mediaEntryName(source)
+		name, copyFile := b.mediaEntryName(rel)
 		if !copyFile {
-			continue // the same source file is already in the bundle
+			_ = source.Close() // the same source file is already in the bundle
+			continue
 		}
-		if err := b.copyMediaFile(name, source); err != nil {
+		err = b.copyMediaFile(name, source)
+		_ = source.Close()
+		if err != nil {
 			return err
 		}
 		b.mediaFiles++
@@ -834,29 +828,51 @@ func (b *bundle) exportMedia(media []commtg.MediaItem) error {
 	return nil
 }
 
-// mediaSourcePath resolves a stored media path. Telegram stores absolute
-// paths under the agent workspace, but relative paths are accepted and
-// resolved against the workspace.
-func (b *bundle) mediaSourcePath(filePath string) string {
+// mediaRelPath resolves a stored media path against the agent workspace and
+// enforces textual containment. Absolute paths outside the workspace and
+// relative paths that escape through `..` are rejected before any filesystem
+// access; the secure open in openMediaSource rejects symlinked components.
+func mediaRelPath(workspace, filePath string) (string, error) {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return "", fmt.Errorf("workspace is not configured")
+	}
 	filePath = strings.TrimSpace(filePath)
 	if filePath == "" {
-		return ""
+		return "", fmt.Errorf("empty file path")
 	}
-	if filepath.IsAbs(filePath) {
-		return filepath.Clean(filePath)
+	workspaceAbs, err := paths.Abs(workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace: %w", err)
 	}
-	workspace := strings.TrimSpace(b.request.Agent.Workspace)
-	if workspace == "" {
-		return filepath.Clean(filePath)
+	rel := filePath
+	absolute := filepath.IsAbs(rel)
+	if absolute {
+		sourceAbs, err := paths.Abs(rel)
+		if err != nil {
+			return "", fmt.Errorf("resolve source path: %w", err)
+		}
+		rel, err = filepath.Rel(workspaceAbs, sourceAbs)
+		if err != nil {
+			return "", fmt.Errorf("source is outside the workspace")
+		}
 	}
-	return filepath.Join(workspace, filepath.FromSlash(filePath))
+	rel = filepath.Clean(rel)
+	if rel == "." || rel == ".." || filepath.IsAbs(rel) ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if absolute {
+			return "", fmt.Errorf("source is outside the workspace")
+		}
+		return "", fmt.Errorf("source path escapes the workspace")
+	}
+	return rel, nil
 }
 
-// mediaEntryName returns the deterministic zip entry for one source file and
-// reports whether it still needs to be copied. Names keep the original base
-// name and extension with a short hash of the source path, plus a counter only
-// if two distinct sources would otherwise collide. A repeated source path is
-// copied once.
+// mediaEntryName returns the deterministic zip entry for one workspace-relative
+// source path and reports whether it still needs to be copied. Names keep the
+// original base name and extension with a short hash of the source path, plus a
+// counter only if two distinct sources would otherwise collide. A repeated
+// source path is copied once.
 func (b *bundle) mediaEntryName(sourcePath string) (string, bool) {
 	if b.mediaEntries == nil {
 		b.mediaEntries = make(map[string]string)
@@ -874,8 +890,9 @@ func (b *bundle) mediaEntryName(sourcePath string) (string, bool) {
 	}
 }
 
-// mediaArchiveName builds a safe file name: original stem, a short stable
-// hash of the source path, then the original extension.
+// mediaArchiveName builds a safe file name from a workspace-relative source
+// path: original stem, a short stable hash of the source path, then the
+// original extension.
 func mediaArchiveName(sourcePath string, attempt int) string {
 	base := filepath.Base(filepath.Clean(sourcePath))
 	if base == "." || base == string(filepath.Separator) || base == "" {
@@ -912,33 +929,20 @@ func safeMediaNamePart(value string) string {
 	return builder.String()
 }
 
-// copyMediaFile streams one regular source file into the zip. Media bytes are
-// preserved byte-for-byte and are not run through --sanitize, which only
-// applies safely to text and JSON entries.
-func (b *bundle) copyMediaFile(name, sourcePath string) error {
+// copyMediaFile streams one already-opened regular source file into the zip.
+// Media bytes are preserved byte-for-byte and are not run through --sanitize,
+// which only applies safely to text and JSON entries.
+func (b *bundle) copyMediaFile(name string, source *os.File) error {
 	clean, err := zipEntryName(name)
 	if err != nil {
 		return err
-	}
-	source, err := os.Open(sourcePath)
-	if err != nil {
-		return fmt.Errorf("traceexport: open media %s: %w", sourcePath, err)
-	}
-	defer source.Close()
-
-	info, err := source.Stat()
-	if err != nil {
-		return fmt.Errorf("traceexport: stat media %s: %w", sourcePath, err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("traceexport: media %s is no longer a regular file", sourcePath)
 	}
 	writer, err := b.createEntry(clean)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(writer, source); err != nil {
-		return fmt.Errorf("traceexport: copy media %s: %w", sourcePath, err)
+		return fmt.Errorf("traceexport: copy media %s: %w", source.Name(), err)
 	}
 	b.files++
 	return nil
@@ -1017,7 +1021,7 @@ func (b *bundle) readme(m manifest) string {
 	builder.WriteString("- `persona/` — `AGENTS.md`, `opencode.jsonc`, `.acolyte/*.md`, `.agents/skills/**`, and `.opencode/agents/**`.\n")
 	builder.WriteString("- `orchestrator/` — audit logs, cron jobs, session mappings, delivery routes, and capability settings.\n")
 	builder.WriteString("- `communication/` — Telegram chats, inbox, outbox, media index, and channel settings.\n")
-	builder.WriteString("- `communication/media/` — byte-for-byte copies of the media files referenced by `communication/media.json`. Each file keeps its original base name and extension plus a short stable hash of its source path (`<name>-<hash><ext>`); missing, symlinked, or non-regular sources are skipped with a warning. `media.json` remains the metadata index and keeps the original source paths.\n")
+	builder.WriteString("- `communication/media/` — byte-for-byte copies of the media files referenced by `communication/media.json`. Each file keeps its original base name and extension plus a short stable hash of its workspace-relative source path (`<name>-<hash><ext>`). Sources outside the workspace, paths escaping through `..`, symlinked path components, missing files, and non-regular files are skipped with a warning. `media.json` remains the metadata index and keeps the original source paths.\n")
 	builder.WriteString("- `memory/` — memory-learn (dream) audit rows.\n")
 	builder.WriteString("- `manifest.json` — machine-readable index with counts and warnings.\n\n")
 	builder.WriteString("## Using this as memory\n\n")

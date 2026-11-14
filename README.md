@@ -202,8 +202,10 @@ The unzipped folder is self-contained: another agent can read `README.md`,
 `sessions/<id>.json` files are included when the OpenCode service supports the
 experimental session export endpoint. Referenced Telegram media files are
 copied byte-for-byte into `communication/media/` (named with a short hash of the
-source path); missing or non-regular sources are skipped with a manifest
-warning. Existing zips are not overwritten unless `--force` is passed.
+workspace-relative source path); sources outside the workspace, paths escaping
+through `..`, symlinked components, and missing or non-regular files are
+skipped with a manifest warning. Existing zips are not overwritten unless
+`--force` is passed.
 
 `--session-id` scopes the whole bundle to one session so it cannot disclose
 unrelated conversations: only that session's transcript and its own

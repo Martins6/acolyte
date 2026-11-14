@@ -537,10 +537,17 @@ func TestExportCopiesMediaFiles(t *testing.T) {
 	if len(copied) != 2 {
 		t.Fatalf("copied media files = %d, want 2: %v", len(copied), copied)
 	}
-	resolvedRel := filepath.Join(ws, filepath.FromSlash(relPath))
+	absRel, err := mediaRelPath(ws, absPath)
+	if err != nil {
+		t.Fatalf("resolve absolute media path: %v", err)
+	}
+	relRel, err := mediaRelPath(ws, relPath)
+	if err != nil {
+		t.Fatalf("resolve relative media path: %v", err)
+	}
 	expected := map[string]string{
-		mediaZipDir + "/" + mediaArchiveName(absPath, 0):     string(absBytes),
-		mediaZipDir + "/" + mediaArchiveName(resolvedRel, 0): string(relBytes),
+		mediaZipDir + "/" + mediaArchiveName(absRel, 0): string(absBytes),
+		mediaZipDir + "/" + mediaArchiveName(relRel, 0): string(relBytes),
 	}
 	for name, want := range expected {
 		got, ok := copied[name]
@@ -670,6 +677,114 @@ func TestExportSkipsUnavailableMediaSources(t *testing.T) {
 	}
 	warnings := strings.Join(parsed.Warnings, "\n")
 	for _, want := range []string{"skipped media", "missing", "symlink", "non-regular"} {
+		if !strings.Contains(warnings, want) {
+			t.Errorf("manifest warnings missing %q:\n%s", want, warnings)
+		}
+	}
+}
+
+// TestExportSkipsEscapingMediaSources proves a stale or crafted media row
+// cannot export an arbitrary local file: absolute paths outside the workspace,
+// relative paths escaping through `..`, and symlinked parent directories are
+// all skipped with warnings while a normal workspace file still copies.
+func TestExportSkipsEscapingMediaSources(t *testing.T) {
+	ws := t.TempDir()
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	writeFile(t, ws, "AGENTS.md", "# Agent hub\n")
+
+	goodPath := filepath.Join(ws, "media", "inbound", "images", "ok.jpg")
+	goodBytes := []byte("good workspace media")
+	writeBytes(t, goodPath, goodBytes)
+
+	outsideDir := t.TempDir()
+	secretPath := filepath.Join(outsideDir, "secret.jpg")
+	secretBytes := []byte("outside secret bytes")
+	writeBytes(t, secretPath, secretBytes)
+
+	relOutside, err := filepath.Rel(ws, secretPath)
+	if err != nil {
+		t.Fatalf("relative outside path: %v", err)
+	}
+	if !strings.HasPrefix(relOutside, ".."+string(filepath.Separator)) {
+		t.Fatalf("relative outside path %q does not escape %q", relOutside, ws)
+	}
+
+	// A symlinked parent directory inside the workspace still resolves
+	// outside, so the whole path must be refused.
+	linkDir := filepath.Join(ws, "media", "linked")
+	if err := os.MkdirAll(filepath.Dir(linkDir), 0755); err != nil {
+		t.Fatalf("mkdir media dir: %v", err)
+	}
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Fatalf("symlink parent: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	for _, item := range []commtg.MediaItem{
+		{TGFileID: "file_ok", FilePath: goodPath, Type: "photo", ChatID: 10, SavedAt: now},
+		{TGFileID: "file_absolute_outside", FilePath: secretPath, Type: "photo", ChatID: 10, SavedAt: now.Add(time.Second)},
+		{TGFileID: "file_relative_escape", FilePath: relOutside, Type: "photo", ChatID: 10, SavedAt: now.Add(2 * time.Second)},
+		{TGFileID: "file_symlink_parent", FilePath: filepath.Join(ws, "media", "linked", "secret.jpg"), Type: "photo", ChatID: 10, SavedAt: now.Add(3 * time.Second)},
+	} {
+		if err := st.CommTG().RecordMedia(item); err != nil {
+			t.Fatalf("record media: %v", err)
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	readOnly, err := store.OpenReadOnly(ws)
+	if err != nil {
+		t.Fatalf("open read-only store: %v", err)
+	}
+	defer readOnly.Close()
+
+	outPath := filepath.Join(t.TempDir(), "escaping-media.zip")
+	if _, err := Export(context.Background(), Request{
+		Agent:   registry.Agent{Name: "valet", Workspace: ws},
+		Store:   readOnly,
+		OutPath: outPath,
+		Now:     now,
+	}); err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+
+	files := readZip(t, outPath)
+	copied := mediaEntries(files)
+	if len(copied) != 1 {
+		t.Fatalf("copied media files = %d, want only the workspace file: %v", len(copied), mediaNames(copied))
+	}
+	for name, content := range copied {
+		if content != string(goodBytes) {
+			t.Errorf("media %s = %q, want %q", name, content, goodBytes)
+		}
+	}
+	for name, content := range files {
+		if strings.Contains(content, string(secretBytes)) {
+			t.Errorf("zip entry %s leaked an outside file", name)
+		}
+	}
+
+	var parsed struct {
+		Counts struct {
+			CommMedia  int `json:"comm_media"`
+			MediaFiles int `json:"media_files"`
+		} `json:"counts"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(files["manifest.json"]), &parsed); err != nil {
+		t.Fatalf("manifest invalid: %v\n%s", err, files["manifest.json"])
+	}
+	if parsed.Counts.CommMedia != 4 || parsed.Counts.MediaFiles != len(copied) {
+		t.Errorf("counts = %+v, want 4 media rows and %d copied files", parsed.Counts, len(copied))
+	}
+	warnings := strings.Join(parsed.Warnings, "\n")
+	for _, want := range []string{
+		"outside the workspace", "escapes the workspace", "symlinked path component",
+	} {
 		if !strings.Contains(warnings, want) {
 			t.Errorf("manifest warnings missing %q:\n%s", want, warnings)
 		}

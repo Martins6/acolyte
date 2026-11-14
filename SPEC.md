@@ -272,8 +272,9 @@ it produces**, documented in `docs/memory/…`.
   `communication/media/`), and `mem_dreams` audit rows. Each session also gets the
   OpenCode-native transfer JSON when the service supports the experimental export endpoint, so the
   bundle can be imported into another OpenCode workspace. The zip is self-contained and readable
-  without Acolyte; missing, symlinked, or non-regular media sources are skipped with manifest
-  warnings. `--session-id <id>` scopes the whole bundle to that session so it cannot
+  without Acolyte; media source paths are confined to the workspace (outside, `..` escaping,
+  symlinked, missing, or non-regular sources are skipped with manifest warnings). `--session-id <id>`
+  scopes the whole bundle to that session so it cannot
   disclose unrelated conversations: `sessions/` holds only its transcript, `communication/` keeps
   only its inbox/outbox rows, the chats they reference, and the media files for those chats
   (copied under `communication/media/`; channel settings omitted), `orchestrator/` keeps only its

@@ -41,15 +41,23 @@ memory/dreams.json        # memory-learn audit rows
 
 `communication/media.json` stays the metadata index and keeps each item's original
 `file_path` (Telegram saves inbound files under `<workspace>/media/inbound/...`). After the
-rows are filtered, every referenced regular file is copied byte-for-byte into
-`communication/media/` so the bundle is self-contained on another machine. Each copy keeps the
-original base name and extension plus a short, stable hash of its source path, e.g.
+rows are filtered, every referenced regular file inside the workspace is opened without following
+symlinks in any path component and copied byte-for-byte into `communication/media/`, so the bundle
+is self-contained on another machine. Each copy keeps the original base name and extension plus a
+short, stable hash of its workspace-relative source path, e.g.
 `1700000000000-photo-3f9c2a1b.jpg`; this avoids collisions when different sources share a name.
 The same source file referenced twice is copied once.
 
-Missing, symlinked, or non-regular source files are skipped and recorded in the manifest
-warnings; they never fail the export. Session Markdown still shows the original absolute source
-paths as provenance, but the portable form is the copy under `communication/media/`.
+Source containment is enforced before opening: absolute paths must resolve inside the workspace and
+relative paths may not escape through `..`. The file is then walked from an opened workspace
+directory with `openat`/`O_NOFOLLOW` on every component, and the opened descriptor is `fstat`ed and
+streamed, so a symlinked parent or a concurrent path swap cannot export a file from outside the
+workspace. On platforms without that Unix primitive, media copying is skipped with a clear warning
+instead of falling back to a symlink-following open.
+
+Missing, outside, escaping, symlinked, or non-regular source files are skipped and recorded in the
+manifest warnings; they never fail the export. Session Markdown still shows the original absolute
+source paths as provenance, but the portable form is the copy under `communication/media/`.
 
 ### Single-session scope (`--session-id`)
 
@@ -121,8 +129,12 @@ re-imports mapped sessions.
 
 ## Safety
 - Symlinks and non-regular files are skipped.
-- Missing, symlinked, or non-regular media source files are skipped with a manifest warning; the
-  export still succeeds.
+- Media source paths are confined to the workspace: absolute paths outside it, relative paths
+  escaping through `..`, and symlinked path components are skipped with a manifest warning, as are
+  missing or non-regular files. The export still succeeds.
+- Media files are opened with `openat`/`O_NOFOLLOW` from an opened workspace directory and streamed
+  from the validated descriptor, so symlinked parents and path-swap races cannot read outside the
+  workspace. Unsupported platforms warn and skip instead of following symlinks.
 - `.env`, `.acolyte.sqlite.db`, and process logs are never included.
 - The zip is written atomically with mode `0600`.
 - Existing output files are not overwritten unless `--force` is passed.
