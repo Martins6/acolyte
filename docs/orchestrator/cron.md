@@ -18,8 +18,9 @@
   Installed services bake `$SHELL` from the installing shell into the unit (see
   [autostart](autostart.md)).
 - **Target** — `--agent-name <name>` **xor** `--workspace-folder <path>` (if neither, use
-  `$ACOLYTE_WORKSPACE_PATH`, then infer from a valid pwd); optional `--session-id <id>` (default =
-  latest session).
+  `$ACOLYTE_WORKSPACE_PATH`, then infer from a valid pwd); optional `--session-id <id>` targets that
+  session for `prompt`/`shell` jobs. Routine jobs reject `--session-id` and always run in
+  `cron:<job ID>`.
 - **Actions are mutually exclusive**: `--prompt` | `--shell` | `--routine`.
 
 ## Routines (`routine` kind)
