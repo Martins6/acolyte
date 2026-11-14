@@ -268,14 +268,17 @@ it produces**, documented in `docs/memory/…`.
   bundle: every OpenCode session as a Markdown timeline (messages, reasoning, tool calls, idle
   markers, and communication routing events), the persona + skills (`AGENTS.md`,
   `opencode.jsonc`, `.acolyte/*.md`, `.agents/skills/**`), orchestrator logs/cron/session
-  mappings, communication state, and `mem_dreams` audit rows. Each session also gets the
+  mappings, communication state (including byte-for-byte copies of referenced media files under
+  `communication/media/`), and `mem_dreams` audit rows. Each session also gets the
   OpenCode-native transfer JSON when the service supports the experimental export endpoint, so the
   bundle can be imported into another OpenCode workspace. The zip is self-contained and readable
-  without Acolyte. `--session-id <id>` scopes the whole bundle to that session so it cannot
+  without Acolyte; missing, symlinked, or non-regular media sources are skipped with manifest
+  warnings. `--session-id <id>` scopes the whole bundle to that session so it cannot
   disclose unrelated conversations: `sessions/` holds only its transcript, `communication/` keeps
-  only its inbox/outbox rows, the chats they reference, and the media for those chats (channel
-  settings omitted), `orchestrator/` keeps only its session mapping (no logs, cron jobs/routes,
-  or settings), and `mem_dreams` rows are omitted; manifest counts reflect the filtered data and
+  only its inbox/outbox rows, the chats they reference, and the media files for those chats
+  (copied under `communication/media/`; channel settings omitted), `orchestrator/` keeps only its
+  session mapping (no logs, cron jobs/routes, or settings), and `mem_dreams` rows are omitted;
+  manifest counts reflect the filtered data and
   persona/skills remain because they are agent identity, not conversation content. The default
   export is unchanged. `--sanitize` redacts common secret patterns (env assignments,
   `authorization`/`bearer`, `api_key=`, `sk-...`, Telegram tokens) on a best-effort basis;

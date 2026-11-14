@@ -32,8 +32,24 @@ orchestrator/             # logs.md, cron-jobs.json, cron-routes.json,
                           # sessions.json, settings.json
 communication/            # chats.json, inbox.json, outbox.json,
                           # media.json, settings.json
+communication/media/      # byte-for-byte copies of referenced media files,
+                          # named <base>-<hash><ext> (hash of source path)
 memory/dreams.json        # memory-learn audit rows
 ```
+
+### Media files
+
+`communication/media.json` stays the metadata index and keeps each item's original
+`file_path` (Telegram saves inbound files under `<workspace>/media/inbound/...`). After the
+rows are filtered, every referenced regular file is copied byte-for-byte into
+`communication/media/` so the bundle is self-contained on another machine. Each copy keeps the
+original base name and extension plus a short, stable hash of its source path, e.g.
+`1700000000000-photo-3f9c2a1b.jpg`; this avoids collisions when different sources share a name.
+The same source file referenced twice is copied once.
+
+Missing, symlinked, or non-regular source files are skipped and recorded in the manifest
+warnings; they never fail the export. Session Markdown still shows the original absolute source
+paths as provenance, but the portable form is the copy under `communication/media/`.
 
 ### Single-session scope (`--session-id`)
 
@@ -42,9 +58,9 @@ conversations. Only the scoped subset of the files above is written:
 
 - `sessions/` — only the selected session's transcript (unchanged behavior).
 - `communication/` — only inbox/outbox rows with `opencode_session_id` equal to the selected
-  session, only the chats those rows reference, and only media saved for those chats.
-  `settings.json` (global channel settings) is omitted; `media.json` is omitted when no chat
-  can be attributed to the session.
+  session, only the chats those rows reference, and only media saved for those chats (including
+  copies under `communication/media/`). `settings.json` (global channel settings) is omitted;
+  `media.json` is omitted when no chat can be attributed to the session.
 - `orchestrator/` — only `sessions.json`, filtered to the selected session's mapping. Audit
   logs, cron jobs, cron routes, and settings are omitted.
 - `memory/dreams.json` — omitted (global memory, unrelated to one conversation).
@@ -62,11 +78,13 @@ Acolyte or OpenCode. The JSON files preserve exact routing/orchestration data, a
 ## Sanitizing secrets
 
 Raw traces may contain secrets from the source workspace (environment values, tokens, keys)
-embedded in conversation text and tool output. With `--sanitize`, every written entry is redacted
-before it goes into the zip: env assignments whose key contains `TOKEN`/`KEY`/`SECRET`/`PASSWORD`,
-`authorization:` values, `bearer` tokens, `api_key=` values, `sk-...` keys, and Telegram bot
-tokens. JSON entries are parsed and walked so redaction can never break their structure;
-`manifest.json` records `"sanitized": true` and the README carries a warning.
+embedded in conversation text and tool output. With `--sanitize`, every written text/JSON entry is
+redacted before it goes into the zip: env assignments whose key contains
+`TOKEN`/`KEY`/`SECRET`/`PASSWORD`, `authorization:` values, `bearer` tokens, `api_key=` values,
+`sk-...` keys, and Telegram bot tokens. JSON entries are parsed and walked so redaction can never
+break their structure; `manifest.json` records `"sanitized": true` and the README carries a warning.
+Media copies under `communication/media/` are binary payloads and are preserved byte-for-byte, so
+they are not sanitized.
 
 Sanitization is **best-effort**: it cannot catch every secret. Review a bundle before sharing it.
 
@@ -103,6 +121,8 @@ re-imports mapped sessions.
 
 ## Safety
 - Symlinks and non-regular files are skipped.
+- Missing, symlinked, or non-regular media source files are skipped with a manifest warning; the
+  export still succeeds.
 - `.env`, `.acolyte.sqlite.db`, and process logs are never included.
 - The zip is written atomically with mode `0600`.
 - Existing output files are not overwritten unless `--force` is passed.

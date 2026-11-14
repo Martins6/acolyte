@@ -187,6 +187,10 @@ func TestExportSingleSessionScope(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 
 	writeFile(t, ws, "AGENTS.md", "# Agent hub\n")
+	// The media index stores workspace-relative paths here; both files exist
+	// so the scoped export can copy only the selected chat's media.
+	writeFile(t, ws, "downloads/media/selected.jpg", "selected media bytes")
+	writeFile(t, ws, "downloads/media/other.jpg", "other media bytes")
 
 	st, err := store.Open(ws)
 	if err != nil {
@@ -392,7 +396,7 @@ func TestExportSingleSessionScope(t *testing.T) {
 	for name, content := range files {
 		for _, banned := range []string{
 			"ses_y", "hello y", "reply y", "env_in_y", "env_out_y",
-			"other chat reply", "bob", "other.jpg",
+			"other chat reply", "bob", "other.jpg", "other media bytes",
 			"global turn completed", "heartbeat", "global cron route",
 			"global dream note", `"notify"`, `"channel"`,
 		} {
@@ -418,6 +422,7 @@ func TestExportSingleSessionScope(t *testing.T) {
 			CommInbox    int `json:"comm_inbox"`
 			CommOutbox   int `json:"comm_outbox"`
 			CommMedia    int `json:"comm_media"`
+			MediaFiles   int `json:"media_files"`
 			MemoryDreams int `json:"memory_dreams"`
 		} `json:"counts"`
 	}
@@ -430,7 +435,7 @@ func TestExportSingleSessionScope(t *testing.T) {
 	counts := parsed.Counts
 	if counts.Sessions != 1 || counts.Messages != 2 || counts.Logs != 0 ||
 		counts.CommInbox != 1 || counts.CommOutbox != 1 || counts.CommMedia != 1 ||
-		counts.MemoryDreams != 0 {
+		counts.MediaFiles != 1 || counts.MemoryDreams != 0 {
 		t.Errorf("counts = %+v, want filtered values", counts)
 	}
 	personaFiles := 0
@@ -458,12 +463,246 @@ func TestExportSingleSessionScope(t *testing.T) {
 	if got := countJSONRows(t, files["communication/media.json"]); got != counts.CommMedia {
 		t.Errorf("media rows = %d, manifest comm_media = %d", got, counts.CommMedia)
 	}
+	copiedMedia := mediaEntries(files)
+	if len(copiedMedia) != counts.MediaFiles || counts.MediaFiles != 1 {
+		t.Errorf("copied media files = %d, manifest media_files = %d", len(copiedMedia), counts.MediaFiles)
+	}
+	for name, content := range copiedMedia {
+		if content != "selected media bytes" {
+			t.Errorf("media %s content = %q, want selected media bytes", name, content)
+		}
+		if strings.Contains(content, "other media bytes") {
+			t.Errorf("media %s leaked another chat's media", name)
+		}
+	}
 	if got := countJSONRows(t, files["orchestrator/sessions.json"]); got != 1 {
 		t.Errorf("orchestrator mappings = %d, want 1", got)
 	}
 	if !strings.Contains(files["README.md"], "single-session export") ||
 		!strings.Contains(files["README.md"], "ses_x") {
 		t.Errorf("README missing the single-session scope note:\n%s", files["README.md"])
+	}
+}
+
+// TestExportCopiesMediaFiles proves referenced media files are copied into
+// the zip byte-for-byte under a deterministic collision-free name, and that
+// manifest media_files counts actual copies (not duplicate source rows).
+func TestExportCopiesMediaFiles(t *testing.T) {
+	ws := t.TempDir()
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	writeFile(t, ws, "AGENTS.md", "# Agent hub\n")
+
+	absPath := filepath.Join(ws, "media", "inbound", "images", "photo.jpg")
+	absBytes := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x01, 0x02, 0x03, 0x00}
+	writeBytes(t, absPath, absBytes)
+	relPath := "media/inbound/documents/photo.jpg"
+	relBytes := []byte("documents photo bytes\x00with nul")
+	writeBytes(t, filepath.Join(ws, filepath.FromSlash(relPath)), relBytes)
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	for index, item := range []commtg.MediaItem{
+		{TGFileID: "file_abs", FilePath: absPath, Type: "photo", ChatID: 10, SavedAt: now},
+		{TGFileID: "file_rel", FilePath: relPath, Type: "document", ChatID: 10, SavedAt: now.Add(time.Second)},
+		// A second row for the same source file must not duplicate the copy.
+		{TGFileID: "file_dup", FilePath: absPath, Type: "photo", ChatID: 10, SavedAt: now.Add(2 * time.Second)},
+	} {
+		if err := st.CommTG().RecordMedia(item); err != nil {
+			t.Fatalf("record media %d: %v", index, err)
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	readOnly, err := store.OpenReadOnly(ws)
+	if err != nil {
+		t.Fatalf("open read-only store: %v", err)
+	}
+	defer readOnly.Close()
+
+	outPath := filepath.Join(t.TempDir(), "media.zip")
+	if _, err := Export(context.Background(), Request{
+		Agent:   registry.Agent{Name: "valet", Workspace: ws},
+		Store:   readOnly,
+		OutPath: outPath,
+		Now:     now,
+	}); err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+
+	files := readZip(t, outPath)
+	copied := mediaEntries(files)
+	if len(copied) != 2 {
+		t.Fatalf("copied media files = %d, want 2: %v", len(copied), copied)
+	}
+	resolvedRel := filepath.Join(ws, filepath.FromSlash(relPath))
+	expected := map[string]string{
+		mediaZipDir + "/" + mediaArchiveName(absPath, 0):     string(absBytes),
+		mediaZipDir + "/" + mediaArchiveName(resolvedRel, 0): string(relBytes),
+	}
+	for name, want := range expected {
+		got, ok := copied[name]
+		if !ok {
+			t.Errorf("zip missing media copy %s; have %v", name, mediaNames(copied))
+			continue
+		}
+		if got != want {
+			t.Errorf("media %s = %q, want byte-for-byte %q", name, got, want)
+		}
+	}
+	for name := range copied {
+		base := strings.TrimPrefix(name, mediaZipDir+"/")
+		if !strings.HasPrefix(base, "photo-") || !strings.HasSuffix(base, ".jpg") {
+			t.Errorf("media name %q does not keep the original base name and extension", base)
+		}
+	}
+
+	var parsed struct {
+		Counts struct {
+			CommMedia  int `json:"comm_media"`
+			MediaFiles int `json:"media_files"`
+		} `json:"counts"`
+	}
+	if err := json.Unmarshal([]byte(files["manifest.json"]), &parsed); err != nil {
+		t.Fatalf("manifest invalid: %v\n%s", err, files["manifest.json"])
+	}
+	if parsed.Counts.CommMedia != 3 || parsed.Counts.MediaFiles != len(copied) {
+		t.Errorf("counts = %+v, want 3 media rows and %d copied files", parsed.Counts, len(copied))
+	}
+	if !strings.Contains(files["README.md"], "communication/media/") ||
+		!strings.Contains(files["README.md"], "Copied media files: 2") {
+		t.Errorf("README missing media copy description:\n%s", files["README.md"])
+	}
+}
+
+// TestExportSkipsUnavailableMediaSources proves missing, symlinked, and
+// non-regular media files are skipped with manifest warnings instead of
+// failing the export, and that no symlink target leaks into the zip.
+func TestExportSkipsUnavailableMediaSources(t *testing.T) {
+	ws := t.TempDir()
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	writeFile(t, ws, "AGENTS.md", "# Agent hub\n")
+
+	goodPath := filepath.Join(ws, "media", "inbound", "images", "ok.jpg")
+	goodBytes := []byte("good media bytes")
+	writeBytes(t, goodPath, goodBytes)
+
+	missingPath := filepath.Join(ws, "media", "inbound", "images", "missing.jpg")
+
+	outside := filepath.Join(t.TempDir(), "secret.jpg")
+	writeBytes(t, outside, []byte("leaked secret bytes"))
+	symlinkPath := filepath.Join(ws, "media", "inbound", "images", "link.jpg")
+	if err := os.MkdirAll(filepath.Dir(symlinkPath), 0755); err != nil {
+		t.Fatalf("mkdir media dir: %v", err)
+	}
+	if err := os.Symlink(outside, symlinkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	dirPath := filepath.Join(ws, "media", "inbound", "images", "dir.jpg")
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		t.Fatalf("mkdir non-regular source: %v", err)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	for _, item := range []commtg.MediaItem{
+		{TGFileID: "file_ok", FilePath: goodPath, Type: "photo", ChatID: 10, SavedAt: now},
+		{TGFileID: "file_missing", FilePath: missingPath, Type: "photo", ChatID: 10, SavedAt: now.Add(time.Second)},
+		{TGFileID: "file_symlink", FilePath: symlinkPath, Type: "photo", ChatID: 10, SavedAt: now.Add(2 * time.Second)},
+		{TGFileID: "file_dir", FilePath: dirPath, Type: "document", ChatID: 10, SavedAt: now.Add(3 * time.Second)},
+	} {
+		if err := st.CommTG().RecordMedia(item); err != nil {
+			t.Fatalf("record media: %v", err)
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	readOnly, err := store.OpenReadOnly(ws)
+	if err != nil {
+		t.Fatalf("open read-only store: %v", err)
+	}
+	defer readOnly.Close()
+
+	outPath := filepath.Join(t.TempDir(), "skipped-media.zip")
+	if _, err := Export(context.Background(), Request{
+		Agent:   registry.Agent{Name: "valet", Workspace: ws},
+		Store:   readOnly,
+		OutPath: outPath,
+		Now:     now,
+	}); err != nil {
+		t.Fatalf("Export() error: %v", err)
+	}
+
+	files := readZip(t, outPath)
+	copied := mediaEntries(files)
+	if len(copied) != 1 {
+		t.Fatalf("copied media files = %d, want only the regular file: %v", len(copied), mediaNames(copied))
+	}
+	for name, content := range copied {
+		if content != string(goodBytes) {
+			t.Errorf("media %s = %q, want %q", name, content, goodBytes)
+		}
+	}
+	for name, content := range files {
+		if strings.Contains(content, "leaked secret bytes") {
+			t.Errorf("zip entry %s leaked a symlink target", name)
+		}
+	}
+
+	var parsed struct {
+		Counts struct {
+			CommMedia  int `json:"comm_media"`
+			MediaFiles int `json:"media_files"`
+		} `json:"counts"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(files["manifest.json"]), &parsed); err != nil {
+		t.Fatalf("manifest invalid: %v\n%s", err, files["manifest.json"])
+	}
+	if parsed.Counts.CommMedia != 4 || parsed.Counts.MediaFiles != 1 {
+		t.Errorf("counts = %+v, want 4 media rows and 1 copied file", parsed.Counts)
+	}
+	warnings := strings.Join(parsed.Warnings, "\n")
+	for _, want := range []string{"skipped media", "missing", "symlink", "non-regular"} {
+		if !strings.Contains(warnings, want) {
+			t.Errorf("manifest warnings missing %q:\n%s", want, warnings)
+		}
+	}
+}
+
+// mediaEntries returns only the copied media entries from a read zip.
+func mediaEntries(files map[string]string) map[string]string {
+	entries := make(map[string]string)
+	for name, content := range files {
+		if strings.HasPrefix(name, mediaZipDir+"/") {
+			entries[name] = content
+		}
+	}
+	return entries
+}
+
+// mediaNames lists zip entry names for debugging failed assertions.
+func mediaNames(entries map[string]string) []string {
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	return names
+}
+
+func writeBytes(t *testing.T, filePath string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(filePath), err)
+	}
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		t.Fatalf("write %s: %v", filePath, err)
 	}
 }
 
