@@ -544,6 +544,7 @@ func TestRouterNewCommandWithBotSuffix(t *testing.T) {
 		envelope.Party{Kind: envelope.PartyUser, ID: "71"},
 		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
 		envelope.Content{Type: envelope.ContentText, Text: "/new@acolyte_bot"})
+	env.Meta = map[string]any{botUsernameMeta: "acolyte_bot"}
 	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
 		t.Fatalf("HandleInbound() error: %v", err)
 	}
@@ -552,6 +553,98 @@ func TestRouterNewCommandWithBotSuffix(t *testing.T) {
 	}
 	if h.hasSession(t, thread) {
 		t.Error("thread mapping still exists after /new@acolyte_bot")
+	}
+}
+
+func TestRouterNewCommandForAnotherBotRunsTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	thread := envelope.TelegramThread(74)
+	h.seedSession(t, thread, "ses_old")
+
+	env := envelope.New(envelope.DirectionIn, "telegram", thread,
+		envelope.Party{Kind: envelope.PartyUser, ID: "74"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "/new@other_bot"})
+	env.Meta = map[string]any{botUsernameMeta: "acolyte_bot"}
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if h.turn.calls != 1 {
+		t.Fatalf("turn calls = %d, want 1", h.turn.calls)
+	}
+	if len(h.turn.prompts) != 1 || h.turn.prompts[0] != "/new@other_bot" {
+		t.Errorf("prompts = %v, want [/new@other_bot]", h.turn.prompts)
+	}
+	if !h.hasSession(t, thread) {
+		t.Error("thread mapping was reset by a command aimed at another bot")
+	}
+}
+
+func TestRouterNewCommandWithoutBotUsernameRunsTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	thread := envelope.TelegramThread(75)
+	h.seedSession(t, thread, "ses_old")
+
+	env := envelope.New(envelope.DirectionIn, "telegram", thread,
+		envelope.Party{Kind: envelope.PartyUser, ID: "75"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "/new@acolyte_bot"})
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if h.turn.calls != 1 {
+		t.Fatalf("turn calls = %d, want 1 when the bot username is unknown", h.turn.calls)
+	}
+	if !h.hasSession(t, thread) {
+		t.Error("thread mapping was reset without a resolved bot username")
+	}
+}
+
+func TestParseCommand(t *testing.T) {
+	tests := []struct {
+		text    string
+		name    string
+		mention string
+		ok      bool
+	}{
+		{text: "/new", name: "new", ok: true},
+		{text: " /new ", name: "new", ok: true},
+		{text: "/NEW", name: "new", ok: true},
+		{text: "/new extra", name: "new", ok: true},
+		{text: "/new@acolyte_bot", name: "new", mention: "acolyte_bot", ok: true},
+		{text: "/new@Acolyte_Bot extra", name: "new", mention: "acolyte_bot", ok: true},
+		{text: "/new@", ok: false},
+		{text: "/", ok: false},
+		{text: "hello", ok: false},
+	}
+	for _, tt := range tests {
+		name, mention, ok := parseCommand(tt.text)
+		if name != tt.name || mention != tt.mention || ok != tt.ok {
+			t.Errorf("parseCommand(%q) = %q, %q, %v; want %q, %q, %v",
+				tt.text, name, mention, ok, tt.name, tt.mention, tt.ok)
+		}
+	}
+}
+
+func TestCommandAddressedToBot(t *testing.T) {
+	tests := []struct {
+		name    string
+		mention string
+		meta    map[string]any
+		want    bool
+	}{
+		{name: "unaddressed", want: true},
+		{name: "addressed to this bot", mention: "acolyte_bot", meta: map[string]any{botUsernameMeta: "acolyte_bot"}, want: true},
+		{name: "case insensitive", mention: "acolyte_bot", meta: map[string]any{botUsernameMeta: "Acolyte_Bot"}, want: true},
+		{name: "another bot", mention: "other_bot", meta: map[string]any{botUsernameMeta: "acolyte_bot"}, want: false},
+		{name: "unknown bot username", mention: "acolyte_bot", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := commandAddressedToBot(tt.mention, tt.meta); got != tt.want {
+				t.Errorf("commandAddressedToBot(%q, %v) = %v, want %v", tt.mention, tt.meta, got, tt.want)
+			}
+		})
 	}
 }
 

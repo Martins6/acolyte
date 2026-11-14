@@ -765,7 +765,8 @@ notify-user`** = user-only, never agent, never session (v0 `notify`) (§10.4).
 32. **Telegram inbound UX is best-effort and adapter-local.** An accepted message gets a 👀 reaction,
     and `typing` is sent immediately and refreshed every 4s until the reply is enqueued.
     `setMyCommands` registers `/new`, which clears the `telegram:<chat_id>` → session mapping under
-    the thread lock and replies without a model turn; multi-message replies are joined with `\n\n`.
+    the thread lock and replies without a model turn (an `@mention` must name this bot);
+    multi-message replies are joined with `\n\n`.
 
 **[OPEN] forks:**
 None.

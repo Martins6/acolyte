@@ -39,7 +39,9 @@ not fail startup.
 
 - It deletes the `telegram:<chat_id>` → OpenCode session mapping in `orch_sessions` and replies
   `New session started.` so the next message creates a fresh OpenCode session.
-- `/new@botname` and `/new` with extra arguments are accepted the same way.
+- An `@mention` is accepted only when it names this bot (for example `/new@acolyte_bot`); a
+  command aimed at another bot is passed to the agent as normal text. Extra arguments after the
+  command are ignored.
 - No model turn runs for `/new`.
 - Any other slash command is passed to the agent as normal text.
 

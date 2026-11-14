@@ -133,6 +133,9 @@ func TestEmulatedTelegramInboundAndOutbound(t *testing.T) {
 	if env.Meta["telegram_message_id"] != int64(update.Message.ID) {
 		t.Errorf("message id = %v, want %d", env.Meta["telegram_message_id"], update.Message.ID)
 	}
+	if env.Meta["telegram_bot_username"] != "acolyte_test_bot" {
+		t.Errorf("bot username = %v, want acolyte_test_bot", env.Meta["telegram_bot_username"])
+	}
 
 	if err := h.adapter.Send(envelope.New(envelope.DirectionOut, Channel, env.Thread, env.To, env.From,
 		envelope.Content{Type: envelope.ContentText, Text: "reply over the emulator"})); err != nil {
@@ -533,6 +536,9 @@ func TestEmulatedTelegramShowsTyping(t *testing.T) {
 func TestEmulatedTelegramRegistersCommands(t *testing.T) {
 	h := newEmulatedHarness(t, "42")
 	h.start(t, func(context.Context, envelope.Envelope) error { return nil })
+	if h.adapter.username != "acolyte_test_bot" {
+		t.Errorf("adapter username = %q, want acolyte_test_bot", h.adapter.username)
+	}
 
 	commands, err := h.server.WaitForCommands(testContext(t))
 	if err != nil {

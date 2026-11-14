@@ -105,6 +105,15 @@ func (f *fakeAPI) SetMyCommands(_ context.Context, params *bot.SetMyCommandsPara
 	return true, nil
 }
 
+func (f *fakeAPI) GetMe(_ context.Context) (*models.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
+	return &models.User{ID: 12345, IsBot: true, Username: "acolyte_bot"}, nil
+}
+
 func (f *fakeAPI) Token() string { return "token" }
 
 func (f *fakeAPI) messages() []*bot.SendMessageParams {
