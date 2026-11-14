@@ -9,6 +9,12 @@
     `agent-post` (social / internal-reddit style).
   - Reuse the Envelope (`channel`, `from/to.kind = "agent"`); only routing/discovery is new.
   - Internal CLI for agent-to-agent mail/notify.
+- **Merged image + final text** — deliver `send_image` output as one photo whose caption is the
+  turn's final reply, instead of today's two messages. Deferred: it would require capturing
+  `send_image` tool calls from the session timeline into a future `TurnResult.Images` field,
+  suppressing the tool-side send, and holding the image until the turn ends. v0 deliberately keeps
+  immediate tool-side delivery plus a separate final message (deterministic, works outside the
+  router reply path, no dependency on turn completion). See `docs/communication/telegram.md`.
 - **More human channels** — Discord, Slack, WhatsApp, email, etc. (new `Communication` adapters).
 
 ## Memory

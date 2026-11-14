@@ -57,7 +57,7 @@ const execFileAsync = promisify(execFile)
 
 export default tool({
   description:
-    "Send exactly one image to the user on Telegram. The image is copied into media/outbound/images and delivered as a photo.",
+    "Send exactly one image to the user on Telegram. The image is copied into media/outbound/images and delivered immediately as a photo; your final reply is a separate message.",
   args: {
     path: tool.schema
       .string()
