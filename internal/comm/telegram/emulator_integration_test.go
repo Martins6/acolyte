@@ -533,6 +533,32 @@ func TestEmulatedTelegramShowsTyping(t *testing.T) {
 	}
 }
 
+// TestEmulatedTelegramShowsTypingForFastTurn guards the race where a turn
+// completes before the typing goroutine gets scheduled: the stop path must
+// still wait for the first chat action to be sent.
+func TestEmulatedTelegramShowsTypingForFastTurn(t *testing.T) {
+	h := newEmulatedHarness(t, "42")
+	inbound := make(chan envelope.Envelope, 1)
+	h.start(t, func(_ context.Context, env envelope.Envelope) error {
+		inbound <- env
+		return nil
+	})
+
+	h.server.SendText(10, 42, "alice", "instant reply")
+	env := waitEnvelope(t, inbound)
+	if env.Content.Text != "instant reply" {
+		t.Errorf("envelope text = %q", env.Content.Text)
+	}
+
+	action, err := h.server.WaitForChatAction(testContext(t), 10)
+	if err != nil {
+		t.Fatalf("wait chat action: %v", err)
+	}
+	if action.Action != "typing" {
+		t.Errorf("chat action = %q, want typing", action.Action)
+	}
+}
+
 func TestEmulatedTelegramRegistersCommands(t *testing.T) {
 	h := newEmulatedHarness(t, "42")
 	h.start(t, func(context.Context, envelope.Envelope) error { return nil })
