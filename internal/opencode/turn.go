@@ -355,7 +355,9 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 	}
 }
 
-// assistantText concatenates the text parts of the assistant messages.
+// assistantText concatenates the text parts of the assistant messages. Text
+// parts within one message stay joined as-is; successive messages are separated
+// by a blank line.
 func assistantText(msgs []Message) string {
 	var b strings.Builder
 	for _, m := range msgs {
@@ -372,7 +374,9 @@ func assistantText(msgs []Message) string {
 			continue
 		}
 		if b.Len() > 0 {
-			b.WriteString("\n")
+			// Successive assistant messages are separate paragraphs: a blank
+			// line keeps them visually distinct instead of running together.
+			b.WriteString("\n\n")
 		}
 		b.WriteString(text.String())
 	}

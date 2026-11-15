@@ -711,7 +711,7 @@ func TestAssistantText(t *testing.T) {
 		{Type: "idle", Outcome: "succeeded"},
 		{Type: "assistant", Content: []ContentPart{{Type: "text", Text: "c"}}},
 	}
-	if got := assistantText(msgs); got != "ab\nc" {
-		t.Errorf("assistantText = %q, want %q", got, "ab\nc")
+	if got := assistantText(msgs); got != "ab\n\nc" {
+		t.Errorf("assistantText = %q, want %q", got, "ab\n\nc")
 	}
 }

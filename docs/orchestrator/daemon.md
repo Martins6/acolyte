@@ -27,6 +27,10 @@ Cron prompt/routine jobs and `acolyte inbox` admit **synthetic** events. Turns a
 persist, even when no channel can deliver the reply; delivery is a separate, durable outbox step.
 `acolyte notify-user` is user-only and therefore requires a registered chat.
 
+`/new` is handled before the model: inside the per-thread lock the router deletes the
+`telegram:<chat_id>` → session mapping in `orch_sessions` and replies `New session started.` with no
+model turn, so the next message starts a fresh OpenCode session.
+
 `acolyte run` is the headless, channel-free path: it runs a real user turn, maps the session to
 `cli:<agent>`, and never starts an adapter or queues a delivery. `--continue` reuses that CLI
 session; the reply is printed directly (plain or `--json`).
@@ -66,4 +70,4 @@ OpenCode session/message IDs needed to join the two.
 Capabilities are baked by `acolyte new` and can be changed in place with
 `acolyte config <agent> get|set|edit` (channels, allowed users, schedule, engine, memory keys; see
 [`config.md`](config.md)). `acolyte new` still preserves existing settings/jobs when it adopts a
-folder. New modes/channels remain deferred in [`FUTURE-IDEAS.md`](../../FUTURE-IDEAS.md).
+folder. New modes/channels remain deferred in [#113](https://github.com/Martins6/acolyte/issues/113).

@@ -90,6 +90,30 @@ func TestDaemonRoutesThroughEmulatedTelegram(t *testing.T) {
 		t.Errorf("reply_to = %v, want %d", reply.ReplyTo, update.Message.ID)
 	}
 
+	// The adapter should acknowledge the inbound message, show a typing
+	// indicator while the turn runs and publish the /new command menu.
+	reaction, err := server.WaitForReaction(ctx, 10, update.Message.ID)
+	if err != nil {
+		t.Fatalf("wait for ack reaction: %v", err)
+	}
+	if reaction.Emoji != telegram.AckReaction {
+		t.Errorf("reaction emoji = %q, want %q", reaction.Emoji, telegram.AckReaction)
+	}
+	action, err := server.WaitForChatAction(ctx, 10)
+	if err != nil {
+		t.Fatalf("wait for typing chat action: %v", err)
+	}
+	if action.Action != "typing" {
+		t.Errorf("chat action = %q, want typing", action.Action)
+	}
+	commands, err := server.WaitForCommands(ctx)
+	if err != nil {
+		t.Fatalf("wait for registered commands: %v", err)
+	}
+	if len(commands) != 1 || commands[0].Command != "new" {
+		t.Errorf("commands = %+v, want only /new", commands)
+	}
+
 	st, release, err := pool.Acquire(ws)
 	if err != nil {
 		t.Fatalf("acquire store: %v", err)

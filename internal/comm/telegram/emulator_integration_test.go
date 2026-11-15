@@ -133,6 +133,9 @@ func TestEmulatedTelegramInboundAndOutbound(t *testing.T) {
 	if env.Meta["telegram_message_id"] != int64(update.Message.ID) {
 		t.Errorf("message id = %v, want %d", env.Meta["telegram_message_id"], update.Message.ID)
 	}
+	if env.Meta["telegram_bot_username"] != "acolyte_test_bot" {
+		t.Errorf("bot username = %v, want acolyte_test_bot", env.Meta["telegram_bot_username"])
+	}
 
 	if err := h.adapter.Send(envelope.New(envelope.DirectionOut, Channel, env.Thread, env.To, env.From,
 		envelope.Content{Type: envelope.ContentText, Text: "reply over the emulator"})); err != nil {
@@ -464,5 +467,139 @@ func TestEmulatedTelegramReplaysFailedInbound(t *testing.T) {
 	})
 	if calls.Load() != 2 {
 		t.Errorf("sink calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestEmulatedTelegramAcknowledgesInbound(t *testing.T) {
+	h := newEmulatedHarness(t, "42")
+	inbound := make(chan envelope.Envelope, 1)
+	h.start(t, func(_ context.Context, env envelope.Envelope) error {
+		inbound <- env
+		return nil
+	})
+
+	update := h.server.SendText(10, 42, "alice", "react to me")
+	waitEnvelope(t, inbound)
+
+	reaction, err := h.server.WaitForReaction(testContext(t), 10, update.Message.ID)
+	if err != nil {
+		t.Fatalf("wait reaction: %v", err)
+	}
+	if reaction.ChatID != 10 {
+		t.Errorf("reaction chat = %d, want 10", reaction.ChatID)
+	}
+	if reaction.MessageID != update.Message.ID {
+		t.Errorf("reaction message = %d, want %d", reaction.MessageID, update.Message.ID)
+	}
+	if reaction.Emoji != "👀" {
+		t.Errorf("reaction emoji = %q, want 👀", reaction.Emoji)
+	}
+}
+
+func TestEmulatedTelegramShowsTyping(t *testing.T) {
+	h := newEmulatedHarness(t, "42")
+	inbound := make(chan envelope.Envelope, 1)
+	admitted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	h.start(t, func(_ context.Context, env envelope.Envelope) error {
+		select {
+		case admitted <- struct{}{}:
+		default:
+		}
+		<-release
+		inbound <- env
+		return nil
+	})
+
+	h.server.SendText(10, 42, "alice", "typing please")
+	select {
+	case <-admitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the sink to run")
+	}
+
+	action, err := h.server.WaitForChatAction(testContext(t), 10)
+	if err != nil {
+		t.Fatalf("wait chat action: %v", err)
+	}
+	if action.Action != "typing" {
+		t.Errorf("chat action = %q, want typing", action.Action)
+	}
+
+	close(release)
+	env := waitEnvelope(t, inbound)
+	if env.Content.Text != "typing please" {
+		t.Errorf("envelope text = %q", env.Content.Text)
+	}
+}
+
+// TestEmulatedTelegramShowsTypingForFastTurn guards the race where a turn
+// completes before the typing goroutine gets scheduled: the stop path must
+// still wait for the first chat action to be sent.
+func TestEmulatedTelegramShowsTypingForFastTurn(t *testing.T) {
+	h := newEmulatedHarness(t, "42")
+	inbound := make(chan envelope.Envelope, 1)
+	h.start(t, func(_ context.Context, env envelope.Envelope) error {
+		inbound <- env
+		return nil
+	})
+
+	h.server.SendText(10, 42, "alice", "instant reply")
+	env := waitEnvelope(t, inbound)
+	if env.Content.Text != "instant reply" {
+		t.Errorf("envelope text = %q", env.Content.Text)
+	}
+
+	action, err := h.server.WaitForChatAction(testContext(t), 10)
+	if err != nil {
+		t.Fatalf("wait chat action: %v", err)
+	}
+	if action.Action != "typing" {
+		t.Errorf("chat action = %q, want typing", action.Action)
+	}
+}
+
+func TestEmulatedTelegramRegistersCommands(t *testing.T) {
+	h := newEmulatedHarness(t, "42")
+	h.start(t, func(context.Context, envelope.Envelope) error { return nil })
+	if h.adapter.username != "acolyte_test_bot" {
+		t.Errorf("adapter username = %q, want acolyte_test_bot", h.adapter.username)
+	}
+
+	commands, err := h.server.WaitForCommands(testContext(t))
+	if err != nil {
+		t.Fatalf("wait commands: %v", err)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("commands = %+v, want exactly one", commands)
+	}
+	if commands[0].Command != "new" {
+		t.Errorf("command = %q, want new", commands[0].Command)
+	}
+	if strings.TrimSpace(commands[0].Description) == "" {
+		t.Error("command description is empty")
+	}
+}
+
+func TestEmulatedTelegramReactionFailureDoesNotBlock(t *testing.T) {
+	h := newEmulatedHarness(t, "42")
+	inbound := make(chan envelope.Envelope, 1)
+	h.start(t, func(_ context.Context, env envelope.Envelope) error {
+		inbound <- env
+		return nil
+	})
+
+	h.server.FailNext("setMessageReaction", 500, "Internal Server Error")
+	h.server.SendText(10, 42, "alice", "the reaction will fail")
+
+	env := waitEnvelope(t, inbound)
+	if env.Content.Text != "the reaction will fail" {
+		t.Errorf("envelope text = %q", env.Content.Text)
+	}
+	waitCondition(t, "the failed reaction call", func() bool {
+		return h.server.Calls("setMessageReaction") >= 1
+	})
+	if reactions := h.server.Reactions(); len(reactions) != 0 {
+		t.Errorf("reactions = %+v, want none after a failed call", reactions)
 	}
 }

@@ -39,6 +39,8 @@ An adapter is started only when:
   payload is cleared only after admission/linkage, and failed rows are retried.
 - Durable outbound delivery: every reply is written to `comm_tg_outbox`; the adapter attempts it
   immediately and retries transient failures with bounded backoff.
+- Immediate channel feedback: the 👀 acknowledgment reaction and the `typing` indicator are
+  adapter-local and best-effort; neither blocks admission or the turn.
 - It does **not** store conversation content. Inbound rows keep routing metadata and OpenCode
   message IDs; outbound text is cleared once delivery reaches `sent` or `failed`. The OpenCode
   session remains the source of truth.
@@ -61,4 +63,4 @@ Envelope bus (in/out), the shared store pool, the cron service (for scheduled se
 | Channel | Doc | Status |
 | ------- | --- | ------ |
 | Telegram | [`telegram.md`](telegram.md) | v0 |
-| agent-mail / agent-im / agent-post | — | deferred (`FUTURE-IDEAS.md`) |
+| agent-mail / agent-im / agent-post | — | deferred ([#113](https://github.com/Martins6/acolyte/issues/113)) |
