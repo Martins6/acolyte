@@ -8,6 +8,16 @@ Telegram adapter: parse Telegram updates into Envelopes (inbound) and deliver En
 Telegram messages (outbound). One adapter runs per agent, bound to that agent's bot token and
 workspace.
 
+## Create the bot
+
+1. Open Telegram and search for [`@BotFather`](https://t.me/BotFather).
+2. Send `/newbot`, follow the prompts, and copy the token it returns.
+3. Store the token as `TELEGRAM_BOT_TOKEN` in `$ACOLYTE_HOME/.env` or in `<workspace>/.env` (see
+   [Config](#config) for precedence).
+
+Each agent needs a distinct token: two agents sharing one cannot poll Telegram at the same time, so
+the daemon starts one and warns about the rest.
+
 ## Inbound
 
 - Receives Telegram updates (messages, photos, documents, audio, voice, video).
