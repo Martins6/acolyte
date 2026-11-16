@@ -9,7 +9,7 @@ installed version.
 | Command | Description |
 | ------- | ----------- |
 | `acolyte new --name <n> --workspace-folder <p> [--config '<json>']` | Scaffold, validate, and register an agent; `--config` is optional ([config reference](README.md#creating-an-agent)). |
-| `acolyte config <agent> get\|set\|edit [value] [--json] [--dry-run]` | Read or update an agent's runtime capabilities ([`orchestrator/config.md`](orchestrator/config.md)). |
+| `acolyte config <agent> get\|set\|edit\|env [value] [--json] [--dry-run]` | Read or update an agent's runtime capabilities; `env [key]` prints secrets and their winning source ([`orchestrator/config.md`](orchestrator/config.md)). |
 | `acolyte status [name\|workspace]` | List agents, or show one agent's channels, allowed users, last message, jobs, and activity. |
 | `acolyte delete <name\|workspace>` | Remove an agent from the registry; the workspace folder is kept. |
 | `acolyte attach [--agent-name <n>] [--session-id <id>]` | Attach the OpenCode TUI to the agent session ([`orchestrator/daemon.md`](orchestrator/daemon.md)). |
@@ -40,6 +40,12 @@ installed version.
 | `acolyte install-service [--user\|--system\|--print]` | Install the daemon as a crash-restarting service ([`orchestrator/autostart.md`](orchestrator/autostart.md)). |
 | `acolyte update [--check]` | Check for and apply releases ([`updating.md`](updating.md)). |
 | `acolyte version [--short]` | Print the binary version. |
+
+## Global flag
+
+`--env KEY=VALUE` is repeatable and works on every command. It overrides secrets for that invocation
+only, and wins over the process environment, `<workspace>/.env`, and `$ACOLYTE_HOME/.env` (in that
+order). `acolyte config <agent> env [key]` reports the winning source per key and masks the value.
 
 ## Targeting an agent
 

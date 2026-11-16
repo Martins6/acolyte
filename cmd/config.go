@@ -46,7 +46,7 @@ type configFlags struct {
 }
 
 var configCmd = &cobra.Command{
-	Use:   "config <agent> <get|set|edit> [value]",
+	Use:   "config <agent> <get|set|edit|env> [value]",
 	Short: "Inspect or update an agent's runtime capabilities",
 	Long: `Inspect or update the runtime capabilities of a registered agent.
 
@@ -102,7 +102,7 @@ func runConfigCommand(w io.Writer, args []string, flags configFlags) error {
 		return fmt.Errorf("config: agent name or workspace is required")
 	}
 	if len(args) < 2 {
-		return fmt.Errorf("config: missing subcommand for %q (use get, set, or edit)", ref)
+		return fmt.Errorf("config: missing subcommand for %q (use get, set, edit, or env)", ref)
 	}
 	sub := args[1]
 	if flags.DryRun && sub != "set" {
