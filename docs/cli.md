@@ -42,9 +42,13 @@
 
 ## Targeting an agent
 
-Commands that act on an agent accept `--agent-name <name>` **xor** `--workspace-folder <path>`.
-When neither is passed they fall back to `$ACOLYTE_WORKSPACE_PATH` and then the current directory,
-which must be a registered agent workspace.
+Flag-targeted commands (`run`, `inspect`, `attach`, `inbox`, `notify-user`, `cron`, and `memory
+export`/`import`) accept `--agent-name <name>` **xor** `--workspace-folder <path>`. When neither is
+passed they fall back to `$ACOLYTE_WORKSPACE_PATH` and then the current directory, which must be a
+registered agent workspace.
+
+Other commands take the target differently: `config`, `status`, and `delete` take an agent name or
+workspace path as a positional argument, while `new` requires both `--name` and `--workspace-folder`.
 
 An explicit `--session-id` must already be mapped to the target agent; sessions are global in
 OpenCode, so this check keeps an inbox or cron event inside the selected agent.
