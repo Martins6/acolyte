@@ -62,23 +62,25 @@ go test -tags=e2e ./e2e/... -v -count=1
 
 The live suite is deliberately small (three live turns plus one zero-cost failure case, including one
 turn through the Telegram emulator and the real daemon). CI runs the unit and Telegram emulator
-suites on every PR. The live job runs after merges to `dev` (and on manual dispatch), not on PRs,
-because the provider credential must not be exposed to PR-controlled code. It has a hard 15-minute
-timeout.
+suites on every PR. In `.github/workflows/test.yml` the live job runs after merges to `dev` (and on
+manual dispatch), never on PRs, because the provider credential must not be exposed to PR-controlled
+code. It has a hard 15-minute timeout.
 
 ## GitHub workflows
 
 - `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR (`test / unit`), plus
   a dedicated hermetic `test / telegram` job for the Bot API emulator suite. After merges to `dev`
   (and on manual dispatch) it starts the managed OpenCode service with `OPENCODE_GO_API_KEY` and
-  runs the live E2E suite as `test / e2e`, capped at 15 minutes. PRs never receive the provider
-  credential.
+  runs the live E2E suite as `test / e2e`, capped at 15 minutes. PR jobs in this workflow never
+  receive the provider credential.
 - `.github/workflows/opencode-review.yml` — reviews every non-draft PR opened by the repository
   owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs
-  from any other author never trigger the agent. Each review posts exactly one PR review whose body
-  starts with a `## Verdict` heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching label, and
-  splits findings into **Necessary** (must fix) and **Non-necessary** (optional). Every new commit
-  re-runs the review on the latest diff.
+  from any other author never trigger the agent. Because it calls the `opencode-go` model on the PR,
+  this workflow *does* receive `OPENCODE_GO_API_KEY`, but only for the owner's non-draft PRs from
+  this repository. Each review posts exactly one PR review whose body starts with a `## Verdict`
+  heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching label, and splits findings into
+  **Necessary** (must fix) and **Non-necessary** (optional). Every new commit re-runs the review on
+  the latest diff.
 - `.github/workflows/pr-guard.yml` — verifies that a PR to `main` comes from `dev` in this repository
   and posts a `pr-guard` commit status on the PR head SHA, from the base-branch definition via
   `pull_request_target`, so a PR cannot redefine its own gate.

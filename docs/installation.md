@@ -50,10 +50,11 @@ Options:
 | `-v, --version <tag>` | Install a specific release, for example `v0.7.0`, instead of the latest. |
 | `-h, --help` | Print usage. |
 
-For a system-wide install, pass the prefix through `bash -s --`:
+For a system-wide install, run the script with enough privileges — the prefix must be writable by the
+user running it:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/martins6/acolyte/main/install.sh | bash -s -- -p /usr/local/bin
+curl -sSL https://raw.githubusercontent.com/martins6/acolyte/main/install.sh | sudo bash -s -- -p /usr/local/bin
 ```
 
 ## Development install
