@@ -57,5 +57,6 @@ The other commands take a target differently:
 - `cron list`, `cron routine-list`, and `cron tick` are global. `cron view` and `cron rm` scan every
   agent when no target flag is passed, and report ambiguity when several agents use the same title.
 
-An explicit `--session-id` must already be mapped to the target agent; sessions are global in
-OpenCode, so this check keeps an inbox or cron event inside the selected agent.
+`--session-id` is checked against the target agent's session mappings by `run`, `inbox`, and
+`cron`, and by `inspect` when a target is given, so an event cannot land in another agent's session.
+`notify-user --session-id` is attribution-only and skips that check.
