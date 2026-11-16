@@ -4,6 +4,18 @@ Acolyte is *powered by OpenCode*. It layers high-level modules on top of the eng
 both the **module documentation index** and the **complete `acolyte new` config reference** — every
 flag and every `--config` key in the system.
 
+## Start here
+
+| If you want to… | Read |
+| --------------- | ---- |
+| Install Acolyte | [`installation.md`](installation.md) |
+| Set up the first agent | [`../README.md`](../README.md) (quick setup) |
+| Look up a command or flag | [`cli.md`](cli.md) |
+| Understand the workspace folder | [`workspace.md`](workspace.md) |
+| Find logs | [`logging.md`](logging.md) |
+| Update the binary | [`updating.md`](updating.md) |
+| Build, test, or land a change | [`development.md`](development.md) |
+
 ---
 
 ## Creating an agent
@@ -181,6 +193,12 @@ Routines are added by modules; see `docs/<module>/` for each routine's behavior.
 ```
 docs/
 ├── README.md                       ← this file (index + `acolyte new` config reference)
+├── installation.md                 ← prerequisites, Homebrew, install script, dev install
+├── cli.md                          ← every command + flags, grouped by task
+├── workspace.md                    ← the `<workspace>/` layout `acolyte new` creates
+├── logging.md                      ← daemon logs + per-agent audit events
+├── updating.md                     ← `acolyte update` and release verification
+├── development.md                  ← structure, dependencies, tests, CI workflows
 ├── memory/
 │   ├── README.md                   ← Memory intent + sub-components + value semantics
 │   ├── memory-load/<mode>.md
