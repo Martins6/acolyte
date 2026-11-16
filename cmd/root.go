@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -43,7 +44,9 @@ func secretOverrides() (map[string]string, error) {
 		key, value, ok := strings.Cut(raw, "=")
 		key = strings.TrimSpace(key)
 		if !ok || key == "" {
-			return nil, fmt.Errorf("invalid --env %q: expected KEY=VALUE", raw)
+			// Never echo the argument: a malformed --env may still carry a
+			// secret value after the '='.
+			return nil, errors.New("invalid --env argument: expected KEY=VALUE with a non-empty key")
 		}
 		overrides[key] = value
 	}

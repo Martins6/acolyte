@@ -546,10 +546,14 @@ func TestSecretOverridesFlags(t *testing.T) {
 		t.Errorf("overrides = %v, want A=1 and B=last", got)
 	}
 
-	for _, flags := range [][]string{{"novalue"}, {"=value"}, {" =value"}} {
+	for _, flags := range [][]string{{"novalue"}, {"=s3cret-value"}, {" =s3cret-value"}} {
 		envFlags = flags
-		if _, err := secretOverrides(); err == nil || !strings.Contains(err.Error(), "expected KEY=VALUE") {
+		_, err := secretOverrides()
+		if err == nil || !strings.Contains(err.Error(), "expected KEY=VALUE") {
 			t.Errorf("secretOverrides(%v) error = %v, want expected-KEY=VALUE error", flags, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "s3cret-value") {
+			t.Errorf("secretOverrides(%v) error leaks the value: %v", flags, err)
 		}
 	}
 }
