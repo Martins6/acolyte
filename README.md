@@ -46,6 +46,17 @@ Or follow along to manually set up:
    }'
    ```
 
+   Acolyte is composed of 4 plug-and-play modules:
+
+   - Orchestrator: when to use Acolyte. Routine jobs and also quick checks.
+   - Learner: what to remember and how to learn from past sessions.
+   - Communicator: how to talk to an acolyte agent using services: CLI, Telegram and whatever else is wanted.
+   - Socializer: how to talk to other acolyte agents that are registered into the network.
+
+   [docs/](docs/) describes the multiple features you can add to those four modules.
+
+   All the four modules do not modify the core OpenCode agentic engine. It uses its resources, such as skills, CLI binaries via the shell tool, plugins, OpenCode native tools and API contracts. It builds around the OpenCode engine only if needed, otherwise tries to be as OpenCode native as possible. The reason being is that they have a great open-source product.
+
 4. Configure your secrets
 
    Acolyte loads secrets from two optional `.env` files:
