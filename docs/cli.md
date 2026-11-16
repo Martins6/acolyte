@@ -42,13 +42,20 @@
 
 ## Targeting an agent
 
-Flag-targeted commands (`run`, `inspect`, `attach`, `inbox`, `notify-user`, `cron`, and `memory
-export`/`import`) accept `--agent-name <name>` **xor** `--workspace-folder <path>`. When neither is
-passed they fall back to `$ACOLYTE_WORKSPACE_PATH` and then the current directory, which must be a
-registered agent workspace.
+For `run`, `attach`, `inbox`, `notify-user`, `memory export`, `memory import`, and `cron` job
+creation, the target is `--agent-name <name>` **xor** `--workspace-folder <path>`. With neither
+flag the command falls back to `$ACOLYTE_WORKSPACE_PATH` and then the current directory, which must
+be a registered agent workspace.
 
-Other commands take the target differently: `config`, `status`, and `delete` take an agent name or
-workspace path as a positional argument, while `new` requires both `--name` and `--workspace-folder`.
+The other commands take a target differently:
+
+- `config`, `status`, and `delete` take the agent name or workspace path as a positional argument;
+  `status` with no argument lists every agent. `new` takes `--name` and `--workspace-folder` and
+  does not accept `--agent-name`.
+- `inspect` scans every registered agent for the session when neither target flag is passed; with a
+  target flag, the session must be mapped to that agent.
+- `cron list`, `cron routine-list`, and `cron tick` are global. `cron view` and `cron rm` scan every
+  agent when no target flag is passed, and report ambiguity when several agents use the same title.
 
 An explicit `--session-id` must already be mapped to the target agent; sessions are global in
 OpenCode, so this check keeps an inbox or cron event inside the selected agent.
