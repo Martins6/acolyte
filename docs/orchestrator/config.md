@@ -1,14 +1,16 @@
-# Runtime config — `acolyte config <agent> get|set|edit`
+# Runtime config — `acolyte config <agent> get|set|edit|env`
 
 `acolyte new` bakes capabilities at creation; `acolyte config` changes them in place afterwards.
 There is still **no `.acolyte.jsonc`** (SPEC §4): every key maps onto the same artifacts
 `acolyte new` writes — `opencode.jsonc`, the registry, and the per-agent store
-(`<workspace>/.acolyte.sqlite.db`).
+(`<workspace>/.acolyte.sqlite.db`). `env` is the exception: it is read-only and reports the
+secrets layers, not a capability.
 
 ```bash
 acolyte config <agent> get [--json]
 acolyte config <agent> set <key> <value> [--dry-run] [--json]
 acolyte config <agent> edit [--json]
+acolyte config <agent> env [key] [--json]
 ```
 
 `<agent>` is an agent name or a workspace path (the same resolver as `acolyte status`).
@@ -85,6 +87,38 @@ Opens `<workspace>/opencode.jsonc` in `$EDITOR` (fallback `vi`), then validates 
 An invalid save is rolled back to the previous content, so a bad edit cannot leave the agent's
 engine config broken. `edit` never touches cron or store state.
 
+## `env`
+
+Prints where each secret comes from — the same resolution the daemon and cron shell jobs use:
+
+| Priority | Source | Label |
+| -------- | ------ | ----- |
+| 1 (highest) | `--env KEY=VALUE` on this invocation | `cli` |
+| 2 | process environment | `process` |
+| 3 | `<workspace>/.env` | `.env-workspace` |
+| 4 | `$ACOLYTE_HOME/.env` | `.env-global` |
+
+Without a key, `env` lists every key declared in `--env` or either `.env` file (process-only
+keys are not enumerated). With a key, it resolves that key from all four layers, so a
+process-only secret still reports `process`.
+
+```text
+$ acolyte config valet env
+Agent:     valet
+Workspace: /Users/me/agents/valet
+
+CONFIG                                           VALUE
+CONFIG-TELEGRAM_BOT_TOKEN:.env-workspace         …cdef
+CONFIG-OPENROUTER_API_KEY:.env-global            …9a12
+```
+
+Values are always masked (last four characters only); the label names the layer and the
+`Workspace:` line names the file for `.env-workspace`. `--json` prints
+`{"agent","workspace","env":[{"key","source","label","value"}]}` with the same masked value,
+and an unknown key is an error instead of an empty line.
+
+`env` never writes files, never mutates the registry or store, and does not affect `set` keys.
+
 ## Examples
 
 ```bash
@@ -109,4 +143,8 @@ acolyte config valet set memory-load null
 # Telegram access
 acolyte config valet set communication.telegram.allowed_users '@alice, @bob'
 acolyte config valet set communication.channels '[]'   # disable channels
+
+# Secrets provenance
+acolyte config valet env
+acolyte config valet env TELEGRAM_BOT_TOKEN
 ```

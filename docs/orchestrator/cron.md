@@ -17,6 +17,9 @@
 - **`$SHELL`** — shell jobs run the script with the user's `$SHELL` (e.g. zsh), never hardcoded `sh`.
   Installed services bake `$SHELL` from the installing shell into the unit (see
   [autostart](autostart.md)).
+- **Secrets** — shell jobs receive the layered environment: `--env KEY=VALUE` (highest), process
+  env, `<workspace>/.env`, `$ACOLYTE_HOME/.env` (see `SPEC.md` §4). Use
+  `acolyte config <agent> env` to check which layer wins.
 - **Target** — `--agent-name <name>` **xor** `--workspace-folder <path>` (if neither, use
   `$ACOLYTE_WORKSPACE_PATH`, then infer from a valid pwd); optional `--session-id <id>` targets that
   session for `prompt`/`shell` jobs. Routine jobs reject `--session-id` and always run in

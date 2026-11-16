@@ -61,6 +61,9 @@ type Options struct {
 	MaxConcurrency  int
 	Now             func() time.Time
 	Shell           string
+	// Env holds CLI --env KEY=VALUE overrides for shell jobs. They win over
+	// the process environment and both .env files.
+	Env map[string]string
 }
 
 type agentStore struct {
@@ -76,6 +79,7 @@ type Service struct {
 	sink            Sink
 	turn            TurnRunner
 	shell           string
+	env             map[string]string
 	now             func() time.Time
 	interval        time.Duration
 	refreshInterval time.Duration
@@ -143,6 +147,7 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		sink:            opts.Sink,
 		turn:            opts.OpenCode,
 		shell:           opts.Shell,
+		env:             opts.Env,
 		now:             opts.Now,
 		interval:        opts.Interval,
 		refreshInterval: opts.RefreshInterval,

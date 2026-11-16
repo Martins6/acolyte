@@ -104,14 +104,16 @@ acolyte new --name valet --workspace-folder ~/agents/valet --config '{
 ## Runtime config
 
 ```bash
-acolyte config <agent> get|set|edit
+acolyte config <agent> get|set|edit|env
 ```
 
 `<agent>` is an agent name or a workspace path. `get` prints the effective config as JSON in the
 exact `--config` shape above (engine from `opencode.jsonc`, identity from the registry, comm
 settings from `comm_tg_settings`, schedule/memory from `orch_settings` + the dream/heartbeat
 jobs). `edit` opens `<workspace>/opencode.jsonc` in `$EDITOR` (fallback `vi`) and re-validates it
-as JSONC with sane `model`/`default_agent` values — an invalid edit is rolled back.
+as JSONC with sane `model`/`default_agent` values — an invalid edit is rolled back. `env [KEY]`
+reports secret provenance (`CONFIG-<KEY>:<source>`, masked values) from the same layering the
+daemon uses.
 
 `set <key> <value>` supports every `--config` key except nested engine/mode overrides that v0
 does not own:
@@ -144,15 +146,21 @@ See [`orchestrator/config.md`](orchestrator/config.md) for the full walkthrough.
 
 ## Secrets
 
-Acolyte loads two optional `.env` files:
+Acolyte resolves secrets in layers, highest priority first:
 
-- `$ACOLYTE_HOME/.env` — global secrets (bot tokens, shared keys).
-- `<workspace>/.env` — per-agent secrets; overrides the global file for that agent.
+1. `--env KEY=VALUE` on the invocation (repeatable; never written to disk).
+2. The process environment.
+3. `<workspace>/.env` — per-agent secrets.
+4. `$ACOLYTE_HOME/.env` — global secrets (bot tokens, shared keys).
 
-Precedence is **process environment > `<workspace>/.env` > `$ACOLYTE_HOME/.env`**. Both files are
-gitignored and are never scaffolded by `acolyte new`; secrets belong there, never in
-`opencode.jsonc` or any tracked file. Model-provider credentials are managed by OpenCode, not
-these files: run `opencode auth login` to store them in OpenCode's auth store.
+`acolyte config <agent> env [KEY]` prints each key's winning layer as
+`CONFIG-<KEY>:<source>` (`.env-global`, `.env-workspace`, `process`, or `cli`) with a
+masked value; `--json` returns `{agent, workspace, env: [{key, source, label, value}]}`.
+The daemon and cron shell jobs use the same resolver, so the CLI view is the runtime view.
+
+Both files are gitignored and are never scaffolded by `acolyte new`; secrets belong there,
+never in `opencode.jsonc` or any tracked file. Model-provider credentials are managed by
+OpenCode, not these files: run `opencode auth login` to store them in OpenCode's auth store.
 
 ---
 

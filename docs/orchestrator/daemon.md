@@ -69,5 +69,7 @@ OpenCode session/message IDs needed to join the two.
 
 Capabilities are baked by `acolyte new` and can be changed in place with
 `acolyte config <agent> get|set|edit` (channels, allowed users, schedule, engine, memory keys; see
-[`config.md`](config.md)). `acolyte new` still preserves existing settings/jobs when it adopts a
+[`config.md`](config.md)). `acolyte config <agent> env [KEY]` shows which secret layer wins
+(`--env`, process env, `.env-workspace`, `.env-global`) without printing the value.
+`acolyte new` still preserves existing settings/jobs when it adopts a
 folder. New modes/channels remain deferred in [#113](https://github.com/Martins6/acolyte/issues/113).

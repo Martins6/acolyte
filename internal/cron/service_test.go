@@ -1181,3 +1181,26 @@ func TestShellWithoutSHELLFails(t *testing.T) {
 		t.Errorf("log message = %q, want $SHELL error", message)
 	}
 }
+
+func TestShellEnvCLIOverridesDotEnv(t *testing.T) {
+	_, ws, _ := setupCron(t)
+	if err := os.WriteFile(filepath.Join(ws, ".env"), []byte("ACOLYTE_TEST_SHELL_ENV=workspace\n"), 0600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	t.Setenv("ACOLYTE_TEST_SHELL_ENV", "process")
+	script := filepath.Join(t.TempDir(), "env.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$ACOLYTE_TEST_SHELL_ENV\"\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	service := &Service{shell: "/bin/sh", env: map[string]string{"ACOLYTE_TEST_SHELL_ENV": "cli"}}
+	out, err := service.runShell(context.Background(), registry.Agent{Name: "valet", Workspace: ws}, orch.CronJob{
+		Title: "env", ShellPath: script,
+	}, jobMeta{TimeoutSeconds: 10})
+	if err != nil {
+		t.Fatalf("runShell() error: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "cli" {
+		t.Errorf("shell env = %q, want cli override", got)
+	}
+}

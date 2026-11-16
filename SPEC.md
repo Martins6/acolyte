@@ -99,13 +99,17 @@ and the **`acolyte` CLI** (plus `CONFIG.md` for orientation).
 | Scheduled capabilities (heartbeat, dream/learn runs, tasks)            | cron jobs                                                      | `acolyte cron list`                                                              |
 | Identity (name, description), comms settings (channels, allowed users) | registry / agent DB                                            | `acolyte status` (identity/activity), `acolyte config <agent> get` (full config) |
 | Persona / self-description                                             | `.acolyte/*.md`                                                | loaded into context (memory-load)                                                |
-| Secrets (bot token, API keys)                                          | `$ACOLYTE_HOME/.env` (global) + `<workspace>/.env` (per-agent) | never in-repo; loaded by the daemon/CLI                                          |
+| Secrets (bot token, API keys)                                          | `$ACOLYTE_HOME/.env` (global) + `<workspace>/.env` (per-agent) + `--env` overrides | never in-repo; `acolyte config <agent> env [KEY]` reports the winning layer              |
 
-**Secrets precedence [DECISION]:** existing process env > `<workspace>/.env` > `$ACOLYTE_HOME/.env`.
-Both files are gitignored and never scaffolded by `acolyte new`. Workspace values are scoped to that
-agent (returned as a per-agent map, not applied with a process-global `os.Setenv`), so one daemon can
-serve many agents without leaking secrets between them. Provider credentials may still live in
-OpenCode's own auth store.
+**Secrets precedence [DECISION]:** `--env KEY=VALUE` on the invocation > existing process env >
+`<workspace>/.env` > `$ACOLYTE_HOME/.env`. The CLI and the runtime (daemon adapters, cron shell
+jobs) resolve through the same `internal/secrets` code, and every value carries its source:
+`acolyte config <agent> env [KEY]` prints `CONFIG-<KEY>:<source>` labels
+(`.env-global`, `.env-workspace`, `process`, `cli`) with masked values. Both files are gitignored
+and never scaffolded by `acolyte new`. Workspace values are scoped to that agent (returned as a
+per-agent map, not applied with a process-global `os.Setenv`), so one daemon can serve many agents
+without leaking secrets between them. Provider credentials may still live in OpenCode's own auth
+store.
 
 **`opencode.jsonc` is shared + live-editable** (§5): Acolyte seeds it at `acolyte new`; any module may
 extend it (add tools/skills); **the agent may edit it on the fly** (OpenCode reloads on save). Rule:
@@ -532,12 +536,14 @@ Two ways to move a message (both target an agent/session like the CLI below):
 
 Common targeting flags: `--agent-name <name>` **xor** `--workspace-folder <path>` (if neither, infer
 from a valid pwd), and `--session-id <id>` (optional; default = latest session for `prompt`/`shell`;
-`routine` jobs reject it because they own a `cron:<job ID>` session).
+`routine` jobs reject it because they own a `cron:<job ID>` session). Every command also accepts a
+repeatable `--env KEY=VALUE`, which is the highest-precedence secrets layer for that invocation
+(§4).
 
 | Command                                                                                                                                                                                                                                                                                        | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `acolyte new --name <name> --workspace-folder <path> --config '<json>'`                                                                                                                                                                                                                        | **Scaffold + validate + register** a fresh agent with the capabilities chosen in `--config` (full key reference in [`docs/README.md`](docs/README.md)). On an existing folder it validates + adopts.                                                                                                                                                                                                                                                      |
-| `acolyte config <agent> get \| set <key> <value> \| edit`                                                                                                                                                                                                                                      | **Runtime capability mutation** (§4): `get` prints the effective config as `--config`-shaped JSON; `set` updates one durable key (`description`, `engine.model/agent`, `communication.*`, `schedule.*`, `memory-*`) with validate-before-write, `--dry-run` diffs, and `--json`; `edit` opens `opencode.jsonc` in `$EDITOR` and re-validates it (invalid edits are rolled back). Reference: [`docs/orchestrator/config.md`](docs/orchestrator/config.md). |
+| `acolyte config <agent> get \| set <key> <value> \| edit \| env [key]`                                                                                                                                                                                                                         | **Runtime capability mutation** (§4): `get` prints the effective config as `--config`-shaped JSON; `set` updates one durable key (`description`, `engine.model/agent`, `communication.*`, `schedule.*`, `memory-*`) with validate-before-write, `--dry-run` diffs, and `--json`; `edit` opens `opencode.jsonc` in `$EDITOR` and re-validates it (invalid edits are rolled back); `env [key]` lists the layered secrets with `CONFIG-<KEY>:<source>` provenance labels and masked values (`--json` for scripts). Reference: [`docs/orchestrator/config.md`](docs/orchestrator/config.md). |
 | `acolyte status [name \| workspace]`                                                                                                                                                                                                                                                           | All agents, or one: name, workspace, channels, allowed Telegram users, last message timestamp, last active timestamp, job count + next job. The last message time is the newest inbound `received_at` or delivered outbound `sent_at`; message text stays in OpenCode/communication history. Full config remains available through `acolyte config <agent> get`.                                                                                          |
 | `acolyte delete <name \| workspace>`                                                                                                                                                                                                                                                           | Remove from the registry **only**. Folder untouched.                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `acolyte cron --title <t> --datetime <cron> (--prompt <text> \| --shell <path> \| --routine <name>) [--routine-args '<json>'] [--dry-run] [--agent-name\|--workspace-folder] [--session-id] [--timezone <IANA>] [--on-success inbox\|notify-user\|log] [--on-failure inbox\|notify-user\|log]` | Create a job. `--title` unique per agent; `--datetime` cron syntax; actions mutually exclusive; agent-name/workspace-folder mutually exclusive; `--dry-run` only with `--routine`; `--session-id` is rejected for `--routine`.                                                                                                                                                                                                                            |
@@ -729,9 +735,11 @@ admit a synthetic event; output is routed via Communication.
 notify-user`** = user-only, never agent, never session (v0 `notify`) (§10.4).
 21. **`synthetic`/`inbox` validated by spike** (2026-11-05, OpenCode v2.2.5): external events reach
     the model + trigger reactions; confirmed request shapes in §5.2; no `--trusted` marker needed.
-22. **Secrets = two-tier `.env`** (§4): `$ACOLYTE_HOME/.env` (global) + `<workspace>/.env`
-    (per-agent); precedence process env > workspace > global; workspace values are scoped, never
-    process-global. Both files are gitignored and never scaffolded.
+22. **Secrets = layered config** (§4): `--env KEY=VALUE` (highest) > process env >
+    `<workspace>/.env` > `$ACOLYTE_HOME/.env`; CLI and runtime share one resolver, and
+    `acolyte config <agent> env` reports `CONFIG-<KEY>:<source>` provenance with masked values.
+    Workspace values are scoped, never process-global. Both files are gitignored and never
+    scaffolded.
 23. **One daemon serves all registered agents** (§1/§14); per-agent isolation and supervision
     hardening is deferred ([#113](https://github.com/Martins6/acolyte/issues/113)).
 24. **`acolyte status` uses fan-out reads in v0** (§12); the `agent_status` snapshot cache is deferred.
