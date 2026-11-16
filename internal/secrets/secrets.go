@@ -190,12 +190,10 @@ func (s *Secrets) Environ() []string {
 			continue
 		}
 		seen[key] = true
-		value, hasValue := s.values[key]
+		// An exported variable beats both .env files; only a CLI override
+		// may replace it.
 		if override, ok := s.overrides[key]; ok {
-			value, hasValue = override, true
-		}
-		if hasValue {
-			env = append(env, key+"="+value)
+			env = append(env, key+"="+override)
 			continue
 		}
 		env = append(env, entry)

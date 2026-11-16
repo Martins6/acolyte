@@ -267,6 +267,31 @@ func TestKeysIncludesFilesAndOverridesOnly(t *testing.T) {
 	}
 }
 
+func TestEnvironProcessBeatsFiles(t *testing.T) {
+	const key = "ACOLYTE_TEST_ENVIRON_PROCESS"
+	home := testHome(t)
+	ws := t.TempDir()
+	writeEnv(t, filepath.Join(home, ".env"), key+"=global\n")
+	writeEnv(t, filepath.Join(ws, ".env"), key+"=workspace\n")
+	t.Setenv(key, "process")
+
+	s, err := Load(ws)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got := environValue(t, s.Environ(), key); got != "process" {
+		t.Errorf("Environ()[%s] = %q, want process (exported value must beat .env files)", key, got)
+	}
+
+	overridden, err := Load(ws, WithOverrides(map[string]string{key: "cli"}))
+	if err != nil {
+		t.Fatalf("Load(overrides) error: %v", err)
+	}
+	if got := environValue(t, overridden.Environ(), key); got != "cli" {
+		t.Errorf("Environ()[%s] = %q, want cli override", key, got)
+	}
+}
+
 func TestEnvironCLIOverrideWinsOverProcess(t *testing.T) {
 	testHome(t)
 	t.Setenv("ACOLYTE_TEST_ENVIRON_CLI", "process")
@@ -296,4 +321,20 @@ func cut(entry string) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+func environValue(t *testing.T, env []string, key string) string {
+	t.Helper()
+	value := ""
+	found := 0
+	for _, entry := range env {
+		if name, entryValue, ok := cut(entry); ok && name == key {
+			value = entryValue
+			found++
+		}
+	}
+	if found == 0 {
+		t.Fatalf("Environ() is missing %s", key)
+	}
+	return value
 }
