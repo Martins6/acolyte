@@ -24,7 +24,17 @@ Or follow along to manually set up:
 
    No Homebrew? Use the install script instead: `curl -sSL https://raw.githubusercontent.com/martins6/acolyte/main/install.sh | bash`. More options in [docs/installation.md](docs/installation.md).
 
-2. Create an agent:
+2. Authenticate with OpenCode
+
+   Acolyte does not store model-provider credentials. It uses OpenCode's auth store, so connect your provider once with the OpenCode CLI:
+
+   ```bash
+   opencode auth login
+   ```
+
+   The managed OpenCode service, and every agent it serves, reuses those credentials.
+
+3. Create an agent:
 
    ```bash
    acolyte new --name valet --workspace-folder ~/agents/valet --config '{
@@ -36,7 +46,7 @@ Or follow along to manually set up:
    }'
    ```
 
-3. Configure your secrets
+4. Configure your secrets
 
    Acolyte loads secrets from two optional `.env` files:
 
@@ -45,7 +55,7 @@ Or follow along to manually set up:
 
    Precedence is **process environment > workspace `.env` > global `.env`**. Both files are gitignored and are never created by `acolyte new`.
 
-4. Start the daemon
+5. Start the daemon
 
    ```bash
    acolyte start
@@ -61,7 +71,7 @@ Or follow along to manually set up:
 
    To keep the daemon running after a crash and start it automatically, install it as a service: `acolyte install-service` (see [Running as a Service](docs/orchestrator/autostart.md)).
 
-5. Talk to it!
+6. Talk to it!
 
    ```bash
    acolyte run "Summarize today's notes" --agent-name valet
