@@ -59,12 +59,30 @@ Or follow along to manually set up:
 
 4. Configure your secrets
 
-   Acolyte loads secrets from two optional `.env` files:
+   Acolyte resolves secrets in layers, highest priority first:
 
-   - `$ACOLYTE_HOME/.env` — global secrets.
-   - `<workspace>/.env` — per-agent secrets, overriding the global file.
+   1. `--env KEY=VALUE` on the invocation, for example `acolyte start --env TELEGRAM_BOT_TOKEN=...` (repeatable, never written to disk).
+   2. The process environment.
+   3. `<workspace>/.env` — per-agent secrets.
+   4. `$ACOLYTE_HOME/.env` — global secrets.
 
-   Precedence is **process environment > workspace `.env` > global `.env`**. Both files are gitignored and are never created by `acolyte new`.
+   `acolyte config <agent> env` prints the winning layer for each key as `CONFIG-<KEY>:<source>` (`.env-global`, `.env-workspace`, `process`, or `cli`) with a masked value. Both files are gitignored and are never created by `acolyte new`.
+
+   These files are not passed to OpenCode. Model-provider credentials belong in OpenCode's auth store (`opencode auth login`).
+
+   ```bash
+   # Global (shared) secrets
+   echo 'TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN' >> "${ACOLYTE_HOME:-$HOME/.acolyte}/.env"
+
+   # Optional per-agent override
+   echo 'TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN' >> ~/agents/valet/.env
+
+   # One-off override for a single daemon run
+   acolyte start --env TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
+
+   # Where is the token actually coming from?
+   acolyte config valet env TELEGRAM_BOT_TOKEN
+   ```
 
 5. Start the daemon
 
@@ -74,7 +92,7 @@ Or follow along to manually set up:
 
    The daemon serves every registered agent:
 
-   - Each agent's Telegram adapter reads its token from the process environment, falling back to `<workspace>/.env` and then `$ACOLYTE_HOME/.env`.
+   - Each agent's Telegram adapter resolves its token as `--env` > process environment > `<workspace>/.env` > `$ACOLYTE_HOME/.env`, logging the winning `CONFIG-<KEY>:<source>` label at startup.
    - Each agent needs a distinct bot token. Two agents sharing a token cannot poll Telegram at the same time; the daemon starts one and warns about the rest.
    - Agents without a token, without Telegram in `communication.channels`, or without allowed users are skipped with a warning.
 

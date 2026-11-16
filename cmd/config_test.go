@@ -268,6 +268,8 @@ func TestRunConfigCommandDispatch(t *testing.T) {
 		{args: []string{"valet", "get", "extra"}, wantErr: "usage:"},
 		{args: []string{"valet", "set", "engine.model"}, wantErr: "usage:"},
 		{args: []string{"valet", "edit", "extra"}, wantErr: "usage:"},
+		{args: []string{"valet", "env", "A", "B"}, wantErr: "usage:"},
+		{args: []string{"valet", "env", " "}, wantErr: "usage:"},
 		{args: []string{"valet", "get"}, flags: configFlags{DryRun: true}, wantErr: "--dry-run is only valid"},
 		{args: []string{"", "get"}, wantErr: "required"},
 	}
@@ -350,5 +352,204 @@ func TestRunConfigSetDryRunDoesNotTouchStore(t *testing.T) {
 	}
 	if len(raw) != 0 {
 		t.Errorf("dry-run migrated the old store (%d bytes)", len(raw))
+	}
+}
+
+func writeSecretsFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func unsetSecretEnv(t *testing.T, key string) {
+	t.Helper()
+	old, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, old)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
+
+func decodeEnvReport(t *testing.T, raw string) envReport {
+	t.Helper()
+	var report envReport
+	if err := json.Unmarshal([]byte(raw), &report); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, raw)
+	}
+	return report
+}
+
+func TestRunConfigEnvListsSources(t *testing.T) {
+	ws := setupCronCLI(t)
+	globalEnv, err := paths.GlobalEnv()
+	if err != nil {
+		t.Fatalf("GlobalEnv() error: %v", err)
+	}
+	writeSecretsFile(t, globalEnv, "TELEGRAM_BOT_TOKEN=global-token-aaaa\nGLOBAL_ONLY=g\n")
+	writeSecretsFile(t, filepath.Join(ws, ".env"), "TELEGRAM_BOT_TOKEN=workspace-token-bbbb\nWORKSPACE_ONLY=w\n")
+	unsetSecretEnv(t, "TELEGRAM_BOT_TOKEN")
+
+	var out bytes.Buffer
+	if err := runConfigEnv(&out, "valet", "", configFlags{}); err != nil {
+		t.Fatalf("runConfigEnv() error: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"Agent:     valet",
+		"CONFIG-GLOBAL_ONLY:.env-global",
+		"CONFIG-WORKSPACE_ONLY:.env-workspace",
+		"CONFIG-TELEGRAM_BOT_TOKEN:.env-workspace",
+		"…bbbb",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "global-token-aaaa") || strings.Contains(text, "workspace-token-bbbb") {
+		t.Errorf("raw secret leaked into output:\n%s", text)
+	}
+}
+
+func TestRunConfigEnvPrecedence(t *testing.T) {
+	const key = "ACOLYTE_TEST_ENV_PRECEDENCE"
+	ws := setupCronCLI(t)
+	globalEnv, err := paths.GlobalEnv()
+	if err != nil {
+		t.Fatalf("GlobalEnv() error: %v", err)
+	}
+	writeSecretsFile(t, globalEnv, key+"=global\n")
+	workspaceEnv := filepath.Join(ws, ".env")
+	writeSecretsFile(t, workspaceEnv, key+"=workspace\n")
+	unsetSecretEnv(t, key)
+
+	resolve := func(flags configFlags) envEntry {
+		t.Helper()
+		flags.JSON = true
+		var out bytes.Buffer
+		if err := runConfigEnv(&out, "valet", key, flags); err != nil {
+			t.Fatalf("runConfigEnv() error: %v", err)
+		}
+		report := decodeEnvReport(t, out.String())
+		if len(report.Env) != 1 {
+			t.Fatalf("env entries = %d, want 1", len(report.Env))
+		}
+		return report.Env[0]
+	}
+
+	if got := resolve(configFlags{}); got.Source != ".env-workspace" || got.Label != "CONFIG-"+key+":.env-workspace" {
+		t.Errorf("workspace = %+v, want .env-workspace", got)
+	}
+
+	if err := os.Remove(workspaceEnv); err != nil {
+		t.Fatalf("remove workspace .env: %v", err)
+	}
+	if got := resolve(configFlags{}); got.Source != ".env-global" || got.Label != "CONFIG-"+key+":.env-global" {
+		t.Errorf("global = %+v, want .env-global", got)
+	}
+
+	t.Setenv(key, "process")
+	if got := resolve(configFlags{}); got.Source != "process" || got.Label != "CONFIG-"+key+":process" {
+		t.Errorf("process = %+v, want process", got)
+	}
+
+	if got := resolve(configFlags{Env: map[string]string{key: "cli"}}); got.Source != "cli" || got.Label != "CONFIG-"+key+":cli" {
+		t.Errorf("cli = %+v, want cli", got)
+	}
+}
+
+func TestRunConfigEnvProcessOnlyKey(t *testing.T) {
+	const key = "ACOLYTE_TEST_PROCESS_ONLY_SECRET"
+	setupCronCLI(t)
+	t.Setenv(key, "process-value-abcd")
+
+	var out bytes.Buffer
+	if err := runConfigEnv(&out, "valet", key, configFlags{JSON: true}); err != nil {
+		t.Fatalf("runConfigEnv() error: %v", err)
+	}
+	report := decodeEnvReport(t, out.String())
+	if len(report.Env) != 1 {
+		t.Fatalf("env entries = %d, want 1", len(report.Env))
+	}
+	if got := report.Env[0]; got.Source != "process" || got.Label != "CONFIG-"+key+":process" || got.Value != "…abcd" {
+		t.Errorf("entry = %+v, want process source and masked value", got)
+	}
+
+	// A process-only key is not part of the declared config, so the full
+	// listing stays focused on --env and the two .env files.
+	out.Reset()
+	if err := runConfigEnv(&out, "valet", "", configFlags{}); err != nil {
+		t.Fatalf("runConfigEnv(list) error: %v", err)
+	}
+	if strings.Contains(out.String(), key) {
+		t.Errorf("full listing included process-only key:\n%s", out.String())
+	}
+}
+
+func TestRunConfigEnvUnknownKey(t *testing.T) {
+	const key = "ACOLYTE_TEST_DEFINITELY_MISSING"
+	setupCronCLI(t)
+	unsetSecretEnv(t, key)
+
+	err := runConfigEnv(&bytes.Buffer{}, "valet", key, configFlags{})
+	if err == nil || !strings.Contains(err.Error(), "not set") {
+		t.Fatalf("error = %v, want not-set error", err)
+	}
+}
+
+func TestRunConfigEnvEmptyListing(t *testing.T) {
+	setupCronCLI(t)
+
+	var out bytes.Buffer
+	if err := runConfigEnv(&out, "valet", "", configFlags{}); err != nil {
+		t.Fatalf("runConfigEnv() error: %v", err)
+	}
+	if !strings.Contains(out.String(), "No secrets declared") {
+		t.Errorf("output = %q, want empty-listing note", out.String())
+	}
+}
+
+func TestMaskSecret(t *testing.T) {
+	cases := map[string]string{
+		"":             "",
+		"abc":          "****",
+		"abcd":         "****",
+		"abcdefgh":     "…efgh",
+		"token-123456": "…3456",
+	}
+	for value, want := range cases {
+		if got := maskSecret(value); got != want {
+			t.Errorf("maskSecret(%q) = %q, want %q", value, got, want)
+		}
+	}
+}
+
+func TestSecretOverridesFlags(t *testing.T) {
+	previous := envFlags
+	t.Cleanup(func() { envFlags = previous })
+
+	envFlags = []string{"A=1", "B=two=three", "B=last"}
+	got, err := secretOverrides()
+	if err != nil {
+		t.Fatalf("secretOverrides() error: %v", err)
+	}
+	if got["A"] != "1" || got["B"] != "last" {
+		t.Errorf("overrides = %v, want A=1 and B=last", got)
+	}
+
+	for _, flags := range [][]string{{"novalue"}, {"=value"}, {" =value"}} {
+		envFlags = flags
+		if _, err := secretOverrides(); err == nil || !strings.Contains(err.Error(), "expected KEY=VALUE") {
+			t.Errorf("secretOverrides(%v) error = %v, want expected-KEY=VALUE error", flags, err)
+		}
 	}
 }

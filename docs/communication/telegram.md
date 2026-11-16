@@ -135,9 +135,10 @@ Non-secret settings live in `comm_tg_settings`, seeded by `acolyte new`:
 - `channels` — JSON array; defaults to `["telegram"]` when absent.
 - `telegram.allowed_users` — JSON array of numeric IDs or `@usernames`.
 
-The bot **token** is a secret read from the layered `.env` files:
-`<workspace>/.env` overrides `$ACOLYTE_HOME/.env`; the process environment overrides both. Neither
-file is ever committed or scaffolded. See `SPEC.md` §4.
+The bot **token** is a secret resolved from four layers, highest first: `--env
+TELEGRAM_BOT_TOKEN=…` on the invocation, the process environment, `<workspace>/.env`, then
+`$ACOLYTE_HOME/.env`. `acolyte config <agent> env TELEGRAM_BOT_TOKEN` reports the winning layer.
+Neither file is ever committed or scaffolded. See `SPEC.md` §4.
 
 Runtime config mutation is available without re-running `acolyte new`:
 

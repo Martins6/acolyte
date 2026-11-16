@@ -95,7 +95,7 @@ func (s *Service) runShell(ctx context.Context, agent registry.Agent, job orch.C
 	}
 	cmd.WaitDelay = 2 * time.Second
 
-	loaded, err := secrets.Load(agent.Workspace)
+	loaded, err := secrets.Load(agent.Workspace, secrets.WithOverrides(s.env))
 	if err != nil {
 		return "", err
 	}
