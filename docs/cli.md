@@ -1,14 +1,15 @@
 # CLI reference
 
-**Intent.** Every `acolyte` command, what it is for, and where to read more. Run
-`acolyte <command> --help` for the exact flags of the installed version.
+**Intent.** Every `acolyte` command, grouped by task, with the flags worth knowing and a pointer to
+the module docs that cover the rest. Run `acolyte <command> --help` for the complete flag list of the
+installed version.
 
 ## Agents
 
 | Command | Description |
 | ------- | ----------- |
-| `acolyte new --name <n> --workspace-folder <p> --config '<json>'` | Scaffold, validate, and register an agent ([config reference](README.md#creating-an-agent)). |
-| `acolyte config <agent> get\|set\|edit [value]` | Read or update an agent's runtime capabilities ([`orchestrator/config.md`](orchestrator/config.md)). |
+| `acolyte new --name <n> --workspace-folder <p> [--config '<json>']` | Scaffold, validate, and register an agent; `--config` is optional ([config reference](README.md#creating-an-agent)). |
+| `acolyte config <agent> get\|set\|edit [value] [--json] [--dry-run]` | Read or update an agent's runtime capabilities ([`orchestrator/config.md`](orchestrator/config.md)). |
 | `acolyte status [name\|workspace]` | List agents, or show one agent's channels, allowed users, last message, jobs, and activity. |
 | `acolyte delete <name\|workspace>` | Remove an agent from the registry; the workspace folder is kept. |
 | `acolyte attach [--agent-name <n>] [--session-id <id>]` | Attach the OpenCode TUI to the agent session ([`orchestrator/daemon.md`](orchestrator/daemon.md)). |
@@ -20,8 +21,8 @@
 | Command | Description |
 | ------- | ----------- |
 | `acolyte start [--log-file <path>]` | Start the multi-agent daemon ([`orchestrator/daemon.md`](orchestrator/daemon.md)). |
-| `acolyte cron ...` | Manage scheduled prompt, shell, and routine jobs ([`orchestrator/cron.md`](orchestrator/cron.md)). |
-| `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service. |
+| `acolyte cron ...` | Create a job (`--title`, `--datetime`, `--prompt`/`--shell`/`--routine`, `--routine-args`, `--timezone`, `--on-success`/`--on-failure`, `--dry-run`) or list, view, remove, and tick jobs — full list in [`orchestrator/cron.md`](orchestrator/cron.md). |
+| `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service (`view`/`rm` take a target flag when titles collide). |
 | `acolyte notify-user "<text>" [--media <path>]` | Notify the user only, never the agent; one optional image. |
 | `acolyte inbox "<text>"` | Deliver a synthetic external event to an agent session. |
 
@@ -29,7 +30,7 @@
 
 | Command | Description |
 | ------- | ----------- |
-| `acolyte memory export --out <zip>` | Export a portable memory trace (`--session-id`, `--no-opencode`, `--sanitize`, `--force`, `--json`) ([`memory/memory-export/opencode-export.md`](memory/memory-export/opencode-export.md)). |
+| `acolyte memory export --out <zip>` | Export a portable memory trace (`--session-id`, `--max-pages`, `--no-opencode`, `--sanitize`, `--force`, `--json`) ([`memory/memory-export/opencode-export.md`](memory/memory-export/opencode-export.md)). |
 | `acolyte memory import <zip> [--mode trace\|sessions\|all]` | Import a trace bundle (`--dry-run`, `--force`, `--json`). |
 
 ## Service and maintenance
