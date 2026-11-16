@@ -1,523 +1,110 @@
 # Acolyte
 
-A runtime for a folder of agents, powered by OpenCode. Each agent is a self-contained workspace with its own identity, persona, learned skills, state, and logs.
+Acolyte is an easy way to set up a personalized, durable agent that has a specific workspace folder to play with, whilst having the capability to easily talk to other acolyte agents.
 
-## Installation
+## Quick Setup
 
-### Prerequisites
+Paste this to your favourite agent:
 
-**Both the OpenCode CLI and this binary are required to run the daemon.**
+```text
+Install Acolyte for me. Use Homebrew if it is available: `brew install Martins6/tap/acolyte`. Otherwise use the install script: `curl -sSL https://raw.githubusercontent.com/martins6/acolyte/main/install.sh | bash`. Make sure the `acolyte` binary ends up on my PATH.
 
-- [OpenCode CLI](https://github.com/anomalyco/opencode) installed (`opencode` command available)
-- Model-provider credentials stored with OpenCode:
+Then read the rest of this README and the documentation under https://github.com/Martins6/acolyte/tree/main/docs.
 
-  ```bash
-  opencode auth login
-  ```
-
-### Quick Install (Linux/macOS)
-
-```bash
-curl -sSL https://raw.githubusercontent.com/martins6/acolyte/main/install.sh | bash
+Before you change anything, ask me a few concise questions: what to call the agent and where its workspace folder should live, which OpenCode model to use, how I want to talk to it (Telegram or headless `acolyte run`), and what it should do for me. Then create the agent, help me set its secrets, and start the daemon.
 ```
 
-This will install the binary to `~/.local/bin`. Make sure to add it to your PATH:
+Or follow along to manually set up:
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+1. Install acolyte:
 
-Or install system-wide with sudo:
+   ```bash
+   brew install Martins6/tap/acolyte
+   ```
 
-```bash
-curl -sSL https://raw.githubusercontent.com/martins6/acolyte/main/install.sh | bash -s -- -p /usr/local/bin
-```
+   No Homebrew? Use the install script instead: `curl -sSL https://raw.githubusercontent.com/martins6/acolyte/main/install.sh | bash`. More options in [docs/installation.md](docs/installation.md).
 
-Install a specific version:
+2. Authenticate with OpenCode
 
-```bash
-curl -sSL https://raw.githubusercontent.com/martins6/acolyte/main/install.sh | bash -s -- -v v0.1.0
-```
+   Acolyte does not store model-provider credentials. It uses OpenCode's auth store, so connect your provider once with the OpenCode CLI:
 
-#### Development Install (Linux/macOS)
+   ```bash
+   opencode auth login
+   ```
 
-<details>
-<summary>Instructions</summary>
+   The managed OpenCode service, and every agent it serves, reuses those credentials.
 
-For developers who want to build from source, use `local_install.sh`:
+3. Create an agent:
 
-```bash
-./local_install.sh
-```
+   ```bash
+   acolyte new --name valet --workspace-folder ~/agents/valet --config '{
+     "description": "Personal assistant",
+     "engine": { "model": "opencode-go/deepseek-v4.1-flash" },
+     "memory-learn": { "mode": "simple-dreaming", "args": { "days": 3 } },
+     "communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["@you"] } },
+     "schedule": { "timezone": "America/Sao_Paulo", "heartbeat_minutes": 60 }
+   }'
+   ```
 
-**Requirements:**
+   Acolyte is composed of 4 plug-and-play modules:
 
-- Go 1.21+ installed
-- OpenCode CLI installed (`opencode` command available)
+   - Orchestrator: when to use Acolyte. Routine jobs and also quick checks.
+   - Learner: what to remember and how to learn from past sessions.
+   - Communicator: how to talk to an acolyte agent using services: CLI, Telegram and whatever else is wanted.
+   - Socializer: how to talk to other acolyte agents that are registered into the network.
 
-This script builds the binary from local source code instead of downloading from GitHub releases.
+   [docs/](docs/) describes the multiple features you can add to those four modules.
 
-</details>
+   All the four modules do not modify the core OpenCode agentic engine. It uses its resources, such as skills, CLI binaries via the shell tool, plugins, OpenCode native tools and API contracts. It builds around the OpenCode engine only if needed, otherwise tries to be as OpenCode native as possible. The reason being is that they have a great open-source product.
 
-## Quick Start
+4. Configure your secrets
 
-### 1. Create a Telegram Bot
+   Acolyte resolves secrets in layers, highest priority first:
 
-1. Open Telegram and search for @BotFather
-2. Send `/newbot` to create a new bot
-3. Follow the instructions and get your bot token
+   1. `--env KEY=VALUE` on the invocation, for example `acolyte start --env TELEGRAM_BOT_TOKEN=...` (repeatable, never written to disk).
+   2. The process environment.
+   3. `<workspace>/.env` — per-agent secrets.
+   4. `$ACOLYTE_HOME/.env` — global secrets.
 
-### 2. Authenticate with OpenCode
+   `acolyte config <agent> env` prints the winning layer for each key as `CONFIG-<KEY>:<source>` (`.env-global`, `.env-workspace`, `process`, or `cli`) with a masked value. Both files are gitignored and are never created by `acolyte new`.
 
-Acolyte does not store model-provider credentials. It uses OpenCode's auth
-store, so connect your provider once with the OpenCode CLI:
+   These files are not passed to OpenCode. Model-provider credentials belong in OpenCode's auth store (`opencode auth login`).
 
-```bash
-opencode auth login
-```
+   ```bash
+   # Global (shared) secrets
+   echo 'TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN' >> "${ACOLYTE_HOME:-$HOME/.acolyte}/.env"
 
-The managed OpenCode service, and every agent it serves, reuses those
-credentials. Prefer this over putting provider keys in Acolyte `.env` files:
-those files are for Acolyte's own secrets, such as `TELEGRAM_BOT_TOKEN`.
+   # Optional per-agent override
+   echo 'TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN' >> ~/agents/valet/.env
 
-### 3. Create an Agent
+   # One-off override for a single daemon run
+   acolyte start --env TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
 
-```bash
-acolyte new --name valet --workspace-folder ~/agents/valet --config '{
-  "description": "Personal assistant",
-  "engine": { "model": "minimax-coding-plan/MiniMax-M3" },
-  "memory-learn": { "mode": "simple-dreaming", "args": { "days": 3 } },
-  "communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["@you"] } },
-  "schedule": { "timezone": "America/Sao_Paulo", "heartbeat_minutes": 60 }
-}'
-```
+   # Where is the token actually coming from?
+   acolyte config valet env TELEGRAM_BOT_TOKEN
+   ```
 
-This scaffolds the agent workspace, bakes the chosen capabilities, and registers the
-agent in `$ACOLYTE_HOME/registry.sqlite.db` (`~/.acolyte` by default). Use
-`acolyte status` to inspect registered agents and `acolyte delete` to remove one from
-the registry (the folder is left untouched).
+5. Start the daemon
 
-### 4. Configure Secrets
+   ```bash
+   acolyte start
+   ```
 
-Acolyte loads secrets from two optional `.env` files:
+   The daemon serves every registered agent:
 
-- `$ACOLYTE_HOME/.env` — global secrets.
-- `<workspace>/.env` — per-agent secrets, overriding the global file.
+   - Each agent's Telegram adapter resolves its token as `--env` > process environment > `<workspace>/.env` > `$ACOLYTE_HOME/.env`, logging the winning `CONFIG-<KEY>:<source>` label at startup.
+   - Each agent needs a distinct bot token. Two agents sharing a token cannot poll Telegram at the same time; the daemon starts one and warns about the rest.
+   - Agents without a token, without Telegram in `communication.channels`, or without allowed users are skipped with a warning.
 
-Precedence is **process environment > workspace `.env` > global `.env`**. Both files
-are gitignored and are never created by `acolyte new`.
+   Press `Ctrl+C` to stop gracefully.
 
-These files are not passed to OpenCode. Model-provider credentials belong in
-OpenCode's auth store (`opencode auth login`, step 2).
+   To keep the daemon running after a crash and start it automatically, install it as a service: `acolyte install-service` (see [Running as a Service](docs/orchestrator/autostart.md)).
 
-```bash
-# Global (shared) secrets
-cat >> "${ACOLYTE_HOME:-$HOME/.acolyte}/.env" <<'EOF'
-TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
-EOF
+6. Talk to it!
 
-# Optional per-agent override
-cat >> ~/agents/valet/.env <<'EOF'
-TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN
-EOF
-```
-
-### 5. Start the Daemon
-
-```bash
-acolyte start
-```
-
-The daemon serves every registered agent:
-
-- Each agent's Telegram adapter reads its token from the process environment,
-  falling back to `<workspace>/.env` and then `$ACOLYTE_HOME/.env`.
-- **Each agent needs a distinct bot token.** Two agents sharing a token cannot
-  poll Telegram at the same time; the daemon starts one and warns about the rest.
-- Agents without a token, without Telegram in `communication.channels`, or
-  without allowed users are skipped with a warning.
-
-Press `Ctrl+C` to stop gracefully.
-
-To keep the daemon running after a crash and start it automatically, install it
-as a service: `acolyte install-service` (see
-[Running as a Service](#running-as-a-service)).
-
-### 6. Inspect a Session
-
-`acolyte inspect` merges the OpenCode conversation with the communication
-routing/delivery rows for one session:
-
-```bash
-acolyte inspect --session-id ses_... --agent-name valet
-acolyte inspect --session-id ses_... --no-opencode   # routing events only
-acolyte inspect --session-id ses_... --ndjson        # one event per line
-```
-
-To open the same session in the OpenCode TUI, attach to the managed service:
-
-```bash
-acolyte attach --agent-name valet
-acolyte attach --agent-name valet --session-id ses_...
-```
-
-Running `opencode` directly in a folder starts its own server; use
-`acolyte attach` (or `opencode attach <url> --dir <workspace> --session <id>`)
-to share Acolyte's sessions.
-
-### 7. Run Headless (No Telegram, No TUI)
-
-`acolyte run` sends one real user turn through the agent's OpenCode session and
-prints the reply. It uses the same managed service as the daemon and never
-starts Telegram or queues a channel delivery.
-
-```bash
-acolyte run "Summarize today's notes" --agent-name valet
-acolyte run "And what did I ask before?" --agent-name valet --continue
-acolyte run "Reply with exactly: OK" --agent-name valet --json
-```
-
-The first run creates a session and maps it to the `cli:<agent>` thread.
-`--continue` reuses that session; `--session-id` selects an existing session
-that is already mapped to the agent. Use `acolyte inspect --session-id <id>` to
-read the transcript, or `acolyte attach --agent-name <agent>` to open the latest
-session in the TUI. Pass `--timeout 10m` to bound a turn; without it there is no
-built-in cap, so the turn runs until it finishes or its context is canceled.
-
-### 8. Export a Memory Trace
-
-`acolyte memory export` writes one portable zip containing every OpenCode
-session as a Markdown timeline (messages, reasoning, tool calls, and
-communication routing events), plus the persona/skills, orchestrator logs,
-cron/session state, communication state, and memory-learn audit rows:
-
-```bash
-acolyte memory export --agent-name valet --out ~/valet-memory.zip
-acolyte memory export --agent-name valet --out one-session.zip --session-id ses_...
-acolyte memory export --agent-name valet --out store-only.zip --no-opencode
-acolyte memory export --agent-name valet --out safe.zip --sanitize
-```
-
-The unzipped folder is self-contained: another agent can read `README.md`,
-`manifest.json`, and `sessions/*.md` as external memory. Native
-`sessions/<id>.json` files are included when the OpenCode service supports the
-experimental session export endpoint. Referenced Telegram media files are
-copied byte-for-byte into `communication/media/` (named with a short hash of the
-workspace-relative source path); sources outside the workspace, paths escaping
-through `..`, symlinked components, and missing or non-regular files are
-skipped with a manifest warning. Existing zips are not overwritten unless
-`--force` is passed.
-
-`--session-id` scopes the whole bundle to one session so it cannot disclose
-unrelated conversations: only that session's transcript and its own
-inbox/outbox/chat/media rows are included, the orchestrator section keeps only
-its session mapping (no logs, cron, or settings), and global memory data
-(dreams) is omitted. Persona and skills are still included — they are agent
-identity, not conversation content. Manifest counts reflect the scoped data.
-
-Raw traces may contain secrets from the source workspace; `--sanitize` redacts
-common secret patterns (env assignments, `authorization`/`bearer` values,
-`api_key=`, `sk-...`, Telegram tokens) on a best-effort basis — review before
-sharing. `manifest.json` records whether sanitization ran.
-
-`acolyte memory import` moves a trace into another agent:
-
-```bash
-acolyte memory import ~/valet-memory.zip --agent-name butler            # extract + index
-acolyte memory import ~/valet-memory.zip --agent-name butler --mode sessions  # replay sessions
-acolyte memory import ~/valet-memory.zip --agent-name butler --mode all --dry-run
-```
-
-The default `trace` mode safely extracts the bundle into
-`downloads/memory-traces/<trace-id>/` and updates the managed block in
-`.acolyte/MEMORY-TRACES.md` (auto-loaded, so the agent sees the index and can
-read the trace on demand). `sessions` mode replays the native session payloads
-through OpenCode's import API and maps them to
-`memory:<trace-id>:<source-session-id>` threads; already-mapped sessions are
-skipped unless `--force`. Extraction rejects absolute paths, `..` traversal,
-and symlink entries, and caps sizes at 512 MiB total / 64 MiB per file.
-
-## Running as a Service
-
-`acolyte start` is a foreground process. `acolyte install-service` writes the
-native service definition, starts it, and keeps it alive:
-
-```bash
-acolyte install-service                 # current user, starts at login
-sudo acolyte install-service --system   # whole machine, starts at boot
-acolyte install-service --print         # show the unit and commands, no writes
-```
-
-The service runs the binary that invoked `install-service`. Re-run the command
-after moving or reinstalling the binary. Stop any foreground `acolyte start`
-first: Telegram allows only one long-poller per bot token.
-
-- **Linux (systemd):** user units run at login and log to journald
-  (`journalctl --user -u acolyte -f`). The installer also enables linger so a
-  user service starts at boot without a login; if that fails, run
-  `sudo loginctl enable-linger $USER`. `--system` writes
-  `/etc/systemd/system/acolyte.service`.
-- **macOS (launchd):** a user LaunchAgent starts at login; `--system` writes
-  `/Library/LaunchDaemons/ai.acolyte.daemon.plist` and starts at boot. Normal
-  logs go to `$ACOLYTE_HOME/logs/daemon.log` (rotated at 10 MiB, three
-  backups) and crash output to `daemon.err.log`.
-- **Crash recovery:** launchd uses `KeepAlive`; systemd uses `Restart=always`
-  with `RestartSec=5` and rate limiting disabled.
-
-Remove a user service with:
-
-```bash
-# macOS
-launchctl bootout gui/$(id -u)/ai.acolyte.daemon && rm ~/Library/LaunchAgents/ai.acolyte.daemon.plist
-
-# Linux
-systemctl --user disable --now acolyte.service && rm ~/.config/systemd/user/acolyte.service
-```
-
-Use `sudo launchctl bootout system/ai.acolyte.daemon` and
-`sudo rm /Library/LaunchDaemons/ai.acolyte.daemon.plist` on macOS, or
-`sudo systemctl disable --now acolyte.service` and
-`sudo rm /etc/systemd/system/acolyte.service` on Linux, for `--system`
-installs. Run `systemctl daemon-reload` (or `systemctl --user daemon-reload`)
-after removing a systemd unit.
-
-If `--system` is requested without root, the command prints the exact `sudo`
-command and the generated unit. On an unsupported platform it prints manual
-instructions for both macOS and Linux.
-
-## Agent Workspace
-
-`acolyte new` creates the SPEC v0 layout:
-
-```
-<workspace>/
-├── AGENTS.md                 # OpenCode hub: persistent guidance + persona index
-├── opencode.jsonc            # OpenCode V2 config = capability wiring
-├── .acolyte.sqlite.db        # per-agent store (orch_*, comm_tg_*, mem_*)
-├── .acolyte/                 # persona
-│   ├── CONFIG.md             #   what Acolyte is + how to inspect capabilities
-│   ├── SOUL.md               #   core behaviour
-│   ├── TOOLS.md              #   tool behaviour + workflows
-│   ├── USER.md               #   user profile memory
-│   └── HEARTBEAT.md          #   what to look for on a heartbeat
-├── .agents/skills/           # learned OpenCode skills
-├── .opencode/agents/         # optional OpenCode agent overrides
-├── media/                    # inbound/ and outbound/ media
-├── downloads/                # legacy media + memory-trace artifacts
-└── .logs/                    # daily log files
-```
-
-`acolyte new` uses this layout exclusively. The old single-workspace `~/.acolyte/`
-layout (`MAIN-PROMPTS/`, `opencode.json`, `data.db`, `conversations/`) is no longer
-used; `acolyte new` still rejects a legacy `opencode.json` when adopting a folder.
-
-## Logging
-
-The daemon logs to standard output/error. Under systemd those streams go to
-journald (`journalctl --user -u acolyte -f` for a user unit, or
-`journalctl -u acolyte -f` for a system unit). Under launchd,
-`acolyte install-service` passes `--log-file $ACOLYTE_HOME/logs/daemon.log`,
-which rotates at 10 MiB and keeps three backups; crash output is written to
-`daemon.err.log` in the same directory. Pass `--log-file <path>` to
-`acolyte start` to use the same rotating file without a service manager.
-
-Per-agent audit events (cron runs, delivery failures, no-channel inbox replies)
-are stored in the `orch_logs` table in `<workspace>/.acolyte.sqlite.db`. Use
-`acolyte inspect --session-id ...` to see the conversation plus routing history
-for one session.
-
-## Media Handling
-
-When an allowed Telegram user sends media:
-
-1. The Telegram adapter downloads the file (reusing an existing download when the
-   Telegram file ID was seen before).
-2. It saves the file under `<workspace>/media/inbound/<type>/`.
-3. It builds a prompt of the form `File located at: <abs-path>\n\nUser message: <caption-or-empty>`
-   and offers it to the agent.
-4. The agent can read or otherwise act on the file via its normal tools.
-
-Photos, documents, audio, voice, and video are all downloaded. The agent can
-send one image back to the user with the `send_image` OpenCode tool or:
-
-```bash
-acolyte notify-user "Here is the chart" --media media/outbound/images/chart.png
-```
-
-JPEG, PNG, and WebP are accepted up to 10 MiB; the image is copied under
-`media/outbound/images/` and delivered as a Telegram photo. Legacy files under
-`<workspace>/downloads/<type>/` are still readable; new writes go to
-`media/inbound/`.
-
-## CLI Commands
-
-| Command                                      | Description                                    |
-| -------------------------------------------- | ---------------------------------------------- |
-| `acolyte new --name <n> --workspace-folder <p> --config '<json>'` | Scaffold, validate, and register an agent |
-| `acolyte config <agent> get\|set\|edit`       | Read or update an agent's runtime capabilities |
-| `acolyte status [name\|workspace]`           | List agents or show one agent's channels, allowed users, last message, jobs/activity |
-| `acolyte delete <name\|workspace>`           | Remove an agent from the registry (folder kept) |
-| `acolyte cron ...`                           | Manage scheduled prompt/shell/routine jobs     |
-| `acolyte cron list\|view\|rm\|routine-list\|tick` | Inspect or run the cron service            |
-| `acolyte notify-user "<text>" [--media <path>]` | Notify the user only; optional single photo |
-| `acolyte inbox "<text>"`                     | Deliver a synthetic external event to an agent |
-| `acolyte run "<text>"`                       | Run one headless agent turn (no Telegram/TUI)  |
-| `acolyte memory export --out <zip>`          | Export the full memory trace as a zip          |
-| `acolyte memory import <zip>`                | Import a trace zip (extract/index or sessions) |
-| `acolyte inspect --session-id <id>`          | Merge OpenCode history with routing events     |
-| `acolyte attach [--agent-name <n>]`          | Attach the OpenCode TUI to the agent session   |
-| `acolyte start`                              | Start the multi-agent daemon                   |
-| `acolyte install-service [--user\|--system]` | Install the daemon as a crash-restarting service |
-| `acolyte update`                             | Check & apply updates                          |
-| `acolyte version`                            | Print binary version                           |
-
-> Routine jobs support `acolyte cron --dry-run` (dream proposal-only runs). Dream and heartbeat
-> turns run under a session-scoped OpenCode permission ruleset: dream analysis is read-only, the
-> dream writer is limited to memory paths, and heartbeat turns are read-only; the routine delivers
-> notifications itself.
-
-## Runtime config
-
-`acolyte config <agent> get|set|edit` changes an agent's capabilities in place — no re-running
-`acolyte new`. `<agent>` is an agent name or a workspace path.
-
-```bash
-acolyte config valet get                       # effective config as JSON (same shape as --config)
-acolyte config valet get --json                # one-line JSON for scripts
-acolyte config valet set engine.model minimax-coding-plan/MiniMax-M3
-acolyte config valet set schedule.heartbeat_minutes 60
-acolyte config valet set memory-learn '{"mode":"simple-dreaming","args":{"days":3}}'
-acolyte config valet set communication.telegram.allowed_users '@alice,@bob'
-acolyte config valet set schedule.timezone America/Sao_Paulo --dry-run   # diff only, no writes
-acolyte config valet edit                      # open opencode.jsonc in $EDITOR, then re-validate
-```
-
-Supported `set` keys: `description`, `engine.model`, `engine.agent`,
-`communication.channels`, `communication.telegram.allowed_users`, `schedule.timezone`,
-`schedule.heartbeat_minutes`, `memory-learn`, `memory-load`, `memory-access`,
-`memory-export` (full reference in [`docs/README.md`](docs/README.md) and
-[`docs/orchestrator/config.md`](docs/orchestrator/config.md)).
-
-Everything is validated before anything is written: `--dry-run` prints a unified diff for
-`opencode.jsonc` plus the before/after values for store/cron changes and leaves state untouched,
-and `--json` makes `get`/`set` machine-readable. `opencode.jsonc` edits are targeted (comments and
-unrelated keys are preserved, writes are temp+rename, symlinks are refused).
-
-## Updating
-
-The bot can fetch and install its own updates from GitHub Releases.
-
-- `acolyte start` runs a non-blocking check at startup. If you're behind, it queues a notification through every running agent's channel.
-- `acolyte update --check` is the dry-run command. It prints current vs latest and exits without downloading.
-- `acolyte update` downloads the matching release asset, verifies its SHA256 against the `checksums.txt` attached to the release, replaces the binary in place, and (by default) re-execs the new process.
-- `acolyte update --version vX.Y.Z` pins a specific release instead of `latest`.
-- `acolyte update --restart=false` replaces the binary but leaves the running process alone; restart `acolyte start` to pick it up.
-- `acolyte update --yes` skips the confirmation prompt for non-interactive use.
-
-For system-wide installs (`/usr/local/bin`) the replace may hit a read-only file system. Reinstall via `install.sh` into `~/.local/bin`, or run the update under `sudo`.
-
-## Development
-
-### Project Structure
-
-```
-.
-├── cmd/                    # CLI commands
-│   ├── root.go
-│   ├── start.go
-│   ├── new.go
-│   ├── cron.go
-│   ├── notify_user.go
-│   ├── inbox.go
-│   ├── run.go
-│   ├── inspect.go
-│   └── attach.go
-├── e2e/                    # Opt-in live end-to-end tests (build tag: e2e)
-├── internal/
-│   ├── agent/             # --config parsing + create/adopt workflow
-│   ├── comm/              # Envelope router, outbox sink, Telegram adapter + test emulator
-│   ├── cron/              # Shared scheduler + execution
-│   ├── daemon/            # Per-agent adapter lifecycle + routing
-│   ├── envelope/          # The Communication ⇄ Orchestrator message type
-│   ├── media/             # Media handling
-│   ├── opencode/          # OpenCode V2 integration
-│   ├── paths/             # $ACOLYTE_HOME + workspace layout
-│   ├── registry/          # Global agent identity store
-│   ├── routine/           # Registered routines (dream, heartbeat)
-│   ├── secrets/           # Layered .env loading
-│   ├── store/             # Per-agent SQLite store + module schemas
-│   ├── storepool/         # Refcounted shared per-agent stores
-│   └── workspace/         # Agent scaffold/validate
-├── main.go
-└── go.mod
-```
-
-### Dependencies
-
-- `github.com/go-telegram/bot` - Telegram Bot API
-- `github.com/spf13/cobra` - CLI framework
-- `github.com/robfig/cron/v3` - Cron schedule parsing
-- `github.com/mattn/go-sqlite3` - SQLite store
-
-### Tests
-
-Unit tests need no provider key or OpenCode service:
-
-```bash
-go test ./...
-go test -race -count=1 ./...
-```
-
-The Telegram communication layer has a hermetic regression suite backed by an
-in-process Bot API emulator (`internal/comm/telegram/telegramtest`). It drives
-the real adapter over HTTP — polling, dedup, authorization, media downloads,
-chunking, retries, replay and daemon routing — without a bot token or Telegram
-network access:
-
-```bash
-go test -race -count=1 -v -run EmulatedTelegram ./internal/comm/telegram/... ./internal/daemon/
-```
-
-Live end-to-end tests build the CLI and run real turns against the OpenCode
-service configured on the machine:
-
-```bash
-ACOLYTE_E2E=1 \
-ACOLYTE_E2E_MODEL=opencode-go/gpt-6-luna \
-go test -tags=e2e ./e2e/... -v -count=1
-```
-
-The live suite is deliberately small (three live turns plus one zero-cost
-failure case, including one turn through the Telegram emulator and the real
-daemon). CI runs the unit and Telegram emulator suites on every PR. The live
-job runs after merges to `dev` (and on manual dispatch), not on PRs, because
-the provider credential must not be exposed to PR-controlled code. It has a
-hard 15-minute timeout.
-
-### GitHub Workflow
-
-GitHub Actions runs the PR test suite and automatic review:
-
-- `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR, plus a dedicated hermetic `test / telegram` job for the Bot API emulator suite. After merges to `dev` (and on manual dispatch), it starts the managed OpenCode service with `OPENCODE_GO_API_KEY` and runs the live E2E suite with a hard 15-minute timeout. PRs never receive the provider credential.
-- `.github/workflows/opencode-review.yml` — reviews every non-draft PR opened by the repository owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs from any other author never trigger the agent.
-
-Each review posts exactly one PR review whose body starts with a `## Verdict` heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching `LGTM`/`NEEDS_REVIEW` label on the PR, and splits findings into **Necessary** (must fix) and **Non-necessary** (optional). The review hunts for security issues, loopholes, edge cases, concurrency issues, unaccounted logic, and mismatches against the PR description. Every new commit re-runs the review on the latest diff. The workflow removes the action's automatic comment so the review is the only thing left on the PR.
-
-The model is pinned in the workflow itself (`opencode-go/gpt-6-luna`); no project-level `opencode.json` is committed — this is a public repo, and the review's runtime-config guard strips any PR-added `opencode.json`/`opencode.jsonc`/`AGENTS.md`/`.opencode/` (restoring base-branch versions) and any `CLAUDE.md` (unsupported in this project) before the agent runs.
-
-Branch protection keeps `main` safe: pull requests are required, they must come from `dev` in this repository and be authored by the owner, and only the owner has merge rights. The gate (`.github/workflows/pr-guard.yml`) runs from the base branch definition via `pull_request_target` and posts a `pr-guard` commit status on the PR head SHA, so a PR cannot redefine its own gate.
-
-Mark `test / unit` and `test / telegram` as required status checks for PRs. The live E2E is a post-merge check on `dev` (and manual dispatch); it does not run on PRs because it needs the provider credential. A live run that exceeds the 15-minute cap fails the check.
-
-To enable it:
-
-1. Add the provider's API key under *Settings → Secrets and variables → Actions* as `OPENCODE_GO_API_KEY` (either as a repository secret, or as an environment secret on the `OPENCODE_GO_API_KEY` environment — the review and E2E jobs declare that environment). The workflows map it to `OPENCODE_API_KEY`, the variable the `opencode-go` provider reads.
-2. Create the `LGTM` and `NEEDS_REVIEW` labels — or skip this, the review creates them on first use.
-
-Usage:
-
-- Open a PR to get an automatic code review; every new push re-runs the review on the latest diff.
-- Land work by merging feature PRs into `dev`, then a `dev` → `main` PR merged by the repository owner.
+   ```bash
+   acolyte run "Summarize today's notes" --agent-name valet
+   ```
 
 ## License
 

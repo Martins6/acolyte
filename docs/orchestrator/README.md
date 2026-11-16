@@ -17,7 +17,7 @@ turn loop, and provides the shared services every module relies on. It is **fixe
 | Command | Purpose |
 | ------- | ------- |
 | `acolyte new` | Scaffold + validate + register a fresh agent with chosen capabilities. |
-| `acolyte config <agent> get\|set\|edit` | Read or update an agent's runtime capabilities in place ([`config.md`](config.md)). |
+| `acolyte config <agent> get\|set\|edit\|env` | Read or update an agent's runtime capabilities in place, or inspect secret provenance ([`config.md`](config.md)). |
 | `acolyte status` | Show agents (name, workspace, channels, allowed users, last message, jobs + next job). |
 | `acolyte delete` | Remove an agent from the registry (folder untouched). |
 | `acolyte cron ...` | List/add/remove prompt, shell, or routine jobs. |

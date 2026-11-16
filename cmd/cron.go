@@ -508,6 +508,10 @@ func runCronRoutineList(w io.Writer) error {
 }
 
 func runCronTick(ctx context.Context, w io.Writer) error {
+	overrides, err := secretOverrides()
+	if err != nil {
+		return err
+	}
 	client, err := openCodeEnsure(ctx)
 	if err != nil {
 		return fmt.Errorf("opencode service unavailable: %w", err)
@@ -526,6 +530,7 @@ func runCronTick(ctx context.Context, w io.Writer) error {
 		Sink:            comm.OutboxSink{Stores: pool, Turn: client},
 		OpenCode:        client,
 		Stores:          pool,
+		Env:             overrides,
 		Interval:        time.Hour,
 		RefreshInterval: time.Hour,
 	})

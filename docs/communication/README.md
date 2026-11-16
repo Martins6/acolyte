@@ -19,10 +19,11 @@ type Communication interface {
 
 ## Per-agent adapters
 
-Each registered agent has its own adapter instance and its own bot token. The daemon reads the
-token from the process environment, falling back to `<workspace>/.env` and then
-`$ACOLYTE_HOME/.env`. **Two agents cannot share a token** (Telegram allows one long-poller per
-bot); the daemon starts one adapter per token and warns about the rest.
+Each registered agent has its own adapter instance and its own bot token. The daemon resolves the
+token as `--env TELEGRAM_BOT_TOKEN=…` > process environment > `<workspace>/.env` >
+`$ACOLYTE_HOME/.env`, and logs the winning `CONFIG-TELEGRAM_BOT_TOKEN:<source>` label.
+**Two agents cannot share a token** (Telegram allows one long-poller per bot); the daemon starts
+one adapter per token and warns about the rest.
 
 An adapter is started only when:
 

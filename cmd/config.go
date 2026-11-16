@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/martins6/acolyte/internal/agent"
 	"github.com/martins6/acolyte/internal/lock"
+	"github.com/martins6/acolyte/internal/secrets"
 	"github.com/martins6/acolyte/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -40,10 +42,11 @@ var openEditor = func(path string) error {
 type configFlags struct {
 	JSON   bool
 	DryRun bool
+	Env    map[string]string
 }
 
 var configCmd = &cobra.Command{
-	Use:   "config <agent> <get|set|edit> [value]",
+	Use:   "config <agent> <get|set|edit|env> [value]",
 	Short: "Inspect or update an agent's runtime capabilities",
 	Long: `Inspect or update the runtime capabilities of a registered agent.
 
@@ -52,6 +55,11 @@ var configCmd = &cobra.Command{
   acolyte config <agent> get                       print the effective config as JSON
   acolyte config <agent> set <key> <value>         update one durable key
   acolyte config <agent> edit                      open opencode.jsonc in $EDITOR
+  acolyte config <agent> env [key]                 list secrets and where they come from
+
+Secrets resolve in this order (highest first): --env KEY=VALUE, process
+environment, <workspace>/.env, $ACOLYTE_HOME/.env. ` + "`env`" + ` prints the winning
+layer as a CONFIG-<KEY>:<source> label and masks the value.
 
 Supported set keys:
   description                          registry description
@@ -74,7 +82,11 @@ Flags:
 		if len(args) == 0 {
 			return cmd.Help()
 		}
-		return runConfigCommand(cmd.OutOrStdout(), args, configFlags{JSON: configJSON, DryRun: configDryRun})
+		overrides, err := secretOverrides()
+		if err != nil {
+			return err
+		}
+		return runConfigCommand(cmd.OutOrStdout(), args, configFlags{JSON: configJSON, DryRun: configDryRun, Env: overrides})
 	},
 }
 
@@ -90,7 +102,7 @@ func runConfigCommand(w io.Writer, args []string, flags configFlags) error {
 		return fmt.Errorf("config: agent name or workspace is required")
 	}
 	if len(args) < 2 {
-		return fmt.Errorf("config: missing subcommand for %q (use get, set, or edit)", ref)
+		return fmt.Errorf("config: missing subcommand for %q (use get, set, edit, or env)", ref)
 	}
 	sub := args[1]
 	if flags.DryRun && sub != "set" {
@@ -112,8 +124,20 @@ func runConfigCommand(w io.Writer, args []string, flags configFlags) error {
 			return fmt.Errorf("usage: acolyte config <agent> edit [--json]")
 		}
 		return runConfigEdit(w, ref, flags.JSON)
+	case "env":
+		if len(args) > 3 {
+			return fmt.Errorf("usage: acolyte config <agent> env [key] [--json]")
+		}
+		key := ""
+		if len(args) == 3 {
+			key = strings.TrimSpace(args[2])
+			if key == "" {
+				return fmt.Errorf("usage: acolyte config <agent> env [key] [--json]")
+			}
+		}
+		return runConfigEnv(w, ref, key, flags)
 	default:
-		return fmt.Errorf("config: unknown subcommand %q (use get, set, or edit)", sub)
+		return fmt.Errorf("config: unknown subcommand %q (use get, set, edit, or env)", sub)
 	}
 }
 
@@ -146,6 +170,96 @@ func runConfigGet(w io.Writer, ref string, jsonOut bool) error {
 	}
 	fmt.Fprintln(w, string(raw))
 	return nil
+}
+
+func runConfigEnv(w io.Writer, ref, key string, flags configFlags) error {
+	target, err := resolveTargetAgent(ref, "")
+	if err != nil {
+		return err
+	}
+	loaded, err := secrets.Load(target.Workspace, secrets.WithOverrides(flags.Env))
+	if err != nil {
+		return err
+	}
+
+	report := envReport{Agent: target.Name, Workspace: target.Workspace}
+	if key != "" {
+		value, source, ok := loaded.Resolve(key)
+		if !ok {
+			return fmt.Errorf("config: %s is not set for agent %q (checked --env, process env, .env-workspace, .env-global)", key, target.Name)
+		}
+		report.Env = []envEntry{newEnvEntry(key, value, source)}
+		return printConfigEnv(w, report, flags.JSON)
+	}
+
+	keys := loaded.Keys()
+	report.Env = make([]envEntry, 0, len(keys))
+	for _, name := range keys {
+		value, source, _ := loaded.Resolve(name)
+		report.Env = append(report.Env, newEnvEntry(name, value, source))
+	}
+	return printConfigEnv(w, report, flags.JSON)
+}
+
+// envEntry is one resolved secret. Value is always masked: the command exists
+// to show provenance, and the label names the file to inspect for the raw
+// value.
+type envEntry struct {
+	Key    string `json:"key"`
+	Source string `json:"source"`
+	Label  string `json:"label"`
+	Value  string `json:"value"`
+}
+
+type envReport struct {
+	Agent     string     `json:"agent"`
+	Workspace string     `json:"workspace"`
+	Env       []envEntry `json:"env"`
+}
+
+func newEnvEntry(key, value string, source secrets.Source) envEntry {
+	return envEntry{
+		Key:    key,
+		Source: string(source),
+		Label:  source.Label(key),
+		Value:  maskSecret(value),
+	}
+}
+
+// maskSecret keeps only the last four characters so two similarly named
+// tokens can be told apart without exposing enough to be replayed.
+func maskSecret(value string) string {
+	if value == "" {
+		return ""
+	}
+	if len(value) <= 4 {
+		return "****"
+	}
+	return "…" + value[len(value)-4:]
+}
+
+func printConfigEnv(w io.Writer, report envReport, jsonOut bool) error {
+	if jsonOut {
+		raw, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(w, string(raw))
+		return nil
+	}
+
+	fmt.Fprintf(w, "Agent:     %s\n", report.Agent)
+	fmt.Fprintf(w, "Workspace: %s\n\n", report.Workspace)
+	if len(report.Env) == 0 {
+		fmt.Fprintln(w, "No secrets declared in --env, <workspace>/.env, or $ACOLYTE_HOME/.env.")
+		return nil
+	}
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "CONFIG\tVALUE")
+	for _, entry := range report.Env {
+		fmt.Fprintf(table, "%s\t%s\n", entry.Label, entry.Value)
+	}
+	return table.Flush()
 }
 
 func runConfigSet(w io.Writer, ref, key, value string, dryRun, jsonOut bool) error {

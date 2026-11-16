@@ -4,6 +4,18 @@ Acolyte is *powered by OpenCode*. It layers high-level modules on top of the eng
 both the **module documentation index** and the **complete `acolyte new` config reference** — every
 flag and every `--config` key in the system.
 
+## Start here
+
+| If you want to… | Read |
+| --------------- | ---- |
+| Install Acolyte | [`installation.md`](installation.md) |
+| Set up the first agent | [`../README.md`](../README.md) (quick setup) |
+| Look up a command or flag | [`cli.md`](cli.md) |
+| Understand the workspace folder | [`workspace.md`](workspace.md) |
+| Find logs | [`logging.md`](logging.md) |
+| Update the binary | [`updating.md`](updating.md) |
+| Build, test, or land a change | [`development.md`](development.md) |
+
 ---
 
 ## Creating an agent
@@ -92,14 +104,16 @@ acolyte new --name valet --workspace-folder ~/agents/valet --config '{
 ## Runtime config
 
 ```bash
-acolyte config <agent> get|set|edit
+acolyte config <agent> get|set|edit|env
 ```
 
 `<agent>` is an agent name or a workspace path. `get` prints the effective config as JSON in the
 exact `--config` shape above (engine from `opencode.jsonc`, identity from the registry, comm
 settings from `comm_tg_settings`, schedule/memory from `orch_settings` + the dream/heartbeat
 jobs). `edit` opens `<workspace>/opencode.jsonc` in `$EDITOR` (fallback `vi`) and re-validates it
-as JSONC with sane `model`/`default_agent` values — an invalid edit is rolled back.
+as JSONC with sane `model`/`default_agent` values — an invalid edit is rolled back. `env [KEY]`
+reports secret provenance (`CONFIG-<KEY>:<source>`, masked values) from the same layering the
+daemon uses.
 
 `set <key> <value>` supports every `--config` key except nested engine/mode overrides that v0
 does not own:
@@ -132,15 +146,21 @@ See [`orchestrator/config.md`](orchestrator/config.md) for the full walkthrough.
 
 ## Secrets
 
-Acolyte loads two optional `.env` files:
+Acolyte resolves secrets in layers, highest priority first:
 
-- `$ACOLYTE_HOME/.env` — global secrets (bot tokens, shared keys).
-- `<workspace>/.env` — per-agent secrets; overrides the global file for that agent.
+1. `--env KEY=VALUE` on the invocation (repeatable; never written to disk).
+2. The process environment.
+3. `<workspace>/.env` — per-agent secrets.
+4. `$ACOLYTE_HOME/.env` — global secrets (bot tokens, shared keys).
 
-Precedence is **process environment > `<workspace>/.env` > `$ACOLYTE_HOME/.env`**. Both files are
-gitignored and are never scaffolded by `acolyte new`; secrets belong there, never in
-`opencode.jsonc` or any tracked file. Model-provider credentials are managed by OpenCode, not
-these files: run `opencode auth login` to store them in OpenCode's auth store.
+`acolyte config <agent> env [KEY]` prints each key's winning layer as
+`CONFIG-<KEY>:<source>` (`.env-global`, `.env-workspace`, `process`, or `cli`) with a
+masked value; `--json` returns `{agent, workspace, env: [{key, source, label, value}]}`.
+The daemon and cron shell jobs use the same resolver, so the CLI view is the runtime view.
+
+Both files are gitignored and are never scaffolded by `acolyte new`; secrets belong there,
+never in `opencode.jsonc` or any tracked file. Model-provider credentials are managed by
+OpenCode, not these files: run `opencode auth login` to store them in OpenCode's auth store.
 
 ---
 
@@ -181,6 +201,12 @@ Routines are added by modules; see `docs/<module>/` for each routine's behavior.
 ```
 docs/
 ├── README.md                       ← this file (index + `acolyte new` config reference)
+├── installation.md                 ← prerequisites, Homebrew, install script, dev install
+├── cli.md                          ← every command + flags, grouped by task
+├── workspace.md                    ← the `<workspace>/` layout `acolyte new` creates
+├── logging.md                      ← daemon logs + per-agent audit events
+├── updating.md                     ← `acolyte update` and release verification
+├── development.md                  ← structure, dependencies, tests, CI workflows
 ├── memory/
 │   ├── README.md                   ← Memory intent + sub-components + value semantics
 │   ├── memory-load/<mode>.md

@@ -1181,3 +1181,37 @@ func TestShellWithoutSHELLFails(t *testing.T) {
 		t.Errorf("log message = %q, want $SHELL error", message)
 	}
 }
+
+func TestShellEnvPrecedence(t *testing.T) {
+	_, ws, _ := setupCron(t)
+	if err := os.WriteFile(filepath.Join(ws, ".env"), []byte("ACOLYTE_TEST_SHELL_ENV=workspace\n"), 0600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	t.Setenv("ACOLYTE_TEST_SHELL_ENV", "process")
+	script := filepath.Join(t.TempDir(), "env.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$ACOLYTE_TEST_SHELL_ENV\"\n"), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	job := orch.CronJob{Title: "env", ShellPath: script}
+	agent := registry.Agent{Name: "valet", Workspace: ws}
+
+	// The process environment must beat the workspace .env file.
+	plain := &Service{shell: "/bin/sh"}
+	out, err := plain.runShell(context.Background(), agent, job, jobMeta{TimeoutSeconds: 10})
+	if err != nil {
+		t.Fatalf("runShell() error: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "process" {
+		t.Errorf("shell env = %q, want process (exported value must beat .env)", got)
+	}
+
+	// An explicit --env override must beat both.
+	service := &Service{shell: "/bin/sh", env: map[string]string{"ACOLYTE_TEST_SHELL_ENV": "cli"}}
+	out, err = service.runShell(context.Background(), agent, job, jobMeta{TimeoutSeconds: 10})
+	if err != nil {
+		t.Fatalf("runShell(override) error: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "cli" {
+		t.Errorf("shell env = %q, want cli override", got)
+	}
+}

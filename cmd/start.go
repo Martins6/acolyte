@@ -40,6 +40,11 @@ Press Ctrl+C to stop gracefully.`,
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
+		overrides, err := secretOverrides()
+		if err != nil {
+			return err
+		}
+
 		if startLogFile != "" {
 			logPath, err := paths.Abs(startLogFile)
 			if err != nil {
@@ -74,6 +79,7 @@ Press Ctrl+C to stop gracefully.`,
 			Registry: reg,
 			Stores:   pool,
 			OpenCode: opencodeClient,
+			Env:      overrides,
 		})
 		if err != nil {
 			return fmt.Errorf("start communication daemon: %w", err)
@@ -86,6 +92,7 @@ Press Ctrl+C to stop gracefully.`,
 			Sink:     daemonSvc,
 			OpenCode: opencodeClient,
 			Stores:   pool,
+			Env:      overrides,
 		})
 		if err != nil {
 			return fmt.Errorf("start cron service: %w", err)

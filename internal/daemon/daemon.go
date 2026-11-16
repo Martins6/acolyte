@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,6 +47,9 @@ type Options struct {
 	RefreshInterval time.Duration
 	Now             func() time.Time
 	CommFactory     CommFactory
+	// Env holds CLI --env KEY=VALUE overrides. They win over the process
+	// environment and both .env files for every agent in this daemon.
+	Env map[string]string
 }
 
 type agentRuntime struct {
@@ -57,14 +59,14 @@ type agentRuntime struct {
 	comm        comm.Communication
 	fingerprint string
 	tokenHash   string
-	tokenSource string
+	tokenSource secrets.Source
 }
 
 type commConfig struct {
 	channels    []string
 	allowed     []string
 	token       string
-	tokenSource string
+	tokenSource secrets.Source
 	tokenHash   string
 	fingerprint string
 }
@@ -76,6 +78,7 @@ type Service struct {
 	refreshInterval time.Duration
 	now             func() time.Time
 	factory         CommFactory
+	env             map[string]string
 	router          *comm.Router
 	sink            comm.OutboxSink
 
@@ -115,6 +118,7 @@ func Start(ctx context.Context, opts Options) (*Service, error) {
 		refreshInterval: opts.RefreshInterval,
 		now:             opts.Now,
 		factory:         opts.CommFactory,
+		env:             opts.Env,
 		sink: comm.OutboxSink{
 			Stores:   opts.Stores,
 			Turn:     opts.OpenCode,
@@ -274,7 +278,7 @@ func (s *Service) startAgent(agent registry.Agent, seenTokens map[string]string)
 		return
 	}
 	if cfg.token == "" {
-		log.Printf("daemon: %s has no TELEGRAM_BOT_TOKEN; skipping channel", agent.Name)
+		log.Printf("daemon: %s has no TELEGRAM_BOT_TOKEN (checked --env, process env, .env-workspace, .env-global); skipping channel", agent.Name)
 		release()
 		return
 	}
@@ -323,7 +327,7 @@ func (s *Service) startAgent(agent registry.Agent, seenTokens map[string]string)
 	s.agents[agent.Name] = rt
 	s.mu.Unlock()
 	seenTokens[cfg.tokenHash] = agent.Name
-	log.Printf("daemon: started telegram for %s (token from %s)", agent.Name, cfg.tokenSource)
+	log.Printf("daemon: started telegram for %s (%s)", agent.Name, cfg.tokenSource.Label("TELEGRAM_BOT_TOKEN"))
 }
 
 func (s *Service) stopAgents() {
@@ -459,7 +463,7 @@ func (s *Service) loadConfig(agent registry.Agent, st *store.Store) (commConfig,
 	if err != nil {
 		return commConfig{}, err
 	}
-	loaded, err := secrets.Load(agent.Workspace)
+	loaded, err := secrets.Load(agent.Workspace, secrets.WithOverrides(s.env))
 	if err != nil {
 		return commConfig{}, err
 	}
@@ -499,14 +503,9 @@ func loadStringList(st *store.Store, key string, fallback []string) ([]string, e
 	return values, nil
 }
 
-func tokenSource(loaded *secrets.Secrets) string {
-	if _, ok := os.LookupEnv("TELEGRAM_BOT_TOKEN"); ok {
-		return "process"
-	}
-	if _, ok := loaded.Workspace()["TELEGRAM_BOT_TOKEN"]; ok {
-		return "workspace"
-	}
-	return "global"
+func tokenSource(loaded *secrets.Secrets) secrets.Source {
+	_, source, _ := loaded.Resolve("TELEGRAM_BOT_TOKEN")
+	return source
 }
 
 func hashToken(token string) string {

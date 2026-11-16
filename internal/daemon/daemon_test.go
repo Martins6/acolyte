@@ -110,6 +110,12 @@ func (f *fakeFactory) count() int {
 	return len(f.comms)
 }
 
+func (f *fakeFactory) token(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tokens[name]
+}
+
 type fakeTurn struct {
 	mu          sync.Mutex
 	userCalls   int
@@ -620,5 +626,30 @@ func TestDaemonRefreshAddsAndRemovesAgents(t *testing.T) {
 	svc.refresh()
 	if !factory.get("one").isStopped() {
 		t.Error("one adapter was not stopped after delete")
+	}
+}
+
+// TestDaemonCLIEnvOverridesDotEnv pins the precedence chain: an --env override
+// wins over the process environment and the agent's .env file.
+func TestDaemonCLIEnvOverridesDotEnv(t *testing.T) {
+	reg, pool, _ := setupDaemon(t, "valet")
+	t.Setenv("TELEGRAM_BOT_TOKEN", "process-token")
+
+	factory := newFakeFactory()
+	svc, err := Start(context.Background(), Options{
+		Registry:        reg,
+		Stores:          pool,
+		OpenCode:        &fakeTurn{},
+		RefreshInterval: time.Hour,
+		CommFactory:     factory.make,
+		Env:             map[string]string{"TELEGRAM_BOT_TOKEN": "cli-token"},
+	})
+	if err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	t.Cleanup(svc.Stop)
+
+	if got := factory.token("valet"); got != "cli-token" {
+		t.Errorf("adapter token = %q, want cli-token", got)
 	}
 }
