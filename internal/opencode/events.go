@@ -90,10 +90,20 @@ func (c *Client) subscribeEvents(ctx context.Context, types []string, handle Eve
 		if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 {
 			return err
 		}
+		// A restarting service asks for a specific retry delay; honor it
+		// instead of the generic reconnect backoff, then rediscover a service
+		// that moved to a new port.
+		wait := delay
+		if retryWait, retry := c.retryDelay(http.MethodGet, "/api/event", err); retry {
+			wait = retryWait
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(delay):
+		case <-time.After(wait):
+		}
+		if c.needsRecover(err) {
+			c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
 		}
 		if delay < eventMaxReconnectDelay {
 			delay *= 2
