@@ -459,10 +459,11 @@ func parseRetryAfter(raw string) time.Duration {
 		return 0
 	}
 	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds > 0 {
-		// Reject values that would overflow the time.Duration multiplication
-		// instead of wrapping into a small positive wait.
+		// Saturate values that would overflow the time.Duration
+		// multiplication; collapsing them to zero would turn a huge minimum
+		// into an immediate retry.
 		if seconds > maxRetryAfterSeconds {
-			return 0
+			return time.Duration(maxRetryAfterSeconds) * time.Second
 		}
 		return time.Duration(seconds) * time.Second
 	}

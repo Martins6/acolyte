@@ -252,7 +252,7 @@ func TestParseRetryAfter(t *testing.T) {
 		{"seconds", "1", time.Second},
 		{"zero", "0", 0},
 		{"garbage", "soon", 0},
-		{"overflow", "999999999999999999", 0},
+		{"overflow", "999999999999999999", time.Duration(maxRetryAfterSeconds) * time.Second},
 		{"past date", "Mon, 02 Jan 2006 15:04:05 GMT", 0},
 	}
 	for _, tt := range tests {
