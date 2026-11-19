@@ -187,6 +187,36 @@ func TestStoppingServiceOutsideRetryWindowStillRecovers(t *testing.T) {
 	}
 }
 
+func TestStoppingServiceRecoversWhenCallerCancels(t *testing.T) {
+	var calls atomic.Int32
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"code":"service_stopping"}`)
+	})
+	recoveries := 0
+	client.recover = func(ctx context.Context) (*Client, error) {
+		recoveries++
+		if err := ctx.Err(); err != nil {
+			t.Errorf("recover context is canceled: %v", err)
+		}
+		return client, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := client.Prompt(ctx, "ses_x", "hello"); err == nil {
+		t.Fatal("Prompt() error = nil, want service error")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("prompt calls = %d, want 1 (no replay after caller cancellation)", got)
+	}
+	if recoveries != 1 {
+		t.Errorf("recoveries = %d, want 1 (the endpoint must recover for later calls)", recoveries)
+	}
+}
+
 func TestAPIErrorCarriesRetryHint(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "2")

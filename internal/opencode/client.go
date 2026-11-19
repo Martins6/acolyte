@@ -287,6 +287,12 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		}
 		select {
 		case <-ctx.Done():
+			// The caller is gone, but a stopping service still needs to be
+			// rediscovered for later calls. Recover on a context that the
+			// cancellation cannot abort, bounded by a fresh retry window.
+			if c.needsRecover(err) {
+				c.recoverEndpoint(context.WithoutCancel(ctx), time.Now().Add(c.retryTimeout))
+			}
 			return err
 		case <-time.After(wait):
 		}
