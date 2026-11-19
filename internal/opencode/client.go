@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Thin client for the OpenCode V2 HTTP API (SPEC §5.1). Request/response
@@ -186,6 +190,12 @@ type InboxItem struct {
 type APIError struct {
 	Status  int
 	Message string
+	// Code is the machine-readable error code when the service sends one, for
+	// example "service_stopping" while it drains for a restart.
+	Code string
+	// RetryAfter is the delay the service asked for (Retry-After), or zero
+	// when the header was absent.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -199,42 +209,115 @@ func (e *APIError) Error() string {
 	}
 }
 
+// Restart-window retry policy. The managed service answers with 503
+// service_stopping or service_starting while it drains and boots, and asks the
+// caller to retry with Retry-After. Those responses reject the request before
+// it is handled, so replaying any call is safe. Transport failures are
+// replayed only for idempotent calls: replaying a prompt could admit it twice.
+const (
+	defaultServiceRetryTimeout  = 30 * time.Second
+	defaultServiceRetryInterval = time.Second
+	serviceRecoverGap           = 5 * time.Second
+)
+
 // Client talks to one OpenCode V2 server instance.
 type Client struct {
+	mu       sync.RWMutex
 	baseURL  string
 	password string
 	client   *http.Client
+
+	// recover re-discovers the managed service after its endpoint goes away
+	// (restart, crash). Ensure sets it; a bare NewClient stays pinned to its
+	// URL. recoverMu serializes recoveries and recoveredAt rate-limits them so
+	// concurrent failed requests cannot stampede `opencode service start`.
+	recover     func(context.Context) (*Client, error)
+	recoverMu   sync.Mutex
+	recoveredAt time.Time
+
+	// Retry policy, configurable per client so tests never race on globals.
+	retryTimeout  time.Duration
+	retryInterval time.Duration
 }
 
 // NewClient returns a client for the OpenCode service at baseURL, authenticating
 // with HTTP Basic "opencode" / password (from ~/.config/opencode/service.json).
 func NewClient(baseURL, password string) *Client {
 	return &Client{
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		password: password,
-		client:   &http.Client{},
+		baseURL:       strings.TrimRight(baseURL, "/"),
+		password:      password,
+		client:        &http.Client{},
+		retryTimeout:  defaultServiceRetryTimeout,
+		retryInterval: defaultServiceRetryInterval,
 	}
 }
 
+func (c *Client) endpoint() (baseURL, password string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.baseURL, c.password
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
-		raw, err := json.Marshal(body)
+		var err error
+		payload, err = json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("opencode: marshal request: %w", err)
 		}
-		reader = bytes.NewReader(raw)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	deadline := time.Now().Add(c.retryTimeout)
+	for {
+		baseURL, password := c.endpoint()
+		err := c.doOnce(ctx, baseURL, password, method, path, payload, out)
+		if err == nil {
+			return nil
+		}
+		wait, retry := c.retryDelay(method, path, err)
+		if !retry || !time.Now().Add(wait).Before(deadline) {
+			// The call cannot be replayed (or its retry hint is outside the
+			// window), but the endpoint may still have moved. Recover it so
+			// later calls work.
+			if c.needsRecover(err) {
+				c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
+			}
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			// The caller is gone, but a stopping service still needs to be
+			// rediscovered for later calls. Recover on a context that the
+			// cancellation cannot abort, bounded by a fresh retry window.
+			if c.needsRecover(err) {
+				c.recoverEndpoint(context.WithoutCancel(ctx), time.Now().Add(c.retryTimeout))
+			}
+			return err
+		case <-time.After(wait):
+		}
+		if c.needsRecover(err) {
+			c.recoverEndpoint(ctx, deadline)
+		}
+	}
+}
+
+// doOnce performs one request against one endpoint snapshot.
+func (c *Client) doOnce(ctx context.Context, baseURL, password, method, path string, payload []byte, out any) error {
+	var reader io.Reader
+	if payload != nil {
+		reader = bytes.NewReader(payload)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, reader)
 	if err != nil {
 		return fmt.Errorf("opencode: create request: %w", err)
 	}
-	if body != nil {
+	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.password != "" {
-		req.SetBasicAuth("opencode", c.password)
+	if password != "" {
+		req.SetBasicAuth("opencode", password)
 	}
 
 	resp, err := c.client.Do(req)
@@ -245,7 +328,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
+		return newAPIError(resp, raw)
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
@@ -254,6 +337,146 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	return nil
 }
+
+// retryDelay reports whether a failed request should be replayed and how long
+// to wait first. A service_stopping/service_starting response rejects the
+// request before it is handled, so every method is safe to replay. A transport
+// failure is only replayed for idempotent calls, and only when the client can
+// re-discover the service; a bare client would just hit the same dead URL.
+func (c *Client) retryDelay(method, path string, err error) (time.Duration, bool) {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.Status != http.StatusServiceUnavailable ||
+			(apiErr.Code != "service_stopping" && apiErr.Code != "service_starting") {
+			return 0, false
+		}
+		if apiErr.RetryAfter > 0 {
+			return apiErr.RetryAfter, true
+		}
+		return c.retryInterval, true
+	}
+	if c.recover == nil || !idempotentRequest(method, path) || !transportFailure(err) {
+		return 0, false
+	}
+	return c.retryInterval, true
+}
+
+// idempotentRequest reports whether replaying the request cannot create
+// duplicate work. The wait and agent/model switches only observe or replace
+// state; prompt and synthetic admission are deliberately excluded.
+func idempotentRequest(method, path string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	case http.MethodPost:
+		return strings.HasSuffix(path, "/wait") ||
+			strings.HasSuffix(path, "/agent") ||
+			strings.HasSuffix(path, "/model")
+	default:
+		return false
+	}
+}
+
+// transportFailure reports whether err failed below the HTTP status layer. A
+// canceled or expired caller context is not a service restart.
+func transportFailure(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
+}
+
+// needsRecover reports whether the service endpoint itself may have moved.
+// service_starting still points at the live service; service_stopping is on
+// its way out, so the next attempt should rediscover it.
+func (c *Client) needsRecover(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status == http.StatusServiceUnavailable && apiErr.Code == "service_stopping"
+	}
+	return transportFailure(err)
+}
+
+// recoverEndpoint re-discovers the managed service after a restart. It is
+// best-effort: the caller still retries the current endpoint if recovery
+// fails, and the cooldown keeps concurrent failures from all starting a
+// service. TryLock lets a request keep its own retry deadline instead of
+// blocking behind another recovery.
+func (c *Client) recoverEndpoint(ctx context.Context, deadline time.Time) {
+	if c.recover == nil || !c.recoverMu.TryLock() {
+		return
+	}
+	defer c.recoverMu.Unlock()
+	if time.Since(c.recoveredAt) < serviceRecoverGap {
+		return
+	}
+	c.recoveredAt = time.Now()
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return
+	}
+	recoverCtx, cancel := context.WithTimeout(ctx, remaining)
+	defer cancel()
+
+	fresh, err := c.recover(recoverCtx)
+	if err != nil || fresh == nil {
+		return
+	}
+	baseURL, password := fresh.endpoint()
+	c.mu.Lock()
+	c.baseURL, c.password = baseURL, password
+	c.mu.Unlock()
+}
+
+// newAPIError projects a non-2xx response into the typed client error,
+// retaining the service code and retry hint when present.
+func newAPIError(resp *http.Response, raw []byte) *APIError {
+	return &APIError{
+		Status:     resp.StatusCode,
+		Message:    strings.TrimSpace(string(raw)),
+		Code:       apiErrorCode(raw),
+		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+	}
+}
+
+// apiErrorCode extracts the machine-readable code from an error body.
+func apiErrorCode(raw []byte) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return ""
+	}
+	return body.Code
+}
+
+// parseRetryAfter decodes a Retry-After header in seconds or HTTP-date form.
+func parseRetryAfter(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds > 0 {
+		// Reject values that would overflow the time.Duration multiplication
+		// instead of wrapping into a small positive wait.
+		if seconds > maxRetryAfterSeconds {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(raw); err == nil {
+		if wait := time.Until(at); wait > 0 {
+			return wait
+		}
+	}
+	return 0
+}
+
+// maxRetryAfterSeconds is the largest whole-second Retry-After value that fits
+// in a time.Duration.
+const maxRetryAfterSeconds = int64(1<<63-1) / int64(time.Second)
 
 // HealthCheck verifies the service is reachable and authenticated.
 func (c *Client) HealthCheck(ctx context.Context) error {

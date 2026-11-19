@@ -16,6 +16,15 @@ adapter per configured agent.
 4. Start cron with the same store pool and the daemon as its sink.
 5. Shutdown order: cron → daemon → store pool → registry.
 
+## Service restarts
+
+The OpenCode background service can restart independently of the daemon (for example while the
+OpenCode CLI updates). While it drains and boots it answers `503` with a `service_stopping` or
+`service_starting` code and `Retry-After`; the shared client waits and replays those calls. After a
+transport failure it re-discovers the service URL and password, so a restart on a new port does not
+strand the daemon. Transport failures are replayed only for idempotent calls (`GET`, permission
+updates, `wait`, and agent/model switches), so a prompt can never be admitted twice.
+
 ## Turn routing
 
 Inbound Telegram updates become Envelopes. The daemon resolves the agent from the adapter, maps
