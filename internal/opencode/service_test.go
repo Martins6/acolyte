@@ -162,6 +162,9 @@ func TestEnsureAdoptsHealthyService(t *testing.T) {
 	if client.baseURL != srv.URL {
 		t.Errorf("baseURL = %q, want %q", client.baseURL, srv.URL)
 	}
+	if client.recover == nil {
+		t.Error("Ensure must install the service recovery hook")
+	}
 }
 
 func TestEnsureStartsService(t *testing.T) {
@@ -209,6 +212,60 @@ func TestEnsureStartsService(t *testing.T) {
 	}
 	if client.baseURL != srv.URL {
 		t.Errorf("baseURL = %q, want %q", client.baseURL, srv.URL)
+	}
+}
+
+func TestEnsureRecoversAfterServiceRestart(t *testing.T) {
+	writeServicePassword(t, `{"password":"secret"}`)
+
+	newService := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/api/info":
+				fmt.Fprint(w, `{"version":"2.2.7"}`)
+			case strings.HasSuffix(r.URL.Path, "/wait"):
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+
+	first := newService()
+	second := newService()
+	t.Cleanup(second.Close)
+
+	url := first.URL
+	origStatus := serviceStatusCmd
+	origStart := serviceStartCmd
+	t.Cleanup(func() {
+		serviceStatusCmd = origStatus
+		serviceStartCmd = origStart
+	})
+	serviceStatusCmd = func(ctx context.Context) ([]byte, error) {
+		return []byte(url + "\n"), nil
+	}
+	serviceStartCmd = func(ctx context.Context) ([]byte, error) {
+		t.Error("start must not be called while a replacement service is healthy")
+		return nil, nil
+	}
+
+	client, err := Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	client.retryInterval = 0
+
+	// The service restarts on a new port while the daemon keeps its client.
+	first.Close()
+	url = second.URL
+
+	if err := client.Wait(context.Background(), "ses_x"); err != nil {
+		t.Fatalf("Wait after restart: %v", err)
+	}
+	if client.baseURL != second.URL {
+		t.Errorf("baseURL = %q, want %q", client.baseURL, second.URL)
 	}
 }
 

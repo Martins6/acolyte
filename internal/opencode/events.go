@@ -90,10 +90,27 @@ func (c *Client) subscribeEvents(ctx context.Context, types []string, handle Eve
 		if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 {
 			return err
 		}
+		// A restarting service asks for a specific retry delay; honor it
+		// instead of the generic reconnect backoff, then rediscover a service
+		// that moved to a new port. Retry-After is a minimum wait: if it
+		// exceeds the retry window, stop rather than reconnecting early.
+		wait := delay
+		if retryWait, retry := c.retryDelay(http.MethodGet, "/api/event", err); retry {
+			if c.retryTimeout > 0 && retryWait > c.retryTimeout {
+				if c.eventStreamLost(err) {
+					c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
+				}
+				return err
+			}
+			wait = retryWait
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(delay):
+		case <-time.After(wait):
+		}
+		if c.eventStreamLost(err) {
+			c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
 		}
 		if delay < eventMaxReconnectDelay {
 			delay *= 2
@@ -104,8 +121,31 @@ func (c *Client) subscribeEvents(ctx context.Context, types []string, handle Eve
 	}
 }
 
+// eventStreamLost reports whether a stream ended because the service or the
+// connection went away, including a clean EOF and read errors below the HTTP
+// status layer. A canceled context, an API rejection, or a handler error is
+// not endpoint loss.
+func (c *Client) eventStreamLost(err error) bool {
+	if err == nil || c.recover == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var handlerErr *eventHandlerError
+	if errors.As(err, &handlerErr) {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return c.needsRecover(err)
+	}
+	return true
+}
+
 func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle EventHandler, ready func()) error {
-	endpoint := c.baseURL + "/api/event"
+	baseURL, password := c.endpoint()
+	endpoint := baseURL + "/api/event"
 	if len(types) > 0 {
 		values := url.Values{}
 		for _, eventType := range types {
@@ -124,8 +164,8 @@ func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle
 		return fmt.Errorf("opencode: create event request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	if c.password != "" {
-		req.SetBasicAuth("opencode", c.password)
+	if password != "" {
+		req.SetBasicAuth("opencode", password)
 	}
 
 	resp, err := c.client.Do(req)
@@ -135,7 +175,7 @@ func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
+		return newAPIError(resp, raw)
 	}
 	if ready != nil {
 		ready()
