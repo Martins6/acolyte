@@ -161,6 +161,32 @@ func TestNonRestartServiceErrorIsNotRetried(t *testing.T) {
 	}
 }
 
+func TestStoppingServiceOutsideRetryWindowStillRecovers(t *testing.T) {
+	var calls atomic.Int32
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"code":"service_stopping"}`)
+	})
+	client.retryTimeout = 10 * time.Millisecond
+	recoveries := 0
+	client.recover = func(ctx context.Context) (*Client, error) {
+		recoveries++
+		return client, nil
+	}
+
+	if _, err := client.Prompt(context.Background(), "ses_x", "hello"); err == nil {
+		t.Fatal("Prompt() error = nil, want service error")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("prompt calls = %d, want 1 (no replay outside the retry window)", got)
+	}
+	if recoveries != 1 {
+		t.Errorf("recoveries = %d, want 1 (the endpoint must recover for later calls)", recoveries)
+	}
+}
+
 func TestAPIErrorCarriesRetryHint(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "2")
@@ -196,6 +222,7 @@ func TestParseRetryAfter(t *testing.T) {
 		{"seconds", "1", time.Second},
 		{"zero", "0", 0},
 		{"garbage", "soon", 0},
+		{"overflow", "999999999999999999", 0},
 		{"past date", "Mon, 02 Jan 2006 15:04:05 GMT", 0},
 	}
 	for _, tt := range tests {

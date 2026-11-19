@@ -276,15 +276,13 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 			return nil
 		}
 		wait, retry := c.retryDelay(method, path, err)
-		if !retry {
-			// A non-idempotent call cannot be replayed, but the endpoint may
-			// still have moved. Recover it so the next call works.
+		if !retry || !time.Now().Add(wait).Before(deadline) {
+			// The call cannot be replayed (or its retry hint is outside the
+			// window), but the endpoint may still have moved. Recover it so
+			// later calls work.
 			if c.needsRecover(err) {
 				c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
 			}
-			return err
-		}
-		if !time.Now().Add(wait).Before(deadline) {
 			return err
 		}
 		select {
@@ -454,7 +452,12 @@ func parseRetryAfter(raw string) time.Duration {
 	if raw == "" {
 		return 0
 	}
-	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds > 0 {
+		// Reject values that would overflow the time.Duration multiplication
+		// instead of wrapping into a small positive wait.
+		if seconds > maxRetryAfterSeconds {
+			return 0
+		}
 		return time.Duration(seconds) * time.Second
 	}
 	if at, err := http.ParseTime(raw); err == nil {
@@ -464,6 +467,10 @@ func parseRetryAfter(raw string) time.Duration {
 	}
 	return 0
 }
+
+// maxRetryAfterSeconds is the largest whole-second Retry-After value that fits
+// in a time.Duration.
+const maxRetryAfterSeconds = int64(1<<63-1) / int64(time.Second)
 
 // HealthCheck verifies the service is reachable and authenticated.
 func (c *Client) HealthCheck(ctx context.Context) error {
