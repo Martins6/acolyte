@@ -276,7 +276,15 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 			return nil
 		}
 		wait, retry := c.retryDelay(method, path, err)
-		if !retry || !time.Now().Add(wait).Before(deadline) {
+		if !retry {
+			// A non-idempotent call cannot be replayed, but the endpoint may
+			// still have moved. Recover it so the next call works.
+			if c.needsRecover(err) {
+				c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
+			}
+			return err
+		}
+		if !time.Now().Add(wait).Before(deadline) {
 			return err
 		}
 		select {
@@ -401,11 +409,11 @@ func (c *Client) recoverEndpoint(ctx context.Context, deadline time.Time) {
 	}
 	c.recoveredAt = time.Now()
 
-	recoverCtx := ctx
-	cancel := func() {}
-	if remaining := time.Until(deadline); remaining > 0 {
-		recoverCtx, cancel = context.WithTimeout(ctx, remaining)
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return
 	}
+	recoverCtx, cancel := context.WithTimeout(ctx, remaining)
 	defer cancel()
 
 	fresh, err := c.recover(recoverCtx)

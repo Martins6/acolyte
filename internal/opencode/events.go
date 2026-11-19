@@ -92,17 +92,21 @@ func (c *Client) subscribeEvents(ctx context.Context, types []string, handle Eve
 		}
 		// A restarting service asks for a specific retry delay; honor it
 		// instead of the generic reconnect backoff, then rediscover a service
-		// that moved to a new port.
+		// that moved to a new port. Keep every wait inside the same bounded
+		// retry window as ordinary API calls.
 		wait := delay
 		if retryWait, retry := c.retryDelay(http.MethodGet, "/api/event", err); retry {
 			wait = retryWait
+		}
+		if c.retryTimeout > 0 && wait > c.retryTimeout {
+			wait = c.retryTimeout
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(wait):
 		}
-		if c.needsRecover(err) {
+		if c.eventStreamLost(err) {
 			c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
 		}
 		if delay < eventMaxReconnectDelay {
@@ -112,6 +116,28 @@ func (c *Client) subscribeEvents(ctx context.Context, types []string, handle Eve
 			}
 		}
 	}
+}
+
+// eventStreamLost reports whether a stream ended because the service or the
+// connection went away, including a clean EOF and read errors below the HTTP
+// status layer. A canceled context, an API rejection, or a handler error is
+// not endpoint loss.
+func (c *Client) eventStreamLost(err error) bool {
+	if err == nil || c.recover == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var handlerErr *eventHandlerError
+	if errors.As(err, &handlerErr) {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return c.needsRecover(err)
+	}
+	return true
 }
 
 func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle EventHandler, ready func()) error {

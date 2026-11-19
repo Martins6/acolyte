@@ -80,8 +80,8 @@ func TestPromptTransportFailureIsNotReplayed(t *testing.T) {
 	if got := calls.Load(); got != 1 {
 		t.Errorf("prompt calls = %d, want 1 (a replayed prompt could admit a duplicate turn)", got)
 	}
-	if recoveries != 0 {
-		t.Errorf("recoveries = %d, want 0", recoveries)
+	if recoveries != 1 {
+		t.Errorf("recoveries = %d, want 1 (the endpoint must recover even when the call cannot be replayed)", recoveries)
 	}
 }
 

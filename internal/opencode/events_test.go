@@ -89,6 +89,12 @@ func TestSubscribeEventsReconnectsAfterEOF(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "")
+	client.retryInterval = 0
+	recoveries := 0
+	client.recover = func(ctx context.Context) (*Client, error) {
+		recoveries++
+		return client, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var got Event
@@ -102,6 +108,51 @@ func TestSubscribeEventsReconnectsAfterEOF(t *testing.T) {
 	}
 	if got.Type != "session.idle" || got.SessionID() != "ses_x" {
 		t.Errorf("event = %+v", got)
+	}
+	if connections.Load() < 2 {
+		t.Errorf("connections = %d, want at least 2", connections.Load())
+	}
+	if recoveries < 1 {
+		t.Errorf("recoveries = %d, want at least 1 (a closed stream must rediscover the endpoint)", recoveries)
+	}
+}
+
+func TestSubscribeEventsCapsRetryAfter(t *testing.T) {
+	var connections atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if connections.Add(1) == 1 {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"code":"service_stopping"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"type\":\"session.idle\",\"data\":{\"sessionID\":\"ses_x\"}}\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "")
+	client.retryInterval = 0
+	client.retryTimeout = 20 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var got Event
+	err := client.SubscribeEvents(ctx, nil, func(event Event) error {
+		got = event
+		cancel()
+		return nil
+	})
+	if err != context.Canceled && err != context.DeadlineExceeded {
+		t.Fatalf("SubscribeEvents() error = %v", err)
+	}
+	if got.Type != "session.idle" {
+		t.Errorf("event = %+v, want session.idle", got)
 	}
 	if connections.Load() < 2 {
 		t.Errorf("connections = %d, want at least 2", connections.Load())
