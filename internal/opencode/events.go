@@ -92,14 +92,17 @@ func (c *Client) subscribeEvents(ctx context.Context, types []string, handle Eve
 		}
 		// A restarting service asks for a specific retry delay; honor it
 		// instead of the generic reconnect backoff, then rediscover a service
-		// that moved to a new port. Keep every wait inside the same bounded
-		// retry window as ordinary API calls.
+		// that moved to a new port. Retry-After is a minimum wait: if it
+		// exceeds the retry window, stop rather than reconnecting early.
 		wait := delay
 		if retryWait, retry := c.retryDelay(http.MethodGet, "/api/event", err); retry {
+			if c.retryTimeout > 0 && retryWait > c.retryTimeout {
+				if c.eventStreamLost(err) {
+					c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
+				}
+				return err
+			}
 			wait = retryWait
-		}
-		if c.retryTimeout > 0 && wait > c.retryTimeout {
-			wait = c.retryTimeout
 		}
 		select {
 		case <-ctx.Done():
