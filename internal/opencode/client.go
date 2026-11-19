@@ -458,13 +458,18 @@ func parseRetryAfter(raw string) time.Duration {
 	if raw == "" {
 		return 0
 	}
-	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds > 0 {
-		// Reject values that would overflow the time.Duration multiplication
-		// instead of wrapping into a small positive wait.
-		if seconds > maxRetryAfterSeconds {
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if seconds <= 0 {
 			return 0
 		}
+		if seconds > maxRetryAfterSeconds {
+			return maxRetryAfter
+		}
 		return time.Duration(seconds) * time.Second
+	} else if isPositiveInteger(raw) {
+		// A decimal hint that overflows int64 is still a valid minimum;
+		// saturate it instead of falling back to the short retry interval.
+		return maxRetryAfter
 	}
 	if at, err := http.ParseTime(raw); err == nil {
 		if wait := time.Until(at); wait > 0 {
@@ -474,9 +479,28 @@ func parseRetryAfter(raw string) time.Duration {
 	return 0
 }
 
+// isPositiveInteger reports whether raw is a non-empty run of decimal digits.
+// It distinguishes an oversized Retry-After from a non-numeric value.
+func isPositiveInteger(raw string) bool {
+	raw = strings.TrimPrefix(raw, "+")
+	if raw == "" {
+		return false
+	}
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // maxRetryAfterSeconds is the largest whole-second Retry-After value that fits
-// in a time.Duration.
-const maxRetryAfterSeconds = int64(1<<63-1) / int64(time.Second)
+// in a time.Duration. Larger hints saturate so a server-requested minimum
+// never collapses into an early retry.
+const (
+	maxRetryAfterSeconds = int64(1<<63-1) / int64(time.Second)
+	maxRetryAfter        = time.Duration(maxRetryAfterSeconds) * time.Second
+)
 
 // HealthCheck verifies the service is reachable and authenticated.
 func (c *Client) HealthCheck(ctx context.Context) error {

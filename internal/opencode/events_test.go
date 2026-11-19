@@ -117,22 +117,13 @@ func TestSubscribeEventsReconnectsAfterEOF(t *testing.T) {
 	}
 }
 
-func TestSubscribeEventsCapsRetryAfter(t *testing.T) {
+func TestSubscribeEventsHonorsLongRetryAfter(t *testing.T) {
 	var connections atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if connections.Add(1) == 1 {
-			w.Header().Set("Retry-After", "60")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprint(w, `{"code":"service_stopping"}`)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "data: {\"type\":\"session.idle\",\"data\":{\"sessionID\":\"ses_x\"}}\n\n")
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
+		connections.Add(1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"code":"service_stopping"}`)
 	}))
 	defer server.Close()
 
@@ -142,20 +133,15 @@ func TestSubscribeEventsCapsRetryAfter(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	var got Event
 	err := client.SubscribeEvents(ctx, nil, func(event Event) error {
-		got = event
-		cancel()
+		t.Errorf("unexpected event: %+v", event)
 		return nil
 	})
-	if err != context.Canceled && err != context.DeadlineExceeded {
-		t.Fatalf("SubscribeEvents() error = %v", err)
+	if err == nil {
+		t.Fatal("SubscribeEvents() error = nil, want the retry-window error")
 	}
-	if got.Type != "session.idle" {
-		t.Errorf("event = %+v, want session.idle", got)
-	}
-	if connections.Load() < 2 {
-		t.Errorf("connections = %d, want at least 2", connections.Load())
+	if connections.Load() != 1 {
+		t.Errorf("connections = %d, want 1 (Retry-After is a minimum; do not reconnect early)", connections.Load())
 	}
 }
 
