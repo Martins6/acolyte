@@ -105,7 +105,8 @@ func (c *Client) subscribeEvents(ctx context.Context, types []string, handle Eve
 }
 
 func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle EventHandler, ready func()) error {
-	endpoint := c.baseURL + "/api/event"
+	baseURL, password := c.endpoint()
+	endpoint := baseURL + "/api/event"
 	if len(types) > 0 {
 		values := url.Values{}
 		for _, eventType := range types {
@@ -124,8 +125,8 @@ func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle
 		return fmt.Errorf("opencode: create event request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	if c.password != "" {
-		req.SetBasicAuth("opencode", c.password)
+	if password != "" {
+		req.SetBasicAuth("opencode", password)
 	}
 
 	resp, err := c.client.Do(req)
@@ -135,7 +136,7 @@ func (c *Client) subscribeEventsOnce(ctx context.Context, types []string, handle
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
+		return newAPIError(resp, raw)
 	}
 	if ready != nil {
 		ready()

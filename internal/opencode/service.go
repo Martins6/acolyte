@@ -130,8 +130,21 @@ func isLoopbackHost(host string) bool {
 
 // Ensure discovers the OpenCode background service, starts it when it is not
 // reachable, and returns an authenticated client. It re-discovers the service
-// URL after starting (the daemon registers its port on startup).
+// URL after starting (the daemon registers its port on startup) and after the
+// service restarts under a long-running client.
 func Ensure(ctx context.Context) (*Client, error) {
+	client, err := ensure(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client.recover = ensure
+	return client, nil
+}
+
+// ensure performs the discovery/start handshake and returns a client pinned to
+// the endpoint it found. Ensure adds the recovery hook so request retries can
+// repeat this handshake without recursing through an already-managed client.
+func ensure(ctx context.Context) (*Client, error) {
 	password, err := LoadServicePassword()
 	if err != nil {
 		return nil, err
