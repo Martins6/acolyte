@@ -496,6 +496,67 @@ func TestNotifyRouteRequiresAuthorizedChat(t *testing.T) {
 	}
 }
 
+// ambiguousInboxTurn returns an ambiguous admission failure without a marker.
+type ambiguousInboxTurn struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *ambiguousInboxTurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return nil, &opencode.PromptError{Err: errors.New("timeout"), Ambiguous: true}
+}
+
+func (t *ambiguousInboxTurn) count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+// TestInboxRouteHoldsAmbiguousAdmission ensures an unclear admission is not
+// retried into a duplicate.
+func TestInboxRouteHoldsAmbiguousAdmission(t *testing.T) {
+	reg, _, now := setupCron(t)
+	turn := &ambiguousInboxTurn{}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("cron:test", "ses_x", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID: "route_inbox", AgentTarget: "valet", Action: "inbox", Text: "event", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	if got := turn.count(); got != 1 {
+		t.Fatalf("admission attempts = %d, want 1", got)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes = %+v, %v", routes, err)
+	}
+	if routes[0].DeliveredAt != nil {
+		t.Error("ambiguous route was marked delivered")
+	}
+	if routes[0].SourceMessageID != orch.RouteAdmissionPending {
+		t.Errorf("marker = %q, want the pending sentinel", routes[0].SourceMessageID)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+	if got := turn.count(); got != 1 {
+		t.Errorf("admission attempts after retry = %d, want still 1", got)
+	}
+}
+
 func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{

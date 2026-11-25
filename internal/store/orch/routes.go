@@ -130,6 +130,38 @@ func scanCronRoutes(rows *sql.Rows) ([]CronRoute, error) {
 	return routes, nil
 }
 
+// SetCronRouteAdmissionPending records admission intent before an inbox input
+// is sent, so an ambiguous outcome is never retried into a duplicate.
+func (s *Store) SetCronRouteAdmissionPending(id string) error {
+	return s.setCronRouteMarker(id, RouteAdmissionPending)
+}
+
+// ClearCronRouteAdmission removes the intent after a definite pre-admission
+// rejection, allowing a later retry to admit.
+func (s *Store) ClearCronRouteAdmission(id string) error {
+	return s.setCronRouteMarker(id, "")
+}
+
+// RouteAdmissionPending is stored as the route marker before an inbox input is
+// sent. It is not a real OpenCode marker.
+const RouteAdmissionPending = "admission_pending"
+
+func (s *Store) setCronRouteMarker(id, marker string) error {
+	result, err := s.db.Exec(`UPDATE orch_cron_routes SET source_message_id = ?
+		WHERE id = ? AND delivered_at IS NULL`, marker, id)
+	if err != nil {
+		return fmt.Errorf("orch: set cron route marker %q: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("orch: set cron route marker %q: %w", id, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("orch: cron route %q is no longer pending", id)
+	}
+	return nil
+}
+
 // GetCronRoute returns one route by ID.
 func (s *Store) GetCronRoute(id string) (CronRoute, bool, error) {
 	rows, err := s.db.Query(`SELECT `+cronRouteColumns+` FROM orch_cron_routes WHERE id = ? LIMIT 1`, id)

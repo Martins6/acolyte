@@ -995,6 +995,11 @@ func (s *Service) removeMemoryRoute(workspace, id string) {
 	}
 }
 
+// routeAdmissionPending is a durable sentinel stored before an inbox input is
+// admitted. If the attempt's outcome is ambiguous, the route stays held here
+// instead of re-admitting the event.
+const routeAdmissionPending = orch.RouteAdmissionPending
+
 // errRouteStillPending means a route's admitted input is still queued; retry
 // later without re-admitting it.
 var errRouteStillPending = errors.New("cron: route input still pending")
@@ -1149,6 +1154,10 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 		// Another worker owns the route; do not admit on a stale claim.
 		return errRouteStillPending
 	}
+	if route.SourceMessageID == routeAdmissionPending {
+		// A previous attempt was ambiguous; hold instead of re-admitting.
+		return errRouteHeld
+	}
 	prober, supportsRecovery := s.turn.(turnCollector)
 	if route.SourceMessageID != "" {
 		if !supportsRecovery {
@@ -1222,6 +1231,9 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 	if route.Meta != "" {
 		_ = json.Unmarshal([]byte(route.Meta), &meta)
 	}
+	if err := pair.store.Orch().SetCronRouteAdmissionPending(route.ID); err != nil {
+		return err
+	}
 	result, runErr := s.turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        route.Text,
 		Description: "Cron inbox event",
@@ -1234,7 +1246,8 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 			if err != nil {
 				return err
 			}
-			if !ok || current.DeliveredAt != nil || current.SourceMessageID != "" {
+			if !ok || current.DeliveredAt != nil ||
+				(current.SourceMessageID != "" && current.SourceMessageID != routeAdmissionPending) {
 				return errRouteFenced
 			}
 			if current.ClaimToken != token {
@@ -1255,17 +1268,28 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 	if errors.Is(runErr, errRouteFenced) {
 		return errRouteStillPending
 	}
-	if runErr != nil && result != nil && result.InputID != "" && route.SourceMessageID == "" {
-		// OpenCode accepted the input but the callback's marker write failed.
-		// Persist it from the returned result; if that also fails, park the
-		// route so a retry cannot admit the same event again.
-		if saveErr := persistRouteAdmitted(pair.store.Orch(), route.ID, result.SessionID, result.InputID); saveErr != nil {
-			_ = pair.store.Orch().HoldCronRoute(route.ID, s.now().Add(24*time.Hour))
-			log.Printf("cron: hold inbox route %s: admission marker could not be persisted: %v", route.ID, saveErr)
-			return errRouteHeld
+	if runErr != nil {
+		if result != nil && result.InputID != "" {
+			// OpenCode accepted the input but the callback's marker write
+			// failed. Persist it from the returned result; if that also fails,
+			// park the route so a retry cannot admit the same event again.
+			if saveErr := persistRouteAdmitted(pair.store.Orch(), route.ID, result.SessionID, result.InputID); saveErr != nil {
+				_ = pair.store.Orch().HoldCronRoute(route.ID, s.now().Add(24*time.Hour))
+				log.Printf("cron: hold inbox route %s: admission marker could not be persisted: %v", route.ID, saveErr)
+				return errRouteHeld
+			}
+			return runErr
 		}
+		if opencode.IsPermanentError(runErr) {
+			// A definite rejection proves no admission; allow a later retry.
+			_ = pair.store.Orch().ClearCronRouteAdmission(route.ID)
+			return runErr
+		}
+		// Ambiguous outcome: keep the durable intent and hold the route rather
+		// than re-admitting the event.
+		return errRouteHeld
 	}
-	return runErr
+	return nil
 }
 
 func (s *Service) retryRoutes(ctx context.Context, pair *agentStore) {
