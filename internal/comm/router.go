@@ -50,6 +50,12 @@ var resumeGraceWindow = 5 * time.Minute
 // whole duration, so waiting without a bound would stall replay.
 var sessionLockWait = 10 * time.Second
 
+// liveTurnTimeout bounds one live user turn. Without it a wedged OpenCode
+// stream can hold the inbound claim forever (the heartbeat keeps renewing it)
+// and recovery never sees the row. A timeout returns the error to the adapter,
+// which hands the durable marker back to reconciliation.
+var liveTurnTimeout = 10 * time.Minute
+
 // maxResumeAttempts bounds how many times recovery re-admits one message before
 // settling it with an explicit notice.
 const maxResumeAttempts = 2
@@ -210,7 +216,7 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		return fmt.Errorf("comm: record admission intent: %w", err)
 	}
 
-	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
+	cfg := opencode.TurnConfig{Workspace: agent.Workspace, Timeout: liveTurnTimeout}
 	if r.events != nil {
 		cfg.OnEvent = r.events(agent, st)
 	}

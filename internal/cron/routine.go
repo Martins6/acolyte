@@ -14,22 +14,22 @@ import (
 	"github.com/martins6/acolyte/internal/store/orch"
 )
 
-func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) (string, string, error) {
+func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) (string, string, bool, error) {
 	if s.routines == nil {
-		return "", "", fmt.Errorf("cron: routine registry is not configured")
+		return "", "", false, fmt.Errorf("cron: routine registry is not configured")
 	}
 	routineValue, ok := s.routines.Get(job.Routine)
 	if !ok {
-		return "", "", fmt.Errorf("cron: routine %q is not registered", job.Routine)
+		return "", "", false, fmt.Errorf("cron: routine %q is not registered", job.Routine)
 	}
 
 	args, err := routine.DecodeArgs(job.RoutineArgs)
 	if err != nil {
-		return "", "", fmt.Errorf("cron: parse routine args for %s: %w", job.Title, err)
+		return "", "", false, fmt.Errorf("cron: parse routine args for %s: %w", job.Title, err)
 	}
 	normalized, err := routine.ValidateArgs(routineValue.Args(), args)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 
 	// Routines are headless and own their session. A stored session id is a
@@ -42,7 +42,7 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 	sessionID := ""
 	session, ok, err := st.Orch().GetSessionByThread(thread)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if ok {
 		sessionID = session.OpenCodeSessionID
@@ -53,6 +53,7 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		_ = json.Unmarshal([]byte(job.Meta), &jobMeta)
 	}
 
+	admitted := false
 	env := routine.Env{
 		Agent:     agent,
 		Workspace: agent.Workspace,
@@ -61,8 +62,12 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		Meta:      jobMeta,
 		Now:       s.now,
 		Store:     st,
-		OnAdmitted: func(admitted opencode.Admitted) error {
-			return st.Orch().SetCronJobPending(job.ID, admitted.SessionID, admitted.InputID, "routine", s.now())
+		OnAdmitted: func(admittedTurn opencode.Admitted) error {
+			if err := st.Orch().SetCronJobPending(job.ID, admittedTurn.SessionID, admittedTurn.InputID, "routine", s.now()); err != nil {
+				return err
+			}
+			admitted = true
+			return nil
 		},
 		NotifyUser: func(ctx context.Context, text string) error {
 			return s.sink.NotifyUser(ctx, agent, text)
@@ -90,5 +95,5 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 	}
 
 	out, err := routineValue.Run(ctx, env, normalized)
-	return out, sessionID, err
+	return out, sessionID, admitted, err
 }

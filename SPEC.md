@@ -758,6 +758,10 @@ queues the real reply when it exists; only definitive failures settle with a not
 (`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply
 collapses to one row instead of double-sending.
 
+**Live turns are bounded.** A live user turn carries a `liveTurnTimeout` (10 min). If it expires, the
+durable marker is handed back to reconciliation instead of letting the inbound claim heartbeat renew
+forever; recovery then applies the normal busy/grace policy.
+
 **Operator notices are labelled.** Text Acolyte generates about its own operation is sent as
 `ACOLYTE SYSTEM MESSAGE: <text>` on its own outbound identity (`sys_<inbound>`), never mixed into agent
 text, and never claims a request completed when it did not.
@@ -766,14 +770,15 @@ text, and never claims a request completed when it did not.
 adapter, so an initial replay can never mark a marker-bearing row processed while recovery is missing.
 
 **Cron runs recover output, not execution.** A job records the marker of the turn it admitted
-(`orch_cron_jobs.pending_*`). On restart, recovery checks that the session is not still in flight,
-collects the turn's text, and routes it, then records the run as attempted. The marker is cleared only
-after a successful collection; a run that errored after admission leaves it for the next pass.
-Permanent probe failures (missing session, truncated output), a delivered turn with no text, and a
-consumed marker with nothing pending settle the run as incomplete instead of retrying forever; a
-marker still queued in the inbox stays recoverable for the next pass. Routine bodies are **not**
-replayed: they mutate files, so a routine interrupted mid-body is reported as incomplete rather than
-re-run or presented as finished.
+(`orch_cron_jobs.pending_*`). On restart, recovery takes the shared per-session turn lock, checks that
+the session is not still in flight, collects the turn's text, and routes it, then records the run as
+attempted. The marker is cleared only after a successful collection; a run that errored after
+admission leaves it for the next pass and logs the transient error without routing a terminal failure,
+so recovery cannot later contradict it. Permanent probe failures (missing session, truncated output),
+a delivered turn with no text, and a consumed marker with nothing pending settle the run as
+incomplete instead of retrying forever; a marker still queued in the inbox stays recoverable for the
+next pass. Routine bodies are **not** replayed: they mutate files, so a routine interrupted mid-body
+is reported as incomplete rather than re-run or presented as finished.
 
 ---
 

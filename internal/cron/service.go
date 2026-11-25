@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/martins6/acolyte/internal/comm"
+	"github.com/martins6/acolyte/internal/lock"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/routine"
@@ -423,7 +424,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		s.logJob(st, job, "error", metaErr.Error())
 		return
 	}
-	text, sessionID, err := s.runJob(ctx, agent, st, job, meta)
+	text, sessionID, admitted, err := s.runJob(ctx, agent, st, job, meta)
 	// Clear the marker only when the run finished. A turn error after admission
 	// (canceled wait, collection failure) must leave the marker so the next
 	// recovery pass can collect the output instead of losing it.
@@ -432,6 +433,13 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	}
 
 	if err != nil {
+		if admitted {
+			// The turn is admitted and its marker is pending. Recovery owns the
+			// outcome; routing a terminal failure now would contradict the
+			// output it may later recover.
+			s.logJob(st, job, "warn", fmt.Sprintf("run did not finish; recovery will collect its output: %v", err))
+			return
+		}
 		if strings.TrimSpace(text) == "" {
 			text = fmt.Sprintf("cron job %q failed: %v", job.Title, err)
 		}
@@ -461,6 +469,10 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 // cronResumeGrace is how long an admitted cron turn may sit uncollected before
 // recovery treats the run as interrupted. A variable so tests can shorten it.
 var cronResumeGrace = 5 * time.Minute
+
+// cronSessionLockWait bounds how long recovery waits for a live turn's session
+// lock before leaving the marker for the next pass.
+var cronSessionLockWait = 10 * time.Second
 
 // turnCollector is the optional recovery half of the cron turn runner.
 type turnCollector interface {
@@ -494,10 +506,18 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			_ = pair.store.Orch().ClearCronJobPending(pending.JobID)
 			continue
 		}
-		// A session that is still busy owns its turn: collecting now would
-		// read partial output and clear a marker that is not finished yet.
+		// Take the shared session lock around the state recheck and collection.
+		// A router, OutboxSink, or another cron turn can otherwise start
+		// between the in-flight check and CollectDelivered, making a busy turn
+		// look completed and routing partial output.
+		releaseLock, lockErr := acquireCronSessionLock(ctx, pending.SessionID)
+		if lockErr != nil {
+			log.Printf("cron: wait for session lock for %s: %v", job.Title, lockErr)
+			continue
+		}
 		info, err := collector.GetSession(ctx, pending.SessionID)
 		if err != nil {
+			releaseLock()
 			if opencode.IsPermanentError(err) {
 				s.settleInterruptedRun(pair.store, job, "the session is no longer available")
 				continue
@@ -506,10 +526,12 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			continue
 		}
 		if info != nil && info.Time.InFlight() {
+			releaseLock()
 			continue
 		}
 		result, delivered, err := collector.CollectDelivered(ctx, pending.SessionID, pending.MarkerID)
 		if err != nil {
+			releaseLock()
 			if errors.Is(err, opencode.ErrTurnTruncated) {
 				s.settleInterruptedRun(pair.store, job, "the turn output exceeded the collection window")
 				continue
@@ -526,6 +548,7 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			// was consumed: it may still be queued on an idle session and
 			// execute later. Only settle once the inbox says it is gone.
 			queued, probeErr := collector.InboxPending(ctx, pending.SessionID, pending.MarkerID)
+			releaseLock()
 			if probeErr != nil {
 				if opencode.IsPermanentError(probeErr) {
 					s.settleInterruptedRun(pair.store, job, "the turn could no longer be inspected")
@@ -540,6 +563,7 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
 			continue
 		}
+		releaseLock()
 		if result == nil || strings.TrimSpace(result.ResponseText) == "" {
 			// The marker was delivered but the turn produced no text: there is
 			// nothing to route, so settle it as incomplete instead of logging
@@ -566,6 +590,18 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 	}
 }
 
+// acquireCronSessionLock takes the shared per-session turn lock. The returned
+// function releases it.
+func acquireCronSessionLock(ctx context.Context, sessionID string) (func(), error) {
+	lockCtx, cancel := context.WithTimeout(ctx, cronSessionLockWait)
+	defer cancel()
+	held, err := lock.AcquireSession(lockCtx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = held.Release() }, nil
+}
+
 // settleInterruptedRun stops a marker that can never produce output from being
 // probed forever. It clears the pending turn, records an honest incomplete
 // note, and marks the run as attempted.
@@ -582,7 +618,7 @@ func (s *Service) jobRunning(agentName, jobID string) bool {
 	return s.running[agentName+"/"+jobID]
 }
 
-func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, error) {
+func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, bool, error) {
 	switch job.Kind {
 	case "shell":
 		out, runErr := s.runShell(ctx, agent, job, meta)
@@ -592,13 +628,13 @@ func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.St
 				sessionID = session.OpenCodeSessionID
 			}
 		}
-		return out, sessionID, runErr
+		return out, sessionID, false, runErr
 	case "prompt":
 		return s.runPrompt(ctx, agent, st, job)
 	case "routine":
 		return s.runRoutine(ctx, agent, st, job)
 	default:
-		return "", "", fmt.Errorf("cron: unknown job kind %q", job.Kind)
+		return "", "", false, fmt.Errorf("cron: unknown job kind %q", job.Kind)
 	}
 }
 

@@ -105,7 +105,11 @@ Behaviour worth remembering when changing this code:
 - Escalation takes the session lock, re-reads the row, and revalidates that the marker is still queued
   before interrupting; a marker that executed while waiting is handed back for a fresh reconcile.
 - The daemon installs the adapter's reconciler before the adapter starts polling, so an initial replay
-  cannot settle a marker-bearing row while recovery is missing.
+  cannot settle a marker-bearing row while recovery is missing. Live user turns are bounded by
+  `liveTurnTimeout`; an expired turn hands its durable marker back to reconciliation.
+- Cron recovery takes the shared session lock around the in-flight recheck and collection. A run that
+  errors after admission keeps its marker and logs the transient error without routing a terminal
+  failure, so recovery cannot later contradict that notification.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.
