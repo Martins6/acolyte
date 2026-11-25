@@ -442,7 +442,7 @@ func (s *Store) PendingCronTurns(before time.Time, limit int) ([]PendingTurn, er
 	rows, err := s.db.Query(`SELECT id, pending_session_id, pending_marker_id, pending_kind,
 			pending_started_at, pending_attempts
 		FROM orch_cron_jobs
-		WHERE (pending_marker_id != '' OR pending_kind = 'indeterminate')
+		WHERE (pending_marker_id != '' OR pending_kind IN ('indeterminate', 'routine-run'))
 		AND pending_started_at <= ?
 		ORDER BY pending_started_at LIMIT ?`, before, limit)
 	if err != nil {
@@ -488,7 +488,7 @@ func (s *Store) CronJobPending(id string) (PendingTurn, bool, error) {
 		value := startedAt.Time
 		turn.StartedAt = &value
 	}
-	if turn.MarkerID == "" && turn.Kind != "indeterminate" {
+	if turn.MarkerID == "" && turn.Kind != "indeterminate" && turn.Kind != "routine-run" {
 		return PendingTurn{}, false, nil
 	}
 	return turn, true, nil

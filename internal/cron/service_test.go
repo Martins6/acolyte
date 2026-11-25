@@ -274,6 +274,60 @@ func (c *countingSink) count() int {
 	return c.notified
 }
 
+// collectingRoutine simulates a routine that consumes one turn and then fails
+// in its post-turn work.
+type collectingRoutine struct{}
+
+func (collectingRoutine) Name() string        { return "turn-taking" }
+func (collectingRoutine) Owner() string       { return "test" }
+func (collectingRoutine) Description() string { return "test routine" }
+func (collectingRoutine) Args() []routine.ArgSpec {
+	return nil
+}
+func (collectingRoutine) Run(_ context.Context, env routine.Env, _ map[string]any) (string, error) {
+	if err := env.OnAdmitted(opencode.Admitted{SessionID: "ses_r", InputID: "msg_r"}); err != nil {
+		return "", err
+	}
+	if err := env.OnCollected(&opencode.TurnResult{SessionID: "ses_r", InputID: "msg_r"}); err != nil {
+		return "", err
+	}
+	return "", errors.New("post-turn failure")
+}
+
+// TestRoutineKeepsRunPendingAfterTurnCollected ensures the routine's durable
+// state survives the gap between a collected turn and routine completion.
+func TestRoutineKeepsRunPendingAfterTurnCollected(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "turn-taking", Kind: "routine", Spec: "@every 1h", Routine: "turn-taking",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	routines := routine.NewRegistry()
+	if err := routines.Register(collectingRoutine{}); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+	svc := startTestService(t, reg, routines, &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("turn-taking")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok {
+		t.Fatal("pending run was lost after the turn was collected")
+	}
+	if pending.Kind != "routine-run" || pending.MarkerID != "" {
+		t.Errorf("pending = %+v, want a run-level routine-run state", pending)
+	}
+}
+
 func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{
@@ -504,6 +558,52 @@ func TestRecoverPendingTurnsSettlesIndeterminateRun(t *testing.T) {
 	}
 	if !storeLogContains(t, pair.store, "could not be tracked reliably") {
 		t.Errorf("logs = %v, want the indeterminate notice", storeLogMessages(t, pair.store))
+	}
+}
+
+// TestRecoverPendingTurnsSettlesUnfinishedRoutine covers a routine that
+// consumed its last turn but stopped before the body finished: recovery settles
+// it as incomplete and never replays the body.
+func TestRecoverPendingTurnsSettlesUnfinishedRoutine(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "dream", Kind: "routine", Spec: "@every 72h", Routine: "dream",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("dream")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "", "", "routine-run", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	turn := &collectingTurn{delivered: true, text: "ignored"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want settled", turns)
+	}
+	if len(turn.collected) != 0 {
+		t.Errorf("collected = %v, want no replay of the routine body", turn.collected)
+	}
+	if !storeLogContains(t, pair.store, "the routine body did not finish") {
+		t.Errorf("logs = %v, want the incomplete-routine note", storeLogMessages(t, pair.store))
 	}
 }
 

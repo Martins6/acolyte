@@ -506,13 +506,18 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			_ = pair.store.Orch().ClearCronJobPending(pending.JobID)
 			continue
 		}
-		if pending.Kind == "indeterminate" || strings.TrimSpace(pending.MarkerID) == "" {
-			// Admission was confirmed but no marker could be saved. There is
+		if pending.Kind == "indeterminate" || pending.Kind == "routine-run" || strings.TrimSpace(pending.MarkerID) == "" {
+			// Admission was confirmed but no collectable marker exists (or a
+			// routine body stopped after consuming its last turn). There is
 			// nothing to collect; settle the run honestly. Re-check first so a
 			// concurrent pass cannot settle it twice.
+			reason := "the run could not be tracked reliably"
+			if pending.Kind == "routine-run" {
+				reason = "the routine body did not finish"
+			}
 			current, ok, checkErr := pair.store.Orch().CronJobPending(job.ID)
-			if checkErr == nil && ok && current.Kind == "indeterminate" {
-				s.settleInterruptedRun(pair.store, job, "the run could not be tracked reliably")
+			if checkErr == nil && ok && current.Kind == pending.Kind {
+				s.settleInterruptedRun(pair.store, job, reason)
 			}
 			continue
 		}

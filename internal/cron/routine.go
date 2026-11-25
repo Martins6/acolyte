@@ -74,11 +74,11 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 			return nil
 		},
 		OnCollected: func(*opencode.TurnResult) error {
-			if err := st.Orch().ClearCronJobPending(job.ID); err != nil {
-				return err
-			}
-			admitted = false
-			return nil
+			// Consume the turn marker while the session lock is held, but keep
+			// a run-level pending state: the routine body still has post-turn
+			// work (audit, writer turn, delivery) and must be settled by
+			// recovery if the process stops before it finishes.
+			return st.Orch().SetCronJobPending(job.ID, "", "", "routine-run", s.now())
 		},
 		NotifyUser: func(ctx context.Context, text string) error {
 			return s.sink.NotifyUser(ctx, agent, text)

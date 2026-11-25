@@ -780,8 +780,8 @@ later contradict it. An admission whose marker cannot be saved is recorded as an
 run and settled as untracked. Permanent probe failures (missing session, truncated output), a delivered
 turn with no text, and a consumed marker with nothing pending settle the run as incomplete instead of
 retrying forever; a marker still queued in the inbox stays recoverable for the next pass. Routine
-bodies are **not** replayed: they mutate files, so a routine interrupted mid-body is reported as
-incomplete rather than re-run or presented as finished.
+bodies are **not** replayed: a collected turn leaves a run-level `routine-run` pending state until the
+body finishes, and recovery settles an unfinished routine as incomplete rather than re-running it.
 
 ---
 
