@@ -223,6 +223,12 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 
 	if turnErr != nil {
+		if r.inboundAdmitted(st, env.ID) {
+			// The marker is durable, so recovery can still collect the real
+			// reply. Do not send an error on the reply identity: it would both
+			// settle the row and make the outbox suppress the recovered reply.
+			return turnErr
+		}
 		if sendErr := r.sendReply(ctx, st, agent, env, result, fmt.Sprintf("Error: %v", turnErr)); sendErr != nil {
 			return fmt.Errorf("%v: %w", turnErr, sendErr)
 		}
@@ -299,8 +305,22 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 		return ReconcileStillPending, err
 	}
 	if info.Time.InFlight() {
-		// The service still owns this turn. Recovery must not interfere.
-		return ReconcileStillPending, nil
+		if !resumeGraceElapsed(item, r.now()) {
+			// The service still owns this turn. Recovery must not interfere
+			// while it is inside the grace window.
+			return ReconcileStillPending, nil
+		}
+		// The session has been busy past the grace window. Bounded recovery
+		// matters more than waiting forever: interrupt it and tell the user the
+		// turn did not finish instead of letting the message sit pending.
+		if err := prober.Interrupt(ctx, sessionID); err != nil && !opencode.IsPermanentError(err) {
+			return ReconcileStillPending, err
+		}
+		notice := SystemNotice("your message was still running after the recovery grace period, so it was interrupted and no reply was delivered. Send it again to retry.")
+		if err := r.settleNotice(ctx, st, agent, env, notice); err != nil {
+			return ReconcileUnrecoverable, err
+		}
+		return ReconcileUnrecoverable, nil
 	}
 
 	result, delivered, err := prober.CollectDelivered(ctx, sessionID, marker)
@@ -551,6 +571,17 @@ func hasMediaPathLine(text, path string) bool {
 		}
 	}
 	return false
+}
+
+// inboundAdmitted reports whether the inbound already carries a durable turn
+// marker. Recovery can re-collect such a turn, so it must not be settled by the
+// admission error path.
+func (r *Router) inboundAdmitted(st *store.Store, envelopeID string) bool {
+	item, found, err := st.CommTG().GetInboxByEnvelope(envelopeID)
+	if err != nil || !found {
+		return false
+	}
+	return strings.TrimSpace(item.OpenCodeMessageID) != "" && strings.TrimSpace(item.OpenCodeSessionID) != ""
 }
 
 func (r *Router) linkInbound(st *store.Store, env envelope.Envelope, result *opencode.TurnResult) error {

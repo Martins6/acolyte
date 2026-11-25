@@ -92,7 +92,10 @@ Behaviour worth remembering when changing this code:
   started; the reply, an error, or an operator notice reports the outcome. Reconciliation heals a
   missing ack (crash between marker and ack) using the same stable identity.
 - Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
-  and only into a fresh session for input that provably never executed.
+  and only into a fresh session for input that provably never executed. A session still in flight past
+  the grace window is interrupted and settled as incomplete, never re-admitted.
+- A collection error after admission keeps the marker and the reply identity free; replay reconciles
+  and queues the real reply when it exists. Only definitive failures settle with a notice.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.

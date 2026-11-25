@@ -421,6 +421,74 @@ func TestRouterAckIsIdempotent(t *testing.T) {
 	}
 }
 
+// failingTurn returns a pre-admission error and never calls OnAdmitted.
+type failingTurn struct{}
+
+func (failingTurn) RunUserTurn(context.Context, string, string, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, errors.New("prompt rejected")
+}
+
+// TestRouterPreAdmissionErrorReplies covers a failure before the turn exists:
+// there is nothing to recover, so the user gets the error reply immediately.
+func TestRouterPreAdmissionErrorReplies(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = failingTurn{}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(76),
+		envelope.Party{Kind: envelope.PartyUser, ID: "76"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 703)
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
+		t.Fatal("HandleInbound() error = nil, want the prompt error")
+	}
+	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != replyEnvelopeID(env.ID) {
+		t.Fatalf("outbound events = %+v, want one error reply on the reply identity", h.outbound.events)
+	}
+	if !strings.Contains(h.outbound.events[0].Content.Text, "Error:") {
+		t.Errorf("reply = %q, want an error reply", h.outbound.events[0].Content.Text)
+	}
+}
+
+// TestRouterPostAdmissionErrorLeavesTurnForRecovery ensures a collection error
+// after admission does not consume the reply identity: the marker must stay
+// eligible for reconciliation so the real reply can still be collected.
+func TestRouterPostAdmissionErrorLeavesTurnForRecovery(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.turn.err = errors.New("stream died")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(77),
+		envelope.Party{Kind: envelope.PartyUser, ID: "77"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 704)
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
+		t.Fatal("HandleInbound() error = nil, want the collection error")
+	}
+	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Fatalf("outbound events = %+v, want only the ack; the reply slot must stay free", h.outbound.events)
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.OpenCodeMessageID != "msg_in" || item.OpenCodeSessionID != "ses_fake" {
+		t.Errorf("marker = %q/%q, want the admitted pair", item.OpenCodeSessionID, item.OpenCodeMessageID)
+	}
+	if item.ProcessedAt != nil {
+		t.Error("row was settled despite an admitted turn awaiting collection")
+	}
+	if item.PendingReply != "" {
+		t.Errorf("pending reply = %q, want none (recovery owns the reply)", item.PendingReply)
+	}
+}
+
 func TestRouterTurnRecordsToolActivity(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.turn.events = []opencode.Event{
@@ -1196,6 +1264,38 @@ func TestReconcileHealsMissingAdmissionAck(t *testing.T) {
 	}
 	if len(outbox) != 1 || outbox[0].EnvelopeID != ackEnvelopeID(env.ID) {
 		t.Fatalf("outbox = %+v, want exactly one healed ack", outbox)
+	}
+}
+
+// TestReconcileInterruptsBusyTurnAfterGrace closes the "busy forever" hole: a
+// session that is still in flight past the grace window is interrupted and the
+// message is settled as incomplete instead of being left pending forever.
+func TestReconcileInterruptsBusyTurnAfterGrace(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		pending: true,
+		session: &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(79),
+		envelope.Party{Kind: envelope.PartyUser, ID: "79"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 410, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	if len(prober.interrupted) != 1 || prober.interrupted[0] != "ses_busy" {
+		t.Errorf("interrupted = %v, want the busy session interrupted", prober.interrupted)
+	}
+	assertSettledWithNotice(t, h, env)
+	if len(h.outbound.events) == 2 && !strings.Contains(h.outbound.events[1].Content.Text, "still running") {
+		t.Errorf("notice = %q, want the busy-turn wording", h.outbound.events[1].Content.Text)
 	}
 }
 

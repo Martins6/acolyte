@@ -732,8 +732,14 @@ failures (missing session, rejected request) settle the same way.
 **Escalation is bounded and honest.** After a `resumeGraceWindow` (5 min), a stranded turn is
 abandoned: the session is interrupted, the thread→session mapping is forgotten, and the marker is
 cleared so the next pass admits the message into a fresh session. Because the abandoned input provably
-never executed, nothing is duplicated; the cost is that thread's conversation context. After
-`maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
+never executed, nothing is duplicated; the cost is that thread's conversation context. A session that
+is still in flight past the grace window is interrupted and the message is settled as incomplete
+instead: execution cannot be disproved, so it is never re-admitted. After `maxResumeAttempts` (2), the
+message is settled and the user is told it did not complete.
+
+**Collection errors do not consume the reply.** A turn error after admission keeps the marker and
+leaves the reply identity (`out_<inbound>`) free. Replay reconciles the turn and queues the real reply
+when it exists; only definitive failures settle with a notice.
 
 **Replies are idempotent per inbound.** The reply envelope ID is derived from the inbound envelope ID
 (`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply
