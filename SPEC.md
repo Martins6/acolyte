@@ -739,7 +739,8 @@ this marker is the session's head turn (no later delivered input, or the next in
 a later turn is never interrupted. The ownership check and interrupt take the same per-session turn
 lock as every admission (router, cron, OutboxSink), so a newer turn cannot start in between; escalation
 re-reads the row and revalidates that the marker is still queued after taking the lock. If an
-interrupt is rejected and cannot be confirmed, the notice says so instead of claiming the turn stopped.
+interrupt is rejected and cannot be confirmed, the notice says so instead of claiming the turn stopped,
+and does not tell the user to resend while the original turn may still run.
 After `maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
 
 **Collection errors do not consume the reply.** A turn error after admission keeps the marker and

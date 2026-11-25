@@ -418,7 +418,7 @@ func (r *Router) reconcile(ctx context.Context, agent registry.Agent, env envelo
 			}
 			noticeText := "your message was still running after the recovery grace period, so it was interrupted and no reply was delivered. Send it again to retry."
 			if !stopConfirmed {
-				noticeText = "your message was still running after the recovery grace period, but stopping it could not be confirmed and no reply was delivered. Send it again to retry."
+				noticeText = "your message was still running after the recovery grace period, but stopping it could not be confirmed and no reply was delivered. Check whether the turn is still running before sending it again."
 			}
 			if err := r.settleNotice(ctx, st, agent, env, SystemNotice(noticeText)); err != nil {
 				return ReconcileUnrecoverable, err

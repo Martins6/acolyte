@@ -1456,6 +1456,9 @@ func TestReconcileBusyStopNotConfirmed(t *testing.T) {
 		if strings.Contains(notice, "was interrupted") {
 			t.Errorf("notice = %q, must not claim an unconfirmed interruption", notice)
 		}
+		if strings.Contains(notice, "Send it again") {
+			t.Errorf("notice = %q, must not recommend retrying while execution may continue", notice)
+		}
 	}
 }
 

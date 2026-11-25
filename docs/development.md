@@ -95,8 +95,8 @@ Behaviour worth remembering when changing this code:
   and only into a fresh session for input that provably never executed. A session still in flight past
   the grace window is interrupted and settled as incomplete, but only when this marker is the head
   turn; a later delivered turn is left alone. The ownership check and interrupt take the per-session
-  turn lock shared by router, cron, and OutboxSink turns. An unconfirmed interrupt settles with wording
-  that does not claim the turn stopped.
+  turn lock shared by router, cron, and OutboxSink turns. An unconfirmed interrupt settles without
+  claiming the turn stopped or asking the user to retry while it may still run.
 - A collection error after admission keeps the marker and the reply identity free. The admission
   callback proves OpenCode accepted the input even if the marker write failed; the error path retries
   the write, and `admitted_at` without a marker is the durable indeterminate state that replay settles
