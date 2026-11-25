@@ -424,9 +424,12 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		return
 	}
 	text, sessionID, err := s.runJob(ctx, agent, st, job, meta)
-	// The turn, if any, is settled once runJob returns; recovery must not try to
-	// collect it again.
-	_ = st.Orch().ClearCronJobPending(job.ID)
+	// Clear the marker only when the run finished. A turn error after admission
+	// (canceled wait, collection failure) must leave the marker so the next
+	// recovery pass can collect the output instead of losing it.
+	if err == nil {
+		_ = st.Orch().ClearCronJobPending(job.ID)
+	}
 
 	if err != nil {
 		if strings.TrimSpace(text) == "" {
@@ -461,7 +464,9 @@ var cronResumeGrace = 5 * time.Minute
 
 // turnCollector is the optional recovery half of the cron turn runner.
 type turnCollector interface {
+	GetSession(ctx context.Context, sessionID string) (*opencode.SessionInfo, error)
 	CollectDelivered(ctx context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error)
+	InboxPending(ctx context.Context, sessionID, itemID string) (bool, error)
 }
 
 // recoverPendingTurns collects the output of runs that were admitted before a
@@ -489,18 +494,61 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			_ = pair.store.Orch().ClearCronJobPending(pending.JobID)
 			continue
 		}
+		// A session that is still busy owns its turn: collecting now would
+		// read partial output and clear a marker that is not finished yet.
+		info, err := collector.GetSession(ctx, pending.SessionID)
+		if err != nil {
+			if opencode.IsPermanentError(err) {
+				s.settleInterruptedRun(pair.store, job, "the session is no longer available")
+				continue
+			}
+			log.Printf("cron: inspect pending session for %s: %v", job.Title, err)
+			continue
+		}
+		if info != nil && info.Time.InFlight() {
+			continue
+		}
 		result, delivered, err := collector.CollectDelivered(ctx, pending.SessionID, pending.MarkerID)
 		if err != nil {
+			if errors.Is(err, opencode.ErrTurnTruncated) {
+				s.settleInterruptedRun(pair.store, job, "the turn output exceeded the collection window")
+				continue
+			}
+			if opencode.IsPermanentError(err) {
+				s.settleInterruptedRun(pair.store, job, "the turn could no longer be collected")
+				continue
+			}
 			log.Printf("cron: collect pending turn for %s: %v", job.Title, err)
+			continue
+		}
+		if !delivered {
+			// Not finding the marker in the timeline does not mean the input
+			// was consumed: it may still be queued on an idle session and
+			// execute later. Only settle once the inbox says it is gone.
+			queued, probeErr := collector.InboxPending(ctx, pending.SessionID, pending.MarkerID)
+			if probeErr != nil {
+				if opencode.IsPermanentError(probeErr) {
+					s.settleInterruptedRun(pair.store, job, "the turn could no longer be inspected")
+					continue
+				}
+				log.Printf("cron: inspect pending input for %s: %v", job.Title, probeErr)
+				continue
+			}
+			if queued {
+				continue
+			}
+			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
+			continue
+		}
+		if result == nil || strings.TrimSpace(result.ResponseText) == "" {
+			// The marker was delivered but the turn produced no text: there is
+			// nothing to route, so settle it as incomplete instead of logging
+			// a recovered-output note for empty content.
+			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
 			continue
 		}
 
 		_ = pair.store.Orch().ClearCronJobPending(job.ID)
-		if !delivered {
-			s.logJob(pair.store, job, "error", "run interrupted: the turn produced no output")
-			_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
-			continue
-		}
 		note := "recovered output from an interrupted run"
 		if pending.Kind == "routine" {
 			note = "recovered turn output from an interrupted routine run; the routine body did not finish"
@@ -516,6 +564,15 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		}
 		_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
 	}
+}
+
+// settleInterruptedRun stops a marker that can never produce output from being
+// probed forever. It clears the pending turn, records an honest incomplete
+// note, and marks the run as attempted.
+func (s *Service) settleInterruptedRun(st *store.Store, job orch.CronJob, reason string) {
+	_ = st.Orch().ClearCronJobPending(job.ID)
+	s.logJob(st, job, "error", "run interrupted: "+reason)
+	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 }
 
 // jobRunning reports whether a run of the job is in flight in this process.

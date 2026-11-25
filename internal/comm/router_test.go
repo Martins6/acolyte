@@ -967,6 +967,160 @@ func TestReconcileRecoversDeliveredTurn(t *testing.T) {
 	}
 }
 
+// TestReconcileSettlesEmptyReply covers a turn that finished without text:
+// sendReply would do nothing, so replay must not mark it processed silently.
+func TestReconcileSettlesEmptyReply(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = &fakeProber{
+		delivered: true,
+		collected: &opencode.TurnResult{SessionID: "ses_1", InputID: "msg_in", ResponseText: "   "},
+		session:   &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(86),
+		envelope.Party{Kind: envelope.PartyUser, ID: "86"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedAdmitted(t, env, 406, "ses_1", "msg_in")
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	assertSettledWithNotice(t, h, env)
+}
+
+// TestReconcileSettlesTruncatedTurn covers ErrTurnTruncated: retrying can
+// never produce a bounded reply, so the row must be settled with a notice.
+func TestReconcileSettlesTruncatedTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = &fakeProber{
+		collectErr: opencode.ErrTurnTruncated,
+		session:    &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(87),
+		envelope.Party{Kind: envelope.PartyUser, ID: "87"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedAdmitted(t, env, 407, "ses_1", "msg_in")
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want the truncated turn settled", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	assertSettledWithNotice(t, h, env)
+}
+
+// TestReconcileLeavesTransientProbeErrorPending ensures only definitive
+// outcomes settle; transport, timeout, rate-limit, and 5xx errors stay pending.
+func TestReconcileLeavesTransientProbeErrorPending(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "transport error", err: errors.New("service unavailable")},
+		{name: "service unavailable", err: &opencode.APIError{Status: 503}},
+		{name: "rate limited", err: &opencode.APIError{Status: 429}},
+		{name: "request timeout", err: &opencode.APIError{Status: 408}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRouterHarness(t, 4)
+			h.router.turn = &fakeProber{
+				collectErr: tc.err,
+				session:    &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+			}
+			env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(88),
+				envelope.Party{Kind: envelope.PartyUser, ID: "88"},
+				envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+				envelope.Content{Type: envelope.ContentText, Text: "hello"})
+			h.seedAdmitted(t, env, 408, "ses_1", "msg_in")
+
+			outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+			if err == nil {
+				t.Fatal("Reconcile() error = nil, want the transient error surfaced")
+			}
+			if outcome != ReconcileStillPending {
+				t.Fatalf("outcome = %v, want still-pending", outcome)
+			}
+			if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+				t.Errorf("outbound events = %+v, want only the healed ack", h.outbound.events)
+			}
+		})
+	}
+}
+
+// TestReconcileSettlesPermanentProbeError covers probes that cannot heal by
+// retrying: a deleted session or a rejected request must settle with a notice.
+func TestReconcileSettlesPermanentProbeError(t *testing.T) {
+	cases := []struct {
+		name       string
+		sessionErr error
+		collectErr error
+		inboxErr   error
+	}{
+		{name: "missing session", sessionErr: &opencode.APIError{Status: 404}},
+		{name: "rejected collect", collectErr: &opencode.APIError{Status: 400}},
+		{name: "rejected inbox probe", inboxErr: &opencode.APIError{Status: 404}},
+		{name: "method not allowed", collectErr: &opencode.APIError{Status: 405}},
+		{name: "conflict", collectErr: &opencode.APIError{Status: 409}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRouterHarness(t, 4)
+			h.router.turn = &fakeProber{
+				sessionErr: tc.sessionErr,
+				collectErr: tc.collectErr,
+				inboxErr:   tc.inboxErr,
+				session:    &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+			}
+			env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(89),
+				envelope.Party{Kind: envelope.PartyUser, ID: "89"},
+				envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+				envelope.Content{Type: envelope.ContentText, Text: "hello"})
+			h.seedAdmitted(t, env, 409, "ses_1", "msg_in")
+
+			outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v, want the permanent error settled", err)
+			}
+			if outcome != ReconcileUnrecoverable {
+				t.Fatalf("outcome = %v, want unrecoverable", outcome)
+			}
+			assertSettledWithNotice(t, h, env)
+		})
+	}
+}
+
+// assertSettledWithNotice checks the terminal shape shared by settled turns:
+// healed ack, one system notice, and a processed inbound row.
+func assertSettledWithNotice(t *testing.T, h *routerHarness, env envelope.Envelope) {
+	t.Helper()
+	if len(h.outbound.events) != 2 || h.outbound.events[1].ID != "sys_"+env.ID {
+		t.Fatalf("outbound events = %+v, want healed ack and a system notice", h.outbound.events)
+	}
+	if !strings.HasPrefix(h.outbound.events[1].Content.Text, SystemNoticeMarker) {
+		t.Errorf("notice = %q, want the %q marker", h.outbound.events[1].Content.Text, SystemNoticeMarker)
+	}
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.ProcessedAt == nil {
+		t.Error("settled row was not marked processed; it will loop forever")
+	}
+}
+
 func TestReconcileLeavesRunningTurnAlone(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.router.turn = &fakeProber{
@@ -1075,8 +1229,31 @@ func TestReconcileClassifiesIdleTurn(t *testing.T) {
 			if outcome != tc.want {
 				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
 			}
-			if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
-				t.Errorf("outbound events = %+v, want only the healed ack", h.outbound.events)
+			if tc.pending {
+				if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+					t.Errorf("outbound events = %+v, want only the healed ack", h.outbound.events)
+				}
+				return
+			}
+			// A consumed turn with nothing to collect is terminal: it must be
+			// settled with an explicit notice, not retried forever.
+			if len(h.outbound.events) != 2 || h.outbound.events[1].ID != "sys_"+env.ID {
+				t.Fatalf("outbound events = %+v, want healed ack and a system notice", h.outbound.events)
+			}
+			if !strings.HasPrefix(h.outbound.events[1].Content.Text, SystemNoticeMarker) {
+				t.Errorf("notice = %q, want the %q marker", h.outbound.events[1].Content.Text, SystemNoticeMarker)
+			}
+			st, release, err := h.pool.Acquire(h.store)
+			if err != nil {
+				t.Fatalf("Acquire() error: %v", err)
+			}
+			defer release()
+			item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+			if err != nil {
+				t.Fatalf("GetInboxByEnvelope() error: %v", err)
+			}
+			if item.ProcessedAt == nil {
+				t.Error("settled row was not marked processed; it will loop forever")
 			}
 		})
 	}

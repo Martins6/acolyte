@@ -51,6 +51,9 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		}
 		return "", created, err
 	}
+	// The turn was collected, so recovery must not collect it again even if
+	// persisting the session mapping below fails.
+	_ = st.Orch().ClearCronJobPending(job.ID)
 	if _, err := st.Orch().UpsertSession(thread, result.SessionID, s.now()); err != nil {
 		return result.ResponseText, result.SessionID, err
 	}

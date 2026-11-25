@@ -220,6 +220,32 @@ func (e *APIError) Error() string {
 	}
 }
 
+// Permanent reports whether the service rejected the request in a way that
+// retrying cannot fix. Every 4xx is permanent except 408 (request timeout) and
+// 429 (rate limited), which may succeed later; 5xx responses are not permanent.
+func (e *APIError) Permanent() bool {
+	if e == nil || e.Status < 400 || e.Status >= 500 {
+		return false
+	}
+	switch e.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	default:
+		return true
+	}
+}
+
+// IsPermanentError reports whether err is a definitive API rejection. Errors
+// that are not *APIError (transport failures, timeouts, cancellations) are not
+// permanent and should be retried.
+func IsPermanentError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Permanent()
+}
+
 // Restart-window retry policy. The managed service answers with 503
 // service_stopping or service_starting while it drains and boots, and asks the
 // caller to retry with Retry-After. Those responses reject the request before
