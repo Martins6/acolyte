@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/martins6/acolyte/internal/comm"
@@ -1003,10 +1004,10 @@ var errRouteStillPending = errors.New("cron: route input still pending")
 var errRouteHeld = errors.New("cron: route held for manual recovery")
 
 // deliverRoute performs one durable route intent according to its action.
-func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch.CronRoute) error {
+func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch.CronRoute, lease time.Time) error {
 	switch route.Action {
 	case "inbox":
-		return s.deliverInboxRoute(ctx, pair, route)
+		return s.deliverInboxRoute(ctx, pair, route, lease)
 	case "log":
 		job, err := pair.store.Orch().GetCronJobByID(route.JobID)
 		if err != nil {
@@ -1051,7 +1052,15 @@ func cronReplyChat(st *store.Store, sessionID string) (int64, bool, error) {
 	}
 	if ok {
 		if chatID, parsed := envelope.ParseTelegramThread(session.Thread); parsed && chatID != 0 {
-			return chatID, true, nil
+			chat, found, err := st.CommTG().GetChat(chatID)
+			if err != nil {
+				return 0, false, err
+			}
+			if found && chat.Allowed && chat.Private {
+				return chatID, true, nil
+			}
+			// The mapped chat is gone, revoked, or not private: fall through to
+			// the latest still-authorized private chat.
 		}
 	}
 	chat, ok, err := st.CommTG().LatestAllowedChat()
@@ -1114,7 +1123,19 @@ func persistRouteAdmitted(orchStore *orch.Store, id, sessionID, markerID string)
 // deliverInboxRoute admits the output as a synthetic input, or collects the
 // input a previous attempt already admitted. The route row stores that marker,
 // so a crash never re-admits the event.
-func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route orch.CronRoute) error {
+func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route orch.CronRoute, lease time.Time) error {
+	current, ok, err := pair.store.Orch().GetCronRoute(route.ID)
+	if err != nil {
+		return err
+	}
+	if !ok || current.DeliveredAt != nil {
+		return nil
+	}
+	route = current
+	if route.ClaimedUntil == nil || !route.ClaimedUntil.Equal(lease) {
+		// Another worker owns the route; do not admit on a stale claim.
+		return errRouteStillPending
+	}
 	prober, supportsRecovery := s.turn.(turnCollector)
 	if route.SourceMessageID != "" {
 		if !supportsRecovery {
@@ -1218,6 +1239,8 @@ func (s *Service) retryRoutes(ctx context.Context, pair *agentStore) {
 			}
 			stop := make(chan struct{})
 			done := make(chan struct{})
+			deliveryCtx, cancelDelivery := context.WithCancel(ctx)
+			var ownershipLost atomic.Bool
 			go func() {
 				defer close(done)
 				ticker := time.NewTicker(routeClaimHeartbeat)
@@ -1231,15 +1254,21 @@ func (s *Service) retryRoutes(ctx context.Context, pair *agentStore) {
 						next := s.now().Add(routeClaimLease)
 						renewed, renewErr := pair.store.Orch().RenewCronRouteClaim(route.ID, expected, next)
 						if renewErr != nil || !renewed {
+							ownershipLost.Store(true)
+							cancelDelivery()
 							return
 						}
 						expected = next
 					}
 				}
 			}()
-			deliverErr := s.deliverRoute(ctx, pair, route)
+			deliverErr := s.deliverRoute(deliveryCtx, pair, route, lease)
 			close(stop)
 			<-done
+			cancelDelivery()
+			if ownershipLost.Load() {
+				continue
+			}
 			if deliverErr != nil {
 				if errors.Is(deliverErr, errRouteHeld) {
 					continue
