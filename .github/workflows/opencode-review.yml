@@ -220,12 +220,20 @@ jobs:
           echo "verdict=$verdict state=$state"
 
           if [ "$verdict" = "LGTM" ] && [ "$state" != "APPROVED" ]; then
-            gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
-              --body "Re-submitted as an approval: this revision returned LGTM. See the review above for details."
+            event=APPROVE
+            body="Re-submitted as an approval: this revision returned LGTM. See the review above for details."
           elif [ "$verdict" = "NEEDS_REVIEW" ] && [ "$state" != "CHANGES_REQUESTED" ]; then
-            gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes \
-              --body "Re-submitted as a changes-requested review: this revision returned NEEDS_REVIEW. See the review above for the findings."
+            event=REQUEST_CHANGES
+            body="Re-submitted as a changes-requested review: this revision returned NEEDS_REVIEW. See the review above for the findings."
+          else
+            exit 0
           fi
+
+          # commit_id pins the review to the revision that was actually
+          # reviewed; a push landing between the head check above and this call
+          # cannot transfer the verdict to the new head.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            -f commit_id="$HEAD_SHA" -f event="$event" -f body="$body"
 
       # The action auto-posts the agent's final reply as a PR comment; the
       # review above is the single source of truth, so remove that comment.
