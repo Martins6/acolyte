@@ -11,12 +11,12 @@ import (
 	"github.com/martins6/acolyte/internal/store/orch"
 )
 
-func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) (string, string, bool, bool, error) {
+func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) (string, string, bool, bool, string, error) {
 	if s.turn == nil {
-		return "", "", false, false, fmt.Errorf("cron: OpenCode turn runner is not configured")
+		return "", "", false, false, "", fmt.Errorf("cron: OpenCode turn runner is not configured")
 	}
 	if strings.TrimSpace(job.Prompt) == "" {
-		return "", "", false, false, fmt.Errorf("cron: prompt is empty")
+		return "", "", false, false, "", fmt.Errorf("cron: prompt is empty")
 	}
 
 	thread := cronThread(job)
@@ -24,7 +24,7 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 	if sessionID == "" {
 		session, ok, err := st.Orch().GetSessionByThread(thread)
 		if err != nil {
-			return "", "", false, false, err
+			return "", "", false, false, "", err
 		}
 		if ok {
 			sessionID = session.OpenCodeSessionID
@@ -36,6 +36,7 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 	admitted := false
 	collected := false
 	routed := false
+	generation := ""
 	result, err := s.turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        job.Prompt,
 		Description: "Scheduled prompt: " + job.Title,
@@ -56,15 +57,22 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 			return nil
 		},
 		OnCollected: func(turn *opencode.TurnResult) error {
-			// Persist the collected output first, with an ID both live execution
-			// and recovery derive, then consume the marker. A crash between the
-			// two therefore cannot lose the response.
+			collected = true
+			generation = turn.InputID
+			// For the user notification route, queue the output with a
+			// deterministic ID before consuming the marker. For every other
+			// route, keep the marker pending until execute has routed the
+			// output; the marker itself is the durable recovery handle.
 			if durableRoute {
 				var routeErr error
 				routed, routeErr = s.enqueuePromptOutput(st, job, turn.InputID, turn)
 				if routeErr != nil {
 					return routeErr
 				}
+			}
+			if !routed {
+				admitted = true
+				return nil
 			}
 			// Still holding the session lock here: consume the exact marker
 			// before another process or recovery pass can see it.
@@ -75,18 +83,18 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 			if !cleared {
 				return fmt.Errorf("cron: pending marker for %s was replaced", job.Title)
 			}
-			collected = true
 			admitted = false
+			generation = ""
 			return nil
 		},
 	})
 	if err != nil {
 		if collected && result != nil {
-			// The output was collected and its marker consumed; the error is
-			// post-collection cleanup (permission restore, lock release).
-			// Route the real output instead of turning it into a failure.
-			s.logJob(st, job, "warn", "turn collected but cleanup failed: "+err.Error())
-			return result.ResponseText, result.SessionID, false, routed, nil
+			// The output was collected; the error is post-collection cleanup or
+			// durable delivery setup. Route the real output when the marker is
+			// still pending, otherwise it is already queued.
+			s.logJob(st, job, "warn", "turn collected but post-collection delivery failed: "+err.Error())
+			return result.ResponseText, result.SessionID, admitted, routed, generation, nil
 		}
 		created := ""
 		if result != nil {
@@ -95,7 +103,7 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		if created != "" {
 			_, _ = st.Orch().UpsertSession(thread, created, s.now())
 		}
-		return "", created, admitted, routed, err
+		return "", created, admitted, routed, generation, err
 	}
 	// The marker was consumed by OnCollected while the session lock was held.
 	if _, err := st.Orch().UpsertSession(thread, result.SessionID, s.now()); err != nil {
@@ -104,7 +112,7 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		// recoverable (and already cleared) one.
 		s.logJob(st, job, "warn", "turn collected but session mapping could not be saved: "+err.Error())
 	}
-	return result.ResponseText, result.SessionID, false, routed, nil
+	return result.ResponseText, result.SessionID, admitted, routed, generation, nil
 }
 
 func cronThread(job orch.CronJob) string {

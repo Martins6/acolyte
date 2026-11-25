@@ -776,11 +776,12 @@ that the session is not still in flight, collects the turn's text, and consumes 
 releasing the lock, then routes it. Non-collectable states (`indeterminate`, `routine-run`) carry a
 unique generation, and recovery clears only the generation it revalidated, so a stale pass cannot
 delete a newer run. Concurrent passes therefore cannot route the same output twice. A completed
-execution never clears unconditionally: prompt turns queue their result in the outbox with a
-deterministic ID before consuming their marker, routine runs compare-and-clear their generation, and
-recovery reuses the same outbox ID. A crash between collection and delivery therefore neither loses
-nor duplicates the response. A post-collection cleanup error still routes the collected output instead
-of turning it into a failure.
+execution never clears unconditionally: the `notify-user` route queues its result in the outbox with a
+deterministic ID before consuming the marker, while every other route keeps the marker itself as the
+durable intent until `execute` has routed successfully (and a missing chat therefore leaves it
+pending). Routine runs compare-and-clear their generation, and recovery reuses the same outbox ID. A
+crash between collection and delivery therefore neither loses nor duplicates the response. A
+post-collection cleanup error still routes the collected output instead of turning it into a failure.
 The marker is cleared only after a successful collection; a run that errored after admission leaves it
 for the next pass and logs the transient error without routing a terminal failure, so recovery cannot
 later contradict it. An admission whose marker cannot be saved is retried first, then recorded as an

@@ -642,8 +642,8 @@ func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
 	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
 		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
 	}
-	if !storeLogContains(t, pair.store, "cleanup failed") {
-		t.Errorf("logs = %v, want the cleanup warning", storeLogMessages(t, pair.store))
+	if !storeLogContains(t, pair.store, "post-collection delivery failed") {
+		t.Errorf("logs = %v, want the delivery warning", storeLogMessages(t, pair.store))
 	}
 }
 
@@ -781,6 +781,61 @@ func TestPromptOutputIsDurableBeforeMarkerClear(t *testing.T) {
 	}
 	if len(sink.notified) != 0 {
 		t.Errorf("notified = %v, want no duplicate route", sink.notified)
+	}
+}
+
+// TestPromptInboxRouteKeepsMarkerUntilRouted ensures non-notify policies use
+// the pending marker as their durable intent until routing succeeds.
+func TestPromptInboxRouteKeepsMarkerUntilRouted(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: `{"on_success":"inbox"}`,
+	})
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "the answer"}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	if len(sink.inboxed) != 1 || sink.inboxed[0] != "the answer" {
+		t.Errorf("inboxed = %v, want the collected answer", sink.inboxed)
+	}
+	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
+		t.Errorf("pending turns = %+v, %v; want cleared after routing", turns, err)
+	}
+}
+
+// TestPromptWithoutChatKeepsMarkerPending ensures the marker survives when the
+// notification route cannot deliver, so recovery can retry instead of losing it.
+func TestPromptWithoutChatKeepsMarkerPending(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	sink := &fakeSink{notifyErr: errors.New("no private chat")}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "the answer"}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok || pending.MarkerID != "msg_fake" {
+		t.Errorf("pending = %+v, ok = %v; want the marker kept for recovery", pending, ok)
 	}
 }
 
@@ -1579,7 +1634,7 @@ func TestPersistRouteMemoryFallback(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	service := &Service{now: func() time.Time { return now }}
-	err = service.persistRoute(st, registry.Agent{Name: "valet", Workspace: notDir}, orch.CronJob{Title: "route"},
+	_, err = service.persistRoute(st, registry.Agent{Name: "valet", Workspace: notDir}, orch.CronJob{Title: "route"},
 		&comm.DeliveryError{EnvelopeID: "env_mem", ChatID: 10, Text: "output"})
 	if !errors.Is(err, errMemoryOnlyRoute) {
 		t.Fatalf("persistRoute() error = %v, want errMemoryOnlyRoute", err)

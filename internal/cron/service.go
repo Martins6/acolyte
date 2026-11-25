@@ -425,7 +425,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		s.logJob(st, job, "error", metaErr.Error())
 		return
 	}
-	text, sessionID, admitted, routed, err := s.runJob(ctx, agent, st, job, meta)
+	text, sessionID, admitted, routed, generation, err := s.runJob(ctx, agent, st, job, meta)
 	// Turn runners consume their own marker under the session lock. Do not
 	// clear here: a later run may already own a newer pending generation.
 
@@ -442,7 +442,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		}
 		s.logJob(st, job, "error", fmt.Sprintf("failed after %s: %v", s.now().Sub(started).Round(time.Millisecond), err))
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, false); routeErr != nil {
-			if persistErr := s.persistRoute(st, agent, job, routeErr); errors.Is(persistErr, errMemoryOnlyRoute) {
+			if _, persistErr := s.persistRoute(st, agent, job, routeErr); errors.Is(persistErr, errMemoryOnlyRoute) {
 				s.requeueAfterPersistFailure(st, job)
 				return
 			}
@@ -452,12 +452,24 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	}
 
 	s.logJob(st, job, "info", fmt.Sprintf("completed in %s", s.now().Sub(started).Round(time.Millisecond)))
+	routedOK := routed
 	if text != "" && !routed {
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, true); routeErr != nil {
-			if persistErr := s.persistRoute(st, agent, job, routeErr); errors.Is(persistErr, errMemoryOnlyRoute) {
+			persisted, persistErr := s.persistRoute(st, agent, job, routeErr)
+			if errors.Is(persistErr, errMemoryOnlyRoute) {
 				s.requeueAfterPersistFailure(st, job)
 				return
 			}
+			routedOK = persisted
+		} else {
+			routedOK = true
+		}
+	}
+	if routedOK && generation != "" {
+		if cleared, clearErr := st.Orch().ClearCronJobPendingIf(job.ID, generation); clearErr != nil {
+			s.logJob(st, job, "warn", "completed run could not clear its pending generation: "+clearErr.Error())
+		} else if !cleared {
+			s.logJob(st, job, "warn", "completed run no longer owns its pending generation")
 		}
 	}
 	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
@@ -761,7 +773,7 @@ func (s *Service) jobRunning(agentName, jobID string) bool {
 	return s.running[agentName+"/"+jobID]
 }
 
-func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, bool, bool, error) {
+func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, bool, bool, string, error) {
 	switch job.Kind {
 	case "shell":
 		out, runErr := s.runShell(ctx, agent, job, meta)
@@ -771,13 +783,13 @@ func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.St
 				sessionID = session.OpenCodeSessionID
 			}
 		}
-		return out, sessionID, false, false, runErr
+		return out, sessionID, false, false, "", runErr
 	case "prompt":
 		return s.runPrompt(ctx, agent, st, job)
 	case "routine":
 		return s.runRoutine(ctx, agent, st, job)
 	default:
-		return "", "", false, false, fmt.Errorf("cron: unknown job kind %q", job.Kind)
+		return "", "", false, false, "", fmt.Errorf("cron: unknown job kind %q", job.Kind)
 	}
 }
 
@@ -832,11 +844,11 @@ func (s *Service) route(ctx context.Context, st *store.Store, agent registry.Age
 var errMemoryOnlyRoute = errors.New("cron: route persisted only in memory")
 
 // persistRoute stores a delivery intent when the outbox enqueue failed.
-func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) error {
+func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.CronJob, routeErr error) (bool, error) {
 	var delivery *comm.DeliveryError
 	if !errors.As(routeErr, &delivery) {
 		s.logJob(st, job, "error", "route failed: "+routeErr.Error())
-		return nil
+		return false, nil
 	}
 	route := orch.CronRoute{
 		ID:                delivery.EnvelopeID,
@@ -854,19 +866,19 @@ func (s *Service) persistRoute(st *store.Store, agent registry.Agent, job orch.C
 	for attempt := 0; attempt < 3; attempt++ {
 		if lastErr = st.Orch().AddCronRoute(route); lastErr == nil {
 			s.logJob(st, job, "warn", "queued undelivered output for retry: "+routeErr.Error())
-			return nil
+			return true, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	if err := writeRouteFallback(agent.Workspace, route); err == nil {
 		s.logJob(st, job, "warn", "queued undelivered output in fallback file: "+routeErr.Error())
-		return nil
+		return true, nil
 	}
 	// Last resort: keep the payload in memory, but tell the caller to requeue
 	// the job so a restart does not silently lose it.
 	s.addMemoryRoute(agent.Workspace, route, job)
 	s.logJob(st, job, "error", "queued undelivered output in memory (DB and file unavailable): "+routeErr.Error())
-	return errMemoryOnlyRoute
+	return false, errMemoryOnlyRoute
 }
 
 // requeueAfterPersistFailure retries moving the job's next run so a failed

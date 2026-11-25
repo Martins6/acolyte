@@ -117,9 +117,10 @@ Behaviour worth remembering when changing this code:
   never replayed.
   Non-collectable pending states carry a unique generation and are cleared with compare-and-clear, so a
   stale recovery pass cannot delete a newer run. Nothing clears pending state unconditionally after a
-  turn: prompts queue their result in the outbox with a deterministic ID before consuming the marker,
-  routines compare-and-clear their generation, recovery reuses the same outbox ID, and a
-  post-collection cleanup error still routes the collected output.
+  turn: `notify-user` queues its result in the outbox with a deterministic ID before consuming the
+  marker, other routes keep the marker until execute routes successfully, routines compare-and-clear
+  their generation, recovery reuses the same outbox ID, and a post-collection cleanup error still
+  routes the collected output.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.
