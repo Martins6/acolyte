@@ -85,6 +85,10 @@ type TurnConfig struct {
 	// marker while the turn still owns the session, so recovery cannot collect
 	// the same output concurrently.
 	OnCollected func(*TurnResult) error
+	// OnLockAcquired, when non-nil, runs after the per-session turn lock is
+	// held and before the input is admitted. Callers use it to fence a stale
+	// owner (for example an expired route claim) before OpenCode accepts work.
+	OnLockAcquired func() error
 }
 
 // SyntheticEvent is an external/background event admitted to a session
@@ -165,6 +169,10 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 		}
 	}
 
+	if err := callLockHook(cfg); err != nil {
+		return &TurnResult{SessionID: info.ID}, err
+	}
+
 	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID}, err
@@ -239,6 +247,10 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 		}
 	}
 
+	if err := callLockHook(cfg); err != nil {
+		return &TurnResult{SessionID: info.ID}, err
+	}
+
 	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID}, err
@@ -287,6 +299,13 @@ func admitInput(cfg TurnConfig, sessionID string, item *InboxItem) error {
 		return nil
 	}
 	return cfg.OnAdmitted(Admitted{SessionID: sessionID, InputID: inboxID(item)})
+}
+
+func callLockHook(cfg TurnConfig) error {
+	if cfg.OnLockAcquired == nil {
+		return nil
+	}
+	return cfg.OnLockAcquired()
 }
 
 // ensureSession creates the session when missing and brings its agent/model in

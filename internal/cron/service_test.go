@@ -159,6 +159,19 @@ func addJob(t *testing.T, ws string, job orch.CronJob) {
 	}
 }
 
+func outboxTexts(t *testing.T, st *store.Store, chatID int64) []string {
+	t.Helper()
+	items, err := st.CommTG().ListOutbox(chatID)
+	if err != nil {
+		t.Fatalf("ListOutbox() error: %v", err)
+	}
+	texts := make([]string, 0, len(items))
+	for _, item := range items {
+		texts = append(texts, item.Text)
+	}
+	return texts
+}
+
 func cronLogMessages(t *testing.T, ws string) []string {
 	t.Helper()
 	st, err := store.Open(ws)
@@ -337,6 +350,324 @@ func TestRoutineKeepsRunPendingAfterTurnCollected(t *testing.T) {
 	}
 }
 
+// TestInboxRouteRecoversAdmittedTurn ensures a route whose synthetic input was
+// already admitted is collected instead of re-admitted.
+func TestInboxRouteRecoversAdmittedTurn(t *testing.T) {
+	reg, _, now := setupCron(t)
+	turn := &collectingTurn{delivered: true, text: "the event result"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_x", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID:                "route_inbox",
+		AgentTarget:       "valet",
+		Action:            "inbox",
+		ChatID:            10,
+		Text:              "event",
+		OpenCodeSessionID: "ses_x",
+		SourceMessageID:   "msg_x",
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	if len(turn.collected) != 1 || turn.collected[0] != "msg_x" {
+		t.Errorf("collected = %v, want the already-admitted marker", turn.collected)
+	}
+	if turn.calls != 0 {
+		t.Errorf("synthetic turns = %d, want 0 (never re-admit)", turn.calls)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 || routes[0].DeliveredAt == nil {
+		t.Errorf("routes = %+v, %v; want delivered after collection", routes, err)
+	}
+}
+
+// TestInboxRouteLeavesInFlightTurnPending ensures a route is not settled while
+// its admitted synthetic turn is still running.
+func TestInboxRouteLeavesInFlightTurnPending(t *testing.T) {
+	reg, _, now := setupCron(t)
+	turn := &collectingTurn{
+		delivered: true,
+		text:      "partial",
+		session:   &opencode.SessionInfo{ID: "ses_x", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+	}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID:                "route_inbox",
+		AgentTarget:       "valet",
+		Action:            "inbox",
+		ChatID:            10,
+		Text:              "event",
+		OpenCodeSessionID: "ses_x",
+		SourceMessageID:   "msg_x",
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes = %+v, %v", routes, err)
+	}
+	if routes[0].DeliveredAt != nil {
+		t.Error("in-flight route was marked delivered")
+	}
+	if routes[0].Attempts != 1 {
+		t.Errorf("attempts = %d, want 1", routes[0].Attempts)
+	}
+}
+
+func TestPromptRouteIntentTruncatesOutput(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	big := strings.Repeat("x", maxOutputBytes+100)
+	if err := svc.addPromptRouteIntent(pair.store, pair.agent, job, "msg_big", &opencode.TurnResult{ResponseText: big}); err != nil {
+		t.Fatalf("addPromptRouteIntent() error: %v", err)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes = %+v, %v", routes, err)
+	}
+	if len(routes[0].Text) > maxOutputBytes+len("\n[output truncated]") || !strings.Contains(routes[0].Text, "truncated") {
+		t.Errorf("route text len = %d, want capped and marked", len(routes[0].Text))
+	}
+}
+
+func TestInboxResponseCapped(t *testing.T) {
+	reg, _, now := setupCron(t)
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_x", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	big := strings.Repeat("x", maxOutputBytes+100)
+	if err := svc.queueInboxResponse(pair, orch.CronRoute{ID: "route_big", ChatID: 10}, &opencode.TurnResult{SessionID: "ses_x", ResponseText: big}); err != nil {
+		t.Fatalf("queueInboxResponse() error: %v", err)
+	}
+	outbox, err := pair.store.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Fatalf("outbox = %+v, %v", outbox, err)
+	}
+	if len(outbox[0].Text) > maxOutputBytes+len("\n[output truncated]") || !strings.Contains(outbox[0].Text, "truncated") {
+		t.Errorf("outbox text len = %d, want capped and marked", len(outbox[0].Text))
+	}
+}
+
+func TestInboxRouteChatRequiresAuthorizedMapping(t *testing.T) {
+	ws := t.TempDir()
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := st.Orch().UpsertSession("telegram:10", "ses_10", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if chatID, err := inboxRouteChat(st, "ses_10"); err != nil || chatID != 10 {
+		t.Fatalf("inboxRouteChat() = %d, %v; want 10", chatID, err)
+	}
+
+	if err := st.CommTG().UpsertChat(10, "alice", false, true, now); err != nil {
+		t.Fatalf("UpsertChat(revoked) error: %v", err)
+	}
+	if chatID, err := inboxRouteChat(st, "ses_10"); err != nil || chatID != 0 {
+		t.Errorf("revoked mapping = %d, %v; want fail closed", chatID, err)
+	}
+
+	if _, err := st.Orch().UpsertSession("telegram:99", "ses_99", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if chatID, err := inboxRouteChat(st, "ses_99"); err != nil || chatID != 0 {
+		t.Errorf("missing mapped chat = %d, %v; want fail closed", chatID, err)
+	}
+
+	if _, err := st.Orch().UpsertSession("cron:job", "ses_cron", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if err := st.CommTG().UpsertChat(11, "bob", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if chatID, err := inboxRouteChat(st, "ses_cron"); err != nil || chatID != 11 {
+		t.Errorf("cron mapping fallback = %d, %v; want 11", chatID, err)
+	}
+}
+
+func TestNotifyRouteRequiresAuthorizedChat(t *testing.T) {
+	reg, _, now := setupCron(t)
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", false, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID: "route_notify", AgentTarget: "valet", Action: "notify-user", ChatID: 10,
+		Text: "secret", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 || routes[0].DeliveredAt != nil {
+		t.Fatalf("routes = %+v, %v; want pending", routes, err)
+	}
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 0 {
+		t.Errorf("outbox = %v, want nothing queued to a revoked chat", texts)
+	}
+}
+
+// ambiguousInboxTurn returns an ambiguous admission failure without a marker.
+type ambiguousInboxTurn struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *ambiguousInboxTurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return nil, &opencode.PromptError{Err: errors.New("timeout"), Ambiguous: true}
+}
+
+func (t *ambiguousInboxTurn) count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+// failingInboxTurn returns a proven pre-admission failure (no request sent).
+type failingInboxTurn struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *failingInboxTurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return nil, errors.New("session lock unavailable")
+}
+
+func (t *failingInboxTurn) count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+// TestInboxRouteRetriesProvenPreAdmissionFailure ensures a failure that never
+// reached OpenCode clears the admission sentinel and remains retryable.
+func TestInboxRouteRetriesProvenPreAdmissionFailure(t *testing.T) {
+	reg, _, now := setupCron(t)
+	turn := &failingInboxTurn{}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("cron:test", "ses_x", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID: "route_inbox", AgentTarget: "valet", Action: "inbox", Text: "event", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	if got := turn.count(); got != 1 {
+		t.Fatalf("admission attempts = %d, want 1", got)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes = %+v, %v", routes, err)
+	}
+	if routes[0].SourceMessageID != "" {
+		t.Errorf("marker = %q, want cleared for a proven pre-admission failure", routes[0].SourceMessageID)
+	}
+	if routes[0].DeliveredAt != nil {
+		t.Error("failed pre-admission route was marked delivered")
+	}
+}
+
+// TestInboxRouteHoldsAmbiguousAdmission ensures an unclear admission is not
+// retried into a duplicate.
+func TestInboxRouteHoldsAmbiguousAdmission(t *testing.T) {
+	reg, _, now := setupCron(t)
+	turn := &ambiguousInboxTurn{}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("cron:test", "ses_x", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID: "route_inbox", AgentTarget: "valet", Action: "inbox", Text: "event", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	if got := turn.count(); got != 1 {
+		t.Fatalf("admission attempts = %d, want 1", got)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes = %+v, %v", routes, err)
+	}
+	if routes[0].DeliveredAt != nil {
+		t.Error("ambiguous route was marked delivered")
+	}
+	if routes[0].SourceMessageID != orch.RouteAdmissionPending {
+		t.Errorf("marker = %q, want the pending sentinel", routes[0].SourceMessageID)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+	if got := turn.count(); got != 1 {
+		t.Errorf("admission attempts after retry = %d, want still 1", got)
+	}
+}
+
 func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{
@@ -452,6 +783,12 @@ func TestLiveCollectionConsumesMarkerBeforeSessionLockRelease(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -478,8 +815,8 @@ func TestLiveCollectionConsumesMarkerBeforeSessionLockRelease(t *testing.T) {
 	if got := turn.recoveryCount(); got != 0 {
 		t.Errorf("recovery collected %d time(s), want 0 after the live turn consumed its marker", got)
 	}
-	if got := sink.count(); got != 1 {
-		t.Errorf("notifications = %d, want exactly one", got)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 || texts[0] != "once" {
+		t.Errorf("outbox = %v, want the collected output", texts)
 	}
 	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
 	if err != nil {
@@ -629,6 +966,12 @@ func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -636,8 +979,8 @@ func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
 
 	svc.execute(context.Background(), pair, job)
 
-	if len(sink.notified) != 1 || sink.notified[0] != "the answer" {
-		t.Errorf("notified = %v, want the collected answer", sink.notified)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 || texts[0] != "the answer" {
+		t.Errorf("outbox = %v, want the collected answer", texts)
 	}
 	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
 		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
@@ -792,10 +1135,17 @@ func TestPromptInboxRouteKeepsMarkerUntilRouted(t *testing.T) {
 		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
 		Enabled: true, CreatedAt: now, Meta: `{"on_success":"inbox"}`,
 	})
+	turn := &fakeTurn{response: "the answer"}
 	sink := &fakeSink{}
-	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "the answer"}, "", now)
+	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -803,17 +1153,21 @@ func TestPromptInboxRouteKeepsMarkerUntilRouted(t *testing.T) {
 
 	svc.execute(context.Background(), pair, job)
 
-	if len(sink.inboxed) != 1 || sink.inboxed[0] != "the answer" {
-		t.Errorf("inboxed = %v, want the collected answer", sink.inboxed)
+	if len(turn.events) != 2 || turn.events[1].Text != "the answer" {
+		t.Errorf("events = %+v, want the prompt and the inbox event", turn.events)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 || routes[0].DeliveredAt == nil || routes[0].Action != "inbox" {
+		t.Errorf("routes = %+v, %v; want one delivered inbox route", routes, err)
 	}
 	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
 		t.Errorf("pending turns = %+v, %v; want cleared after routing", turns, err)
 	}
 }
 
-// TestPromptWithoutChatKeepsMarkerPending ensures the marker survives when the
-// notification route cannot deliver, so recovery can retry instead of losing it.
-func TestPromptWithoutChatKeepsMarkerPending(t *testing.T) {
+// TestPromptWithoutChatKeepsDurableRouteIntent ensures the output survives as
+// a durable route intent even when no notification chat exists yet.
+func TestPromptWithoutChatKeepsDurableRouteIntent(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{
 		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
@@ -830,12 +1184,12 @@ func TestPromptWithoutChatKeepsMarkerPending(t *testing.T) {
 
 	svc.execute(context.Background(), pair, job)
 
-	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
-	if err != nil {
-		t.Fatalf("CronJobPending() error: %v", err)
+	if _, ok, err := pair.store.Orch().CronJobPending(job.ID); err != nil || ok {
+		t.Errorf("pending marker = ok %v, err %v; want it consumed after the route intent", ok, err)
 	}
-	if !ok || pending.MarkerID != "msg_fake" {
-		t.Errorf("pending = %+v, ok = %v; want the marker kept for recovery", pending, ok)
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 || routes[0].Action != "notify-user" || routes[0].Text != "the answer" || routes[0].DeliveredAt != nil {
+		t.Errorf("routes = %+v, %v; want one pending notify-user route intent", routes, err)
 	}
 }
 
@@ -852,6 +1206,12 @@ func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -859,8 +1219,8 @@ func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
 
 	svc.execute(context.Background(), pair, job)
 
-	if len(sink.notified) != 1 || sink.notified[0] != "the answer" {
-		t.Errorf("notified = %v, want the collected answer", sink.notified)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 || texts[0] != "the answer" {
+		t.Errorf("outbox = %v, want the collected answer", texts)
 	}
 	turns, err := pair.store.Orch().PendingCronTurns(now.Add(time.Second), 10)
 	if err != nil {
@@ -868,9 +1228,6 @@ func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
 	}
 	if len(turns) != 0 {
 		t.Errorf("pending turns = %+v, want cleared after collection", turns)
-	}
-	if !storeLogContains(t, pair.store, "session mapping could not be saved") {
-		t.Errorf("logs = %v, want the mapping warning", storeLogMessages(t, pair.store))
 	}
 }
 
@@ -909,6 +1266,12 @@ func TestAdmittedPendingRetriesTransientWrite(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "partial", err: errors.New("collection failed")}, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -922,8 +1285,9 @@ func TestAdmittedPendingRetriesTransientWrite(t *testing.T) {
 
 	svc.turn = &collectingTurn{delivered: true, text: "recovered"}
 	svc.recoverPendingTurns(context.Background(), pair)
-	if len(sink.notified) != 1 || sink.notified[0] != "recovered" {
-		t.Errorf("notified = %v, want the recovered output", sink.notified)
+	svc.retryRoutes(context.Background(), pair)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 || texts[0] != "recovered" {
+		t.Errorf("outbox = %v, want the recovered output", texts)
 	}
 	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
 		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
@@ -1049,6 +1413,9 @@ func TestRecoverPendingTurnsConcurrentPassesRouteOnce(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, collector, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
@@ -1059,12 +1426,13 @@ func TestRecoverPendingTurnsConcurrentPassesRouteOnce(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	svc.retryRoutes(context.Background(), pair)
 
 	if got := collector.count(); got != 1 {
 		t.Errorf("collect calls = %d, want 1", got)
 	}
-	if got := sink.count(); got != 1 {
-		t.Errorf("notifications = %d, want 1", got)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 {
+		t.Errorf("outbox = %v, want one delivered route", texts)
 	}
 	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
 	if err != nil {
@@ -1518,6 +1886,14 @@ func TestCronDeliveryErrorPersistsRouteAndRetries(t *testing.T) {
 		Meta: `{"on_success":"notify-user"}`,
 	})
 	sink := &fakeSink{notifyErr: &comm.DeliveryError{EnvelopeID: "env_route", ChatID: 10, Text: "output"}}
+	setupStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := setupStore.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	setupStore.Close()
 	service := startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
 	service.Tick(context.Background())
 	service.Wait()
@@ -2052,6 +2428,15 @@ func TestPromptJobRoutesOutputAndStoresSession(t *testing.T) {
 		Meta: `{"on_success":"notify-user"}`,
 	})
 
+	setupStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := setupStore.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	setupStore.Close()
+
 	sink := &fakeSink{}
 	turn := &fakeTurn{response: "reply"}
 	service := startTestService(t, reg, routine.NewRegistry(), sink, turn, "/bin/sh", now)
@@ -2065,9 +2450,14 @@ func TestPromptJobRoutesOutputAndStoresSession(t *testing.T) {
 	if len(turn.events) != 1 || turn.events[0].Text != "hello" {
 		t.Errorf("events = %+v", turn.events)
 	}
-	if len(sink.notified) != 1 || sink.notified[0] != "reply" {
-		t.Errorf("notified = %v, want reply", sink.notified)
+	outStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
+	if texts := outboxTexts(t, outStore, 10); len(texts) != 1 || texts[0] != "reply" {
+		t.Errorf("outbox = %v, want reply", texts)
+	}
+	outStore.Close()
 
 	st, err := store.Open(ws)
 	if err != nil {
@@ -2129,6 +2519,15 @@ func TestInvalidRoutingFallsBackToNotifyUser(t *testing.T) {
 		Meta: `{"on_success":"notify_user"}`,
 	})
 
+	setupStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := setupStore.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	setupStore.Close()
+
 	sink := &fakeSink{}
 	turn := &fakeTurn{response: "reply"}
 	service := startTestService(t, reg, routine.NewRegistry(), sink, turn, "/bin/sh", now)
@@ -2136,9 +2535,14 @@ func TestInvalidRoutingFallsBackToNotifyUser(t *testing.T) {
 	service.Wait()
 	service.Stop()
 
-	if len(sink.notified) != 1 || sink.notified[0] != "reply" {
-		t.Errorf("notified = %v, want fallback notify-user", sink.notified)
+	outStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
+	if texts := outboxTexts(t, outStore, 10); len(texts) != 1 || texts[0] != "reply" {
+		t.Errorf("outbox = %v, want fallback notify-user", texts)
+	}
+	outStore.Close()
 }
 
 func TestRoutineJobRoutesOutput(t *testing.T) {

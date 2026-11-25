@@ -116,11 +116,13 @@ Behaviour worth remembering when changing this code:
   each collected turn until the body finishes, so a crash in post-turn work is settled as incomplete,
   never replayed.
   Non-collectable pending states carry a unique generation and are cleared with compare-and-clear, so a
-  stale recovery pass cannot delete a newer run. Nothing clears pending state unconditionally after a
-  turn: `notify-user` queues its result in the outbox with a deterministic ID before consuming the
-  marker, other routes keep the marker until execute routes successfully, recovery honors the job's
-  route policy and revalidates ownership, routines compare-and-clear their generation, recovery reuses
-  the same outbox ID, and a post-collection cleanup error still routes the collected output.
+  stale recovery pass cannot delete a newer run. A collected prompt result is stored as an action-aware
+  `orch_cron_routes` intent (notify-user, inbox, or log) with a deterministic ID before its marker is
+  consumed; the route loop claims it atomically and renews the claim during delivery, inbox routes
+  persist the admitted synthetic marker and enqueue the agent reaction under its own deterministic ID
+  rather than re-admitting, an unpersistable inbox marker parks the route, and recovery creates the
+  same intent. Nothing clears pending state unconditionally after a turn, and a post-collection cleanup
+  error still routes the collected output.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.

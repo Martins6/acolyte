@@ -773,16 +773,20 @@ adapter, so an initial replay can never mark a marker-bearing row processed whil
 (`orch_cron_jobs.pending_*`). A live turn consumes that marker in `TurnConfig.OnCollected` before
 releasing the session lock. On restart, recovery takes the same lock, revalidates the marker, checks
 that the session is not still in flight, collects the turn's text, and consumes the marker before
-releasing the lock, then routes it. Non-collectable states (`indeterminate`, `routine-run`) carry a
-unique generation, and recovery clears only the generation it revalidated, so a stale pass cannot
-delete a newer run. Concurrent passes therefore cannot route the same output twice. A completed
-execution never clears unconditionally: the `notify-user` route queues its result in the outbox with a
-deterministic ID before consuming the marker, while every other route keeps the marker itself as the
-durable intent until `execute` has routed successfully (and a missing chat therefore leaves it
-pending). Recovery honors the job's configured route policy the same way and revalidates ownership
-before routing. Routine runs compare-and-clear their generation, and recovery reuses the same outbox
-ID. A crash between collection and delivery therefore neither loses nor duplicates the response. A
-post-collection cleanup error still routes the collected output instead of turning it into a failure.
+releasing the lock. Non-collectable states (`indeterminate`, `routine-run`) carry a unique generation,
+and recovery clears only the generation it revalidated, so a stale pass cannot delete a newer run.
+
+A collected prompt result becomes a durable `orch_cron_routes` intent with a deterministic ID before
+its marker is consumed. The intent records the job's route policy (`notify-user`, `inbox`, or `log`) and
+the route loop claims it atomically, renews the claim during delivery, then delivers it: `notify-user`
+resolves the chat lazily and enqueues the deterministic outbox row, `inbox` persists the admitted
+synthetic marker and collects it instead of re-admitting, then enqueues the agent reaction under its own
+deterministic ID, and `log` appends the output. If an inbox admission marker cannot be persisted, the
+route is parked rather than retried into a duplicate. Recovery creates the same intent, so a crash
+between collection and delivery neither loses nor duplicates the response. A completed execution never clears pending state unconditionally:
+prompt turns consume their exact marker under the lock, routine runs compare-and-clear their generation,
+and a post-collection cleanup error still routes the collected output instead of turning it into a
+failure.
 The marker is cleared only after a successful collection; a run that errored after admission leaves it
 for the next pass and logs the transient error without routing a terminal failure, so recovery cannot
 later contradict it. An admission whose marker cannot be saved is retried first, then recorded as an

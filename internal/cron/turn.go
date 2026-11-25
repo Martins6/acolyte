@@ -31,8 +31,6 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		}
 	}
 
-	meta, _ := parseJobMeta(job.Meta)
-	durableRoute := meta.OnSuccess == "" || meta.OnSuccess == "notify-user"
 	admitted := false
 	collected := false
 	routed := false
@@ -59,20 +57,16 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		OnCollected: func(turn *opencode.TurnResult) error {
 			collected = true
 			generation = turn.InputID
-			// For the user notification route, queue the output with a
-			// deterministic ID before consuming the marker. For every other
-			// route, keep the marker pending until execute has routed the
-			// output; the marker itself is the durable recovery handle.
-			if durableRoute {
-				var routeErr error
-				routed, routeErr = s.enqueuePromptOutput(st, job, turn.InputID, turn)
-				if routeErr != nil {
-					return routeErr
-				}
+			// Persist the route intent first, with a deterministic ID both live
+			// execution and recovery derive. The marker is consumed only after
+			// the intent exists, so a crash cannot lose or reroute the output.
+			if err := s.addPromptRouteIntent(st, agent, job, turn.InputID, turn); err != nil {
+				return err
 			}
-			if !routed {
-				admitted = true
-				return nil
+			if turn.SessionID != "" {
+				if _, err := st.Orch().UpsertSession(cronThread(job), turn.SessionID, s.now()); err != nil {
+					return err
+				}
 			}
 			// Still holding the session lock here: consume the exact marker
 			// before another process or recovery pass can see it.
@@ -84,17 +78,20 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 				return fmt.Errorf("cron: pending marker for %s was replaced", job.Title)
 			}
 			admitted = false
+			routed = true
 			generation = ""
 			return nil
 		},
 	})
 	if err != nil {
 		if collected && result != nil {
-			// The output was collected; the error is post-collection cleanup or
-			// durable delivery setup. Route the real output when the marker is
-			// still pending, otherwise it is already queued.
 			s.logJob(st, job, "warn", "turn collected but post-collection delivery failed: "+err.Error())
-			return result.ResponseText, result.SessionID, admitted, routed, generation, nil
+			if generation != "" {
+				// The durable intent was not stored; keep the marker so
+				// recovery retries instead of using a non-durable fallback.
+				return result.ResponseText, result.SessionID, true, false, generation, err
+			}
+			return result.ResponseText, result.SessionID, false, true, "", nil
 		}
 		created := ""
 		if result != nil {
@@ -106,12 +103,6 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		return "", created, admitted, routed, generation, err
 	}
 	// The marker was consumed by OnCollected while the session lock was held.
-	if _, err := st.Orch().UpsertSession(thread, result.SessionID, s.now()); err != nil {
-		// The output is already collected and will be routed; only the thread
-		// mapping failed, so log it instead of turning a completed run into a
-		// recoverable (and already cleared) one.
-		s.logJob(st, job, "warn", "turn collected but session mapping could not be saved: "+err.Error())
-	}
 	return result.ResponseText, result.SessionID, admitted, routed, generation, nil
 }
 
