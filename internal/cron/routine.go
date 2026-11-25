@@ -14,22 +14,22 @@ import (
 	"github.com/martins6/acolyte/internal/store/orch"
 )
 
-func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) (string, string, bool, error) {
+func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) (string, string, bool, bool, error) {
 	if s.routines == nil {
-		return "", "", false, fmt.Errorf("cron: routine registry is not configured")
+		return "", "", false, false, fmt.Errorf("cron: routine registry is not configured")
 	}
 	routineValue, ok := s.routines.Get(job.Routine)
 	if !ok {
-		return "", "", false, fmt.Errorf("cron: routine %q is not registered", job.Routine)
+		return "", "", false, false, fmt.Errorf("cron: routine %q is not registered", job.Routine)
 	}
 
 	args, err := routine.DecodeArgs(job.RoutineArgs)
 	if err != nil {
-		return "", "", false, fmt.Errorf("cron: parse routine args for %s: %w", job.Title, err)
+		return "", "", false, false, fmt.Errorf("cron: parse routine args for %s: %w", job.Title, err)
 	}
 	normalized, err := routine.ValidateArgs(routineValue.Args(), args)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, false, err
 	}
 
 	// Routines are headless and own their session. A stored session id is a
@@ -42,7 +42,7 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 	sessionID := ""
 	session, ok, err := st.Orch().GetSessionByThread(thread)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, false, err
 	}
 	if ok {
 		sessionID = session.OpenCodeSessionID
@@ -121,5 +121,5 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 			s.logJob(st, job, "warn", "routine completed but a newer run owns the pending state")
 		}
 	}
-	return out, sessionID, admitted, err
+	return out, sessionID, admitted, false, err
 }

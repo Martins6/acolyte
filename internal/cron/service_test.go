@@ -723,6 +723,67 @@ func TestRecoverPendingTurnsDoesNotRouteAfterNewerRun(t *testing.T) {
 	}
 }
 
+// TestPromptOutputIsDurableBeforeMarkerClear ensures the outbox row exists with
+// a deterministic ID before recovery state is consumed, and that recovery
+// re-uses that ID instead of delivering twice.
+func TestPromptOutputIsDurableBeforeMarkerClear(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "durable answer"}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	outbox, err := pair.store.CommTG().ListOutbox(10)
+	if err != nil {
+		t.Fatalf("ListOutbox() error: %v", err)
+	}
+	wantID := cronOutputID(job.ID, "msg_fake")
+	if len(outbox) != 1 || outbox[0].EnvelopeID != wantID || outbox[0].Text != "durable answer" {
+		t.Fatalf("outbox = %+v, want one row %q", outbox, wantID)
+	}
+	if len(sink.notified) != 0 {
+		t.Errorf("notified = %v, want direct outbox delivery only", sink.notified)
+	}
+
+	// Simulate a crash before the marker clear: recovery must re-use the ID.
+	if err := pair.store.Orch().SetCronJobPending(job.ID, "ses_fake", "msg_fake", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	svc.turn = &collectingTurn{delivered: true, text: "durable answer"}
+	svc.recoverPendingTurns(context.Background(), pair)
+	outbox, err = pair.store.CommTG().ListOutbox(10)
+	if err != nil {
+		t.Fatalf("ListOutbox() error: %v", err)
+	}
+	if len(outbox) != 1 || outbox[0].EnvelopeID != wantID {
+		t.Errorf("outbox after recovery = %+v, want the original row only", outbox)
+	}
+	if len(sink.notified) != 0 {
+		t.Errorf("notified = %v, want no duplicate route", sink.notified)
+	}
+}
+
 // TestExecuteRoutesCollectedOutputWhenSessionMappingFails ensures a collected
 // turn is still delivered when only persisting the thread mapping fails.
 func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {

@@ -425,7 +425,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		s.logJob(st, job, "error", metaErr.Error())
 		return
 	}
-	text, sessionID, admitted, err := s.runJob(ctx, agent, st, job, meta)
+	text, sessionID, admitted, routed, err := s.runJob(ctx, agent, st, job, meta)
 	// Turn runners consume their own marker under the session lock. Do not
 	// clear here: a later run may already own a newer pending generation.
 
@@ -452,7 +452,7 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 	}
 
 	s.logJob(st, job, "info", fmt.Sprintf("completed in %s", s.now().Sub(started).Round(time.Millisecond)))
-	if text != "" {
+	if text != "" && !routed {
 		if routeErr := s.route(ctx, st, agent, job, meta, text, sessionID, true); routeErr != nil {
 			if persistErr := s.persistRoute(st, agent, job, routeErr); errors.Is(persistErr, errMemoryOnlyRoute) {
 				s.requeueAfterPersistFailure(st, job)
@@ -601,6 +601,19 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			releaseLock()
 			continue
 		}
+		// Persist a prompt result before consuming its marker, with the same
+		// deterministic outbox ID the live path uses. A crash between queueing
+		// and clearing therefore cannot lose the response.
+		routedOutput := false
+		if pending.Kind == "turn" {
+			var enqueueErr error
+			routedOutput, enqueueErr = s.enqueuePromptOutput(pair.store, job, pending.MarkerID, result)
+			if enqueueErr != nil {
+				releaseLock()
+				log.Printf("cron: queue recovered output for %s: %v", job.Title, enqueueErr)
+				continue
+			}
+		}
 		// Consume the marker while still holding the session lock, so a
 		// concurrent recovery pass cannot collect and route the same output.
 		// Compare-and-clear also protects a newer run that replaced the state
@@ -622,7 +635,7 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			note = "recovered turn output from an interrupted routine run; the routine body did not finish"
 		}
 		s.logJob(pair.store, job, "info", note)
-		if text := strings.TrimSpace(result.ResponseText); text != "" {
+		if text := strings.TrimSpace(result.ResponseText); text != "" && !routedOutput {
 			meta, metaErr := parseJobMeta(job.Meta)
 			if metaErr != nil {
 				s.logJob(pair.store, job, "error", "recovered output could not be routed: "+metaErr.Error())
@@ -644,6 +657,55 @@ func acquireCronSessionLock(ctx context.Context, sessionID string) (func(), erro
 		return nil, err
 	}
 	return func() { _ = held.Release() }, nil
+}
+
+// cronOutputID is the deterministic outbox identity for a prompt job's
+// collected output. Live execution and recovery use the same ID, so delivery is
+// idempotent across a restart.
+func cronOutputID(jobID, markerID string) string {
+	return "cron_out_" + strings.TrimSpace(jobID) + "_" + strings.TrimSpace(markerID)
+}
+
+// enqueuePromptOutput durably queues a prompt result before its recovery marker
+// is consumed. It returns false when there is no allowed chat to deliver to, so
+// the caller falls back to its normal route.
+func (s *Service) enqueuePromptOutput(st *store.Store, job orch.CronJob, markerID string, result *opencode.TurnResult) (bool, error) {
+	text := ""
+	if result != nil {
+		text = strings.TrimSpace(result.ResponseText)
+	}
+	if text == "" || strings.TrimSpace(markerID) == "" {
+		return false, nil
+	}
+	chat, ok, err := st.CommTG().LatestAllowedChat()
+	if err != nil {
+		return false, err
+	}
+	if !ok || chat.ChatID == 0 {
+		return false, nil
+	}
+	sourceID := ""
+	sessionID := ""
+	if result != nil {
+		sessionID = result.SessionID
+		if len(result.MessageIDs) > 0 {
+			sourceID = result.MessageIDs[len(result.MessageIDs)-1]
+		}
+	}
+	id := cronOutputID(job.ID, markerID)
+	_, err = st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+		ID:                id,
+		EnvelopeID:        id,
+		ChatID:            chat.ChatID,
+		Text:              text,
+		OpenCodeSessionID: sessionID,
+		SourceMessageID:   sourceID,
+		CreatedAt:         s.now(),
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // cronPendingToken returns a unique generation for a non-collectable pending
@@ -699,7 +761,7 @@ func (s *Service) jobRunning(agentName, jobID string) bool {
 	return s.running[agentName+"/"+jobID]
 }
 
-func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, bool, error) {
+func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, bool, bool, error) {
 	switch job.Kind {
 	case "shell":
 		out, runErr := s.runShell(ctx, agent, job, meta)
@@ -709,13 +771,13 @@ func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.St
 				sessionID = session.OpenCodeSessionID
 			}
 		}
-		return out, sessionID, false, runErr
+		return out, sessionID, false, false, runErr
 	case "prompt":
 		return s.runPrompt(ctx, agent, st, job)
 	case "routine":
 		return s.runRoutine(ctx, agent, st, job)
 	default:
-		return "", "", false, fmt.Errorf("cron: unknown job kind %q", job.Kind)
+		return "", "", false, false, fmt.Errorf("cron: unknown job kind %q", job.Kind)
 	}
 }
 
