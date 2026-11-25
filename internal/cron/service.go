@@ -717,8 +717,6 @@ func cronOutputID(jobID, markerID string) string {
 }
 
 // enqueuePromptOutput durably queues a prompt result before its recovery marker
-// is consumed. It returns false when there is no allowed chat to deliver to, so
-// the caller falls back to its normal route.
 // addPromptRouteIntent durably records what should happen to a collected
 // prompt result before its recovery marker is consumed. Every route policy is
 // represented, so a crash at any point can be recovered idempotently.
@@ -739,6 +737,9 @@ func (s *Service) addPromptRouteIntent(st *store.Store, agent registry.Agent, jo
 	}
 	if text == "" {
 		return nil
+	}
+	if len(text) > maxOutputBytes {
+		text = text[:maxOutputBytes] + "\n[output truncated]"
 	}
 	meta, metaErr := parseJobMeta(job.Meta)
 	if metaErr != nil {

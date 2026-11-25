@@ -427,6 +427,32 @@ func TestInboxRouteLeavesInFlightTurnPending(t *testing.T) {
 	}
 }
 
+func TestPromptRouteIntentTruncatesOutput(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	big := strings.Repeat("x", maxOutputBytes+100)
+	if err := svc.addPromptRouteIntent(pair.store, pair.agent, job, "msg_big", &opencode.TurnResult{ResponseText: big}); err != nil {
+		t.Fatalf("addPromptRouteIntent() error: %v", err)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes = %+v, %v", routes, err)
+	}
+	if len(routes[0].Text) > maxOutputBytes+len("\n[output truncated]") || !strings.Contains(routes[0].Text, "truncated") {
+		t.Errorf("route text len = %d, want capped and marked", len(routes[0].Text))
+	}
+}
+
 func TestCronReplyChatRequiresAuthorizedMapping(t *testing.T) {
 	ws := t.TempDir()
 	st, err := store.Open(ws)
