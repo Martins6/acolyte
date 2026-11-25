@@ -393,7 +393,8 @@ func TestInboxRouteRecoversAdmittedTurn(t *testing.T) {
 func TestInboxRouteLeavesInFlightTurnPending(t *testing.T) {
 	reg, _, now := setupCron(t)
 	turn := &collectingTurn{
-		delivered: false,
+		delivered: true,
+		text:      "partial",
 		session:   &opencode.SessionInfo{ID: "ses_x", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
 	}
 	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)

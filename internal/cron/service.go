@@ -1150,6 +1150,14 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 		if !supportsRecovery {
 			return fmt.Errorf("cron: turn runner does not support inbox route recovery")
 		}
+		// An in-flight session may expose partial text; do not accept it.
+		info, err := prober.GetSession(ctx, route.OpenCodeSessionID)
+		if err != nil {
+			return err
+		}
+		if info != nil && info.Time.InFlight() {
+			return errRouteStillPending
+		}
 		result, delivered, err := prober.CollectDelivered(ctx, route.OpenCodeSessionID, route.SourceMessageID)
 		if err != nil {
 			if errors.Is(err, opencode.ErrTurnTruncated) || opencode.IsPermanentError(err) {
@@ -1165,16 +1173,8 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 			}
 			return nil
 		}
-		// The marker is not in the delivered timeline yet. If the session is
-		// still running the turn, leave the route pending; otherwise the input
-		// is either queued or consumed with no output.
-		info, err := prober.GetSession(ctx, route.OpenCodeSessionID)
-		if err != nil {
-			return err
-		}
-		if info != nil && info.Time.InFlight() {
-			return errRouteStillPending
-		}
+		// The marker is not in the delivered timeline yet. The input is either
+		// queued or consumed with no output.
 		pending, err := prober.InboxPending(ctx, route.OpenCodeSessionID, route.SourceMessageID)
 		if err != nil {
 			return err
