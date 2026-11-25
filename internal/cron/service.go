@@ -1012,8 +1012,8 @@ func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch
 		if err != nil {
 			job = orch.CronJob{ID: route.JobID, Title: route.JobID}
 		}
-		s.logJob(pair.store, job, "info", "output: "+route.Text)
-		return nil
+		_, err = pair.store.Orch().AppendLogDeduped("info", "cron:"+job.Title, "output: "+route.Text, job.Meta, route.ID, s.now())
+		return err
 	default:
 		chatID := route.ChatID
 		if chatID == 0 {

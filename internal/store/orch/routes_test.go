@@ -56,6 +56,56 @@ func TestCronRouteActionAndAdmission(t *testing.T) {
 	}
 }
 
+func TestDueCronRoutesSkipsLiveClaim(t *testing.T) {
+	store := migrateTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.AddCronRoute(CronRoute{
+		ID: "route_1", AgentTarget: "valet", Action: "inbox", Text: "event", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+	if ok, err := store.ClaimCronRoute("route_1", now, now.Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("ClaimCronRoute() = %v, %v", ok, err)
+	}
+	routes, err := store.DueCronRoutes(now, 10)
+	if err != nil {
+		t.Fatalf("DueCronRoutes() error: %v", err)
+	}
+	if len(routes) != 0 {
+		t.Errorf("routes = %+v, want claimed route skipped", routes)
+	}
+	routes, err = store.DueCronRoutes(now.Add(2*time.Minute), 10)
+	if err != nil {
+		t.Fatalf("DueCronRoutes() error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Errorf("routes after lease = %+v, want one", routes)
+	}
+}
+
+func TestAppendLogDeduped(t *testing.T) {
+	store := migrateTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	inserted, err := store.AppendLogDeduped("info", "cron:test", "output", "{}", "route_1", now)
+	if err != nil || !inserted {
+		t.Fatalf("AppendLogDeduped() = %v, %v; want inserted", inserted, err)
+	}
+	inserted, err = store.AppendLogDeduped("info", "cron:test", "output", "{}", "route_1", now)
+	if err != nil {
+		t.Fatalf("AppendLogDeduped(second) error: %v", err)
+	}
+	if inserted {
+		t.Error("duplicate dedupe key inserted a second row")
+	}
+	logs, err := store.ListLogs(0)
+	if err != nil {
+		t.Fatalf("ListLogs() error: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Errorf("logs = %d, want one", len(logs))
+	}
+}
+
 func TestClaimCronRoute(t *testing.T) {
 	store := migrateTestStore(t)
 	now := time.Now().UTC().Truncate(time.Second)

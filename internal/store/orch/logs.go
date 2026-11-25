@@ -18,18 +18,35 @@ type LogEntry struct {
 
 // AppendLog writes one orchestrator audit-log row.
 func (s *Store) AppendLog(level, source, message, meta string, at time.Time) error {
+	_, err := s.appendLog(level, source, message, meta, "", at)
+	return err
+}
+
+// AppendLogDeduped writes one audit-log row unless dedupeKey was already used.
+// It returns whether a row was inserted.
+func (s *Store) AppendLogDeduped(level, source, message, meta, dedupeKey string, at time.Time) (bool, error) {
+	return s.appendLog(level, source, message, meta, dedupeKey, at)
+}
+
+func (s *Store) appendLog(level, source, message, meta, dedupeKey string, at time.Time) (bool, error) {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
 	if strings.TrimSpace(meta) == "" {
 		meta = "{}"
 	}
-	_, err := s.db.Exec(`INSERT INTO orch_logs (level, source, message, meta, created_at)
-		VALUES (?, ?, ?, ?, ?)`, strings.TrimSpace(level), strings.TrimSpace(source), message, meta, at)
+	result, err := s.db.Exec(`INSERT INTO orch_logs (level, source, message, meta, created_at, dedupe_key)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(dedupe_key) WHERE dedupe_key != '' DO NOTHING`,
+		strings.TrimSpace(level), strings.TrimSpace(source), message, meta, at, strings.TrimSpace(dedupeKey))
 	if err != nil {
-		return fmt.Errorf("orch: append log: %w", err)
+		return false, fmt.Errorf("orch: append log: %w", err)
 	}
-	return nil
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: append log: %w", err)
+	}
+	return affected > 0, nil
 }
 
 // ListLogs returns audit-log rows in chronological order. limit <= 0 returns

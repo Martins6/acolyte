@@ -176,8 +176,10 @@ func (s *Store) DueCronRoutes(now time.Time, limit int) ([]CronRoute, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(`SELECT `+cronRouteColumns+` FROM orch_cron_routes
-		WHERE delivered_at IS NULL AND COALESCE(next_attempt_at, created_at) <= ?
-		ORDER BY created_at, id LIMIT ?`, now, limit)
+		WHERE delivered_at IS NULL
+		AND (claimed_until IS NULL OR claimed_until <= ?)
+		AND COALESCE(next_attempt_at, created_at) <= ?
+		ORDER BY created_at, id LIMIT ?`, now, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("orch: list due cron routes: %w", err)
 	}

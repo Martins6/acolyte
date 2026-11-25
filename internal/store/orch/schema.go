@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "orch"
-	version = 4
+	version = 5
 )
 
 // Migrate creates or upgrades the orchestrator schema.
@@ -50,6 +50,12 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("orch: migrate to version 4: %w", err)
 		}
 		current = 4
+	}
+	if current < 5 {
+		if err := migrateV5(db); err != nil {
+			return fmt.Errorf("orch: migrate to version 5: %w", err)
+		}
+		current = 5
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -113,6 +119,22 @@ func migrateV4(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// migrateV5 adds a dedupe key so retried log routes cannot append the same
+// output twice.
+func migrateV5(db *sql.DB) error {
+	columns, err := tableColumns(db, "orch_logs")
+	if err != nil {
+		return err
+	}
+	if !columns["dedupe_key"] {
+		if _, err := db.Exec(`ALTER TABLE orch_logs ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_logs_dedupe ON orch_logs(dedupe_key) WHERE dedupe_key != ''`)
+	return err
 }
 
 func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
