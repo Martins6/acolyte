@@ -14,6 +14,7 @@ import (
 
 	"github.com/martins6/acolyte/internal/envelope"
 	"github.com/martins6/acolyte/internal/opencode"
+	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store/commtg"
 	"github.com/martins6/acolyte/internal/storepool"
@@ -165,6 +166,7 @@ type routerHarness struct {
 
 func newRouterHarness(t *testing.T, maxConcurrency int) *routerHarness {
 	t.Helper()
+	t.Setenv(paths.HomeEnv, t.TempDir())
 	ws := filepath.Join(t.TempDir(), "agent")
 	if err := os.MkdirAll(ws, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -660,7 +662,10 @@ func TestRouterPromptIncludesMedia(t *testing.T) {
 	}
 }
 
-func TestRouterTurnErrorPersistsAndRoutesError(t *testing.T) {
+// TestRouterAdmittedTurnErrorLeavesReplyIdentityFree covers an admitted turn
+// without a bookkeeping row: the callback proves OpenCode accepted the input,
+// so the error must not consume the reply identity.
+func TestRouterAdmittedTurnErrorLeavesReplyIdentityFree(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.turn.result = &opencode.TurnResult{SessionID: "ses_err", InputID: "msg_in"}
 	h.turn.err = errors.New("boom")
@@ -671,8 +676,8 @@ func TestRouterTurnErrorPersistsAndRoutesError(t *testing.T) {
 	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
 		t.Fatal("HandleInbound() error = nil, want error")
 	}
-	if len(h.outbound.events) != 2 || !strings.Contains(h.outbound.events[1].Content.Text, "Error: boom") {
-		t.Errorf("outbound = %+v", h.outbound.events)
+	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Errorf("outbound = %+v, want only the ack with the reply slot free", h.outbound.events)
 	}
 	st, release, err := h.pool.Acquire(h.store)
 	if err != nil {

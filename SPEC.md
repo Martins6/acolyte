@@ -736,13 +736,16 @@ never executed, nothing is duplicated; the cost is that thread's conversation co
 is still in flight past the grace window is interrupted and the message is settled as incomplete
 instead: execution cannot be disproved, so it is never re-admitted. Recovery first establishes that
 this marker is the session's head turn (no later delivered input, or the next input is still queued);
-a later turn is never interrupted. If an interrupt is rejected and cannot be confirmed, the notice says
-so instead of claiming the turn stopped. After `maxResumeAttempts` (2), the message is settled and the
-user is told it did not complete.
+a later turn is never interrupted. The ownership check and interrupt take the same per-session turn
+lock as every admission (router, cron, OutboxSink), so a newer turn cannot start in between. If an
+interrupt is rejected and cannot be confirmed, the notice says so instead of claiming the turn stopped.
+After `maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
 
 **Collection errors do not consume the reply.** A turn error after admission keeps the marker and
-leaves the reply identity (`out_<inbound>`) free. Replay reconciles the turn and queues the real reply
-when it exists; only definitive failures settle with a notice.
+leaves the reply identity (`out_<inbound>`) free. The admission callback proves OpenCode accepted the
+input even if persisting the marker failed; the error path retries that write from the returned marker
+and only an unadmitted turn gets an immediate error reply. Replay reconciles the turn and queues the
+real reply when it exists; only definitive failures settle with a notice.
 
 **Replies are idempotent per inbound.** The reply envelope ID is derived from the inbound envelope ID
 (`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply
@@ -751,6 +754,9 @@ collapses to one row instead of double-sending.
 **Operator notices are labelled.** Text Acolyte generates about its own operation is sent as
 `ACOLYTE SYSTEM MESSAGE: <text>` on its own outbound identity (`sys_<inbound>`), never mixed into agent
 text, and never claims a request completed when it did not.
+
+**Recovery is wired before polling.** The daemon installs the adapter's reconciler before starting the
+adapter, so an initial replay can never mark a marker-bearing row processed while recovery is missing.
 
 **Cron runs recover output, not execution.** A job records the marker of the turn it admitted
 (`orch_cron_jobs.pending_*`). On restart, recovery checks that the session is not still in flight,

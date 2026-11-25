@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/martins6/acolyte/internal/envelope"
+	"github.com/martins6/acolyte/internal/lock"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
@@ -43,6 +44,11 @@ type TurnProber interface {
 // resumeGraceWindow is how long a stranded turn may sit before recovery abandons
 // it. It is a variable so tests can shorten it.
 var resumeGraceWindow = 5 * time.Minute
+
+// sessionLockWait bounds how long recovery waits for a live turn's session lock
+// before leaving the row for the next pass. A live turn holds this lock for its
+// whole duration, so waiting without a bound would stall replay.
+var sessionLockWait = 10 * time.Second
 
 // maxResumeAttempts bounds how many times recovery re-admits one message before
 // settling it with an explicit notice.
@@ -206,13 +212,13 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	// finishes leaves the user with a retryable outbox row instead of silence.
 	admitted := false
 	cfg.OnAdmitted = func(admittedTurn opencode.Admitted) error {
+		// The callback only runs after OpenCode accepted the input, so the turn
+		// exists even if persisting the marker below fails.
+		admitted = true
 		if err := st.CommTG().MarkInboundAdmitted(env.ID, admittedTurn.SessionID, admittedTurn.InputID, r.now()); err != nil {
 			if !errors.Is(err, commtg.ErrInboundNotFound) {
 				return err
 			}
-		} else {
-			// Only a successful write proves recovery can re-collect the turn.
-			admitted = true
 		}
 		if err := r.sendAck(ctx, agent, env); err != nil {
 			// The marker is already durable, so the turn is recoverable.
@@ -231,9 +237,16 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 
 	if turnErr != nil {
 		if admitted {
-			// The marker is durable, so recovery can still collect the real
-			// reply. Do not send an error on the reply identity: it would both
-			// settle the row and make the outbox suppress the recovered reply.
+			// The callback means OpenCode accepted the input, so recovery owns
+			// the reply even if the marker write failed. Try the idempotent
+			// write once more from the returned marker, then leave the reply
+			// identity free for reconciliation.
+			if result != nil && strings.TrimSpace(result.SessionID) != "" && strings.TrimSpace(result.InputID) != "" {
+				if linkErr := st.CommTG().MarkInboundAdmitted(env.ID, result.SessionID, result.InputID, r.now()); linkErr != nil &&
+					!errors.Is(linkErr, commtg.ErrInboundNotFound) {
+					return fmt.Errorf("%v: persist admitted marker: %w", turnErr, linkErr)
+				}
+			}
 			return turnErr
 		}
 		if sendErr := r.sendReply(ctx, st, agent, env, result, fmt.Sprintf("Error: %v", turnErr)); sendErr != nil {
@@ -316,6 +329,26 @@ func (r *Router) reconcile(ctx context.Context, agent registry.Agent, env envelo
 		}
 		// A transient service error must not settle the message; look again.
 		return ReconcileStillPending, err
+	}
+	if info.Time.InFlight() {
+		// Another producer (cron, OutboxSink) can admit a turn on the same
+		// session without using the router's thread lock. Take the session's
+		// turn lock so the ownership check and any interrupt are serialized
+		// with every admission, then re-check: the turn may have finished
+		// while we waited.
+		releaseLock, lockErr := r.lockForRecovery(ctx, sessionID)
+		if lockErr != nil {
+			log.Printf("comm: wait for session lock %s: %v", sessionID, lockErr)
+			return ReconcileStillPending, nil
+		}
+		defer releaseLock()
+		info, err = prober.GetSession(ctx, sessionID)
+		if err != nil {
+			if opencode.IsPermanentError(err) {
+				return r.settleProbeFailure(ctx, st, agent, env)
+			}
+			return ReconcileStillPending, err
+		}
 	}
 	if info.Time.InFlight() {
 		active, queued, err := r.sessionTurnState(ctx, prober, sessionID, marker)
@@ -420,6 +453,18 @@ func (r *Router) reconcile(ctx context.Context, agent registry.Agent, env envelo
 		return ReconcileUnrecoverable, err
 	}
 	return ReconcileUnrecoverable, nil
+}
+
+// lockForRecovery takes the per-session turn lock shared by every producer
+// (router turns, cron, OutboxSink). It releases the returned function.
+func (r *Router) lockForRecovery(ctx context.Context, sessionID string) (func(), error) {
+	lockCtx, cancel := context.WithTimeout(ctx, sessionLockWait)
+	defer cancel()
+	held, err := lock.AcquireSession(lockCtx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = held.Release() }, nil
 }
 
 // sessionTurnState reports whether this marker's turn owns a busy session.

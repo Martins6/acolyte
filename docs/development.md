@@ -94,10 +94,14 @@ Behaviour worth remembering when changing this code:
 - Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
   and only into a fresh session for input that provably never executed. A session still in flight past
   the grace window is interrupted and settled as incomplete, but only when this marker is the head
-  turn; a later delivered turn is left alone. The thread lock serializes the probe with new admissions.
-  An unconfirmed interrupt settles with wording that does not claim the turn stopped.
-- A collection error after admission keeps the marker and the reply identity free; replay reconciles
-  and queues the real reply when it exists. Only definitive failures settle with a notice.
+  turn; a later delivered turn is left alone. The ownership check and interrupt take the per-session
+  turn lock shared by router, cron, and OutboxSink turns. An unconfirmed interrupt settles with wording
+  that does not claim the turn stopped.
+- A collection error after admission keeps the marker and the reply identity free. The admission
+  callback proves OpenCode accepted the input even if the marker write failed; the error path retries
+  the write from the returned marker, and only an unadmitted turn replies immediately.
+- The daemon installs the adapter's reconciler before the adapter starts polling, so an initial replay
+  cannot settle a marker-bearing row while recovery is missing.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.
