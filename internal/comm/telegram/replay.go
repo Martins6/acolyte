@@ -54,6 +54,13 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 				return
 			}
 		}
+		if item.PendingReply == "" && a.reconciler() != nil {
+			// A marker appeared after this pass decided to admit, so the reply
+			// belongs to recovery. Hand the row back instead of settling it
+			// without collecting that reply.
+			_ = a.store.CommTG().ReleaseInboundClaim(env.ID, token)
+			return
+		}
 		if markErr := a.store.CommTG().MarkInboundProcessed(env.ID, token, a.now()); markErr != nil {
 			log.Printf("telegram: mark linked inbound %s processed for %s: %v", env.ID, a.agent.Name, markErr)
 		}
@@ -154,7 +161,7 @@ func (a *Adapter) replayPending(ctx context.Context) {
 			continue
 		}
 		if item.OpenCodeMessageID != "" {
-			_ = a.store.CommTG().MarkInboundProcessedUnconditional(item.EnvelopeID, a.now())
+			a.reconcileItem(ctx, item)
 			continue
 		}
 		if strings.TrimSpace(item.PendingEnvelope) == "" {
@@ -178,6 +185,69 @@ func (a *Adapter) replayPending(ctx context.Context) {
 		}
 		a.admit(ctx, env)
 	}
+}
+
+// reconcileItem settles an inbound whose turn was already admitted. The marker
+// on the row is the recovery token: a finished turn is re-collected and its
+// reply queued, a running turn is left alone, and a turn that never executed is
+// reported as stranded so escalation can decide what to do.
+func (a *Adapter) reconcileItem(ctx context.Context, item commtg.InboxItem) {
+	reconcile := a.reconciler()
+
+	if reconcile == nil || strings.TrimSpace(item.PendingEnvelope) == "" {
+		// No recovery wiring, or a legacy row with no payload: there is no
+		// envelope to reply to, so settle it exactly as before.
+		_ = a.store.CommTG().MarkInboundProcessedUnconditional(item.EnvelopeID, a.now())
+		return
+	}
+
+	env, ok := decodeReplayEnvelope(item.PendingEnvelope)
+	if !ok {
+		_ = a.store.CommTG().RecordInboundFailureUnclaimed(item.EnvelopeID, "decode pending envelope for recovery")
+		return
+	}
+
+	token := envelope.NewID()
+	now := a.now()
+	claimed, err := a.store.CommTG().ClaimInbound(item.EnvelopeID, token, now, now.Add(claimLease))
+	if err != nil || !claimed {
+		return
+	}
+
+	outcome, err := reconcile(ctx, env)
+	if err != nil {
+		_ = a.store.CommTG().RecordInboundFailure(item.EnvelopeID, token, err.Error())
+		return
+	}
+	if outcome == comm.ReconcileRecovered {
+		_ = a.store.CommTG().MarkInboundProcessed(item.EnvelopeID, token, a.now())
+		return
+	}
+	// Still pending, stranded, or unrecoverable: hand the row straight back so
+	// the next pass can look again. Counting these as failures would inflate the
+	// admission counter for work that has not failed to be admitted.
+	_ = a.store.CommTG().ReleaseInboundClaim(item.EnvelopeID, token)
+}
+
+// reconciler returns the installed recovery hook, if any.
+func (a *Adapter) reconciler() comm.Reconciler {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.reconcile
+}
+
+// decodeReplayEnvelope accepts both stored payload shapes: the replayPayload
+// wrapper written since v4, and the bare envelope written by earlier versions.
+func decodeReplayEnvelope(raw string) (envelope.Envelope, bool) {
+	var payload replayPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err == nil && payload.Envelope.ID != "" {
+		return payload.Envelope, true
+	}
+	var env envelope.Envelope
+	if err := json.Unmarshal([]byte(raw), &env); err == nil && env.ID != "" {
+		return env, true
+	}
+	return envelope.Envelope{}, false
 }
 
 func (a *Adapter) deliverPendingReply(item commtg.InboxItem) error {

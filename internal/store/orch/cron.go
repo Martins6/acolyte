@@ -389,6 +389,91 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+// PendingTurn is a cron run whose turn was admitted but whose output has not
+// been collected yet. It is the recovery handle for a run cut short by a
+// restart.
+type PendingTurn struct {
+	JobID     string
+	SessionID string
+	MarkerID  string
+	Kind      string
+	StartedAt *time.Time
+	Attempts  int
+}
+
+// SetCronJobPending records the turn a job just admitted.
+func (s *Store) SetCronJobPending(id, sessionID, markerID, kind string, at time.Time) error {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	result, err := s.db.Exec(`UPDATE orch_cron_jobs
+		SET pending_session_id = ?, pending_marker_id = ?, pending_kind = ?, pending_started_at = ?
+		WHERE id = ?`, sessionID, markerID, kind, at, id)
+	if err != nil {
+		return fmt.Errorf("orch: set pending turn for job %q: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("orch: set pending turn for job %q: %w", id, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("orch: cron job %q not found", id)
+	}
+	return nil
+}
+
+// ClearCronJobPending marks the job's admitted turn as collected.
+func (s *Store) ClearCronJobPending(id string) error {
+	_, err := s.db.Exec(`UPDATE orch_cron_jobs
+		SET pending_session_id = '', pending_marker_id = '', pending_kind = '',
+		    pending_started_at = NULL, pending_attempts = 0
+		WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("orch: clear pending turn for job %q: %w", id, err)
+	}
+	return nil
+}
+
+// PendingCronTurns returns jobs whose admitted turn started at or before before.
+func (s *Store) PendingCronTurns(before time.Time, limit int) ([]PendingTurn, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`SELECT id, pending_session_id, pending_marker_id, pending_kind,
+			pending_started_at, pending_attempts
+		FROM orch_cron_jobs
+		WHERE pending_marker_id != '' AND pending_started_at <= ?
+		ORDER BY pending_started_at LIMIT ?`, before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("orch: list pending cron turns: %w", err)
+	}
+	defer rows.Close()
+
+	var turns []PendingTurn
+	for rows.Next() {
+		var turn PendingTurn
+		var startedAt sql.NullTime
+		if err := rows.Scan(&turn.JobID, &turn.SessionID, &turn.MarkerID, &turn.Kind, &startedAt, &turn.Attempts); err != nil {
+			return nil, fmt.Errorf("orch: scan pending cron turn: %w", err)
+		}
+		if startedAt.Valid {
+			value := startedAt.Time
+			turn.StartedAt = &value
+		}
+		turns = append(turns, turn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("orch: scan pending cron turns: %w", err)
+	}
+	return turns, nil
+}
+
+// GetCronJobByID returns one job by its identifier.
+func (s *Store) GetCronJobByID(id string) (CronJob, error) {
+	row := s.db.QueryRow(`SELECT `+cronColumns+` FROM orch_cron_jobs WHERE id = ?`, strings.TrimSpace(id))
+	return scanJob(row)
+}
+
 func scanJob(row scanner) (CronJob, error) {
 	var job CronJob
 	var enabled int

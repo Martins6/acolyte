@@ -307,6 +307,17 @@ func (s *Service) startAgent(agent registry.Agent, seenTokens map[string]string)
 		release()
 		return
 	}
+	// Recovery is optional: adapters that support it settle inbounds whose turn
+	// was admitted before a restart instead of dropping or re-prompting them.
+	if setter, ok := adapter.(comm.ReconcilerSetter); ok {
+		setter.SetReconciler(func(ctx context.Context, env envelope.Envelope) (comm.ReconcileOutcome, error) {
+			outcome, err := s.router.Recover(ctx, agent, env)
+			if err != nil {
+				log.Printf("daemon: recover for %s (%s): %v", agent.Name, outcome, err)
+			}
+			return outcome, err
+		})
+	}
 
 	rt := &agentRuntime{
 		agent:       agent,

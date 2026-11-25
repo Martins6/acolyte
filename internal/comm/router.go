@@ -27,6 +27,60 @@ type TurnRunner interface {
 	RunUserTurn(ctx context.Context, sessionID, text string, cfg opencode.TurnConfig) (*opencode.TurnResult, error)
 }
 
+// TurnProber is the optional recovery half of a turn runner. A runner that
+// implements it can re-collect a turn that was admitted before a restart
+// without waiting and without admitting it again.
+type TurnProber interface {
+	GetSession(ctx context.Context, sessionID string) (*opencode.SessionInfo, error)
+	CollectDelivered(ctx context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error)
+	InboxPending(ctx context.Context, sessionID, itemID string) (bool, error)
+	Interrupt(ctx context.Context, sessionID string) error
+}
+
+// resumeGraceWindow is how long a stranded turn may sit before recovery abandons
+// it. It is a variable so tests can shorten it.
+var resumeGraceWindow = 5 * time.Minute
+
+// maxResumeAttempts bounds how many times recovery re-admits one message before
+// settling it with an explicit notice.
+const maxResumeAttempts = 2
+
+// ReconcileOutcome reports what recovery found for an admitted inbound.
+type ReconcileOutcome int
+
+const (
+	// ReconcileStillPending means the turn is queued or running and should be
+	// left alone; a later pass will look again.
+	ReconcileStillPending ReconcileOutcome = iota
+	// ReconcileRecovered means the turn's reply was collected and queued.
+	ReconcileRecovered
+	// ReconcileStranded means the input was admitted but never executed, so
+	// recovery may re-admit it.
+	ReconcileStranded
+	// ReconcileUnrecoverable means the marker cannot produce a reply and the
+	// inbound must be settled explicitly instead of retried forever.
+	ReconcileUnrecoverable
+	// ReconcileReAdmitted means recovery abandoned the stranded turn and reset
+	// the row for a fresh admission on the next pass.
+	ReconcileReAdmitted
+)
+
+// String renders the outcome for logs.
+func (o ReconcileOutcome) String() string {
+	switch o {
+	case ReconcileRecovered:
+		return "recovered"
+	case ReconcileStranded:
+		return "stranded"
+	case ReconcileUnrecoverable:
+		return "unrecoverable"
+	case ReconcileReAdmitted:
+		return "re-admitted"
+	default:
+		return "still-pending"
+	}
+}
+
 // Outbound routes an outbound envelope to the agent's Communication adapter.
 type Outbound func(ctx context.Context, agent registry.Agent, env envelope.Envelope) error
 
@@ -143,6 +197,15 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	if r.events != nil {
 		cfg.OnEvent = r.events(agent, st)
 	}
+	// Persist the marker the moment the input is admitted. Recovery re-collects
+	// by this pair instead of admitting the message a second time.
+	cfg.OnAdmitted = func(admitted opencode.Admitted) error {
+		if err := st.CommTG().MarkInboundAdmitted(env.ID, admitted.SessionID, admitted.InputID, r.now()); err != nil &&
+			!errors.Is(err, commtg.ErrInboundNotFound) {
+			return err
+		}
+		return nil
+	}
 	result, turnErr := r.turn.RunUserTurn(ctx, sessionID, text, cfg)
 	if result != nil && result.SessionID != "" {
 		if _, err := st.Orch().UpsertSession(env.Thread, result.SessionID, r.now()); err != nil && turnErr == nil {
@@ -174,6 +237,189 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		_ = st.CommTG().ClearInboundReply(env.ID)
 	}
 	return nil
+}
+
+// Reconcile settles an inbound whose turn was admitted earlier. It is the
+// recovery counterpart to HandleInbound: it never admits a new turn, it only
+// looks at the marker already recorded on the inbound row.
+//
+// Callers must hold the inbound claim. That is what makes recovery safe: the
+// row is excluded from PendingInbound while a live turn owns it, so this can
+// never race the turn it is inspecting.
+func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
+	prober, ok := r.turn.(TurnProber)
+	if !ok {
+		return ReconcileUnrecoverable, fmt.Errorf("comm: turn runner does not support recovery")
+	}
+
+	st, release, err := r.stores.Acquire(agent.Workspace)
+	if err != nil {
+		return ReconcileStillPending, fmt.Errorf("comm: open agent store: %w", err)
+	}
+	defer release()
+
+	item, found, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		return ReconcileStillPending, err
+	}
+	if !found {
+		return ReconcileUnrecoverable, fmt.Errorf("comm: inbound %q not found", env.ID)
+	}
+	marker := strings.TrimSpace(item.OpenCodeMessageID)
+	sessionID := strings.TrimSpace(item.OpenCodeSessionID)
+	if marker == "" || sessionID == "" {
+		// Nothing was admitted, so there is nothing to collect. The caller
+		// falls back to normal admission.
+		return ReconcileStillPending, nil
+	}
+
+	info, err := prober.GetSession(ctx, sessionID)
+	if err != nil {
+		// A transient service error must not settle the message; look again.
+		return ReconcileStillPending, err
+	}
+	if info.Time.InFlight() {
+		// The service still owns this turn. Recovery must not interfere.
+		return ReconcileStillPending, nil
+	}
+
+	result, delivered, err := prober.CollectDelivered(ctx, sessionID, marker)
+	if err != nil {
+		if errors.Is(err, opencode.ErrTurnTruncated) {
+			return ReconcileUnrecoverable, err
+		}
+		return ReconcileStillPending, err
+	}
+	if delivered {
+		if err := r.sendReply(ctx, st, agent, env, result, result.ResponseText); err != nil {
+			return ReconcileRecovered, err
+		}
+		_ = st.CommTG().ClearInboundReply(env.ID)
+		return ReconcileRecovered, nil
+	}
+
+	// Idle with no reply. Either the input is still queued (it never executed)
+	// or it was consumed and produced nothing.
+	pending, err := prober.InboxPending(ctx, sessionID, marker)
+	if err != nil {
+		return ReconcileStillPending, err
+	}
+	if pending {
+		return ReconcileStranded, nil
+	}
+	return ReconcileUnrecoverable, nil
+}
+
+// Recover applies the escalation policy on top of Reconcile. A stranded turn is
+// left alone until the grace window passes; then it is abandoned, and the
+// message is re-admitted into a fresh session. When the attempt budget runs out
+// the message is settled with an explicit notice instead of retrying forever.
+func (r *Router) Recover(ctx context.Context, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
+	outcome, err := r.Reconcile(ctx, agent, env)
+	if err != nil || outcome != ReconcileStranded {
+		return outcome, err
+	}
+
+	st, release, err := r.stores.Acquire(agent.Workspace)
+	if err != nil {
+		return ReconcileStillPending, fmt.Errorf("comm: open agent store: %w", err)
+	}
+	defer release()
+
+	item, found, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		return ReconcileStillPending, err
+	}
+	if !found {
+		return ReconcileStillPending, nil
+	}
+	if !resumeGraceElapsed(item, r.now()) {
+		return ReconcileStillPending, nil
+	}
+	if strings.TrimSpace(item.PendingEnvelope) == "" || item.ResumeAttempts >= maxResumeAttempts {
+		// Either the payload needed to re-admit is gone, or the budget is spent.
+		// Retrying is pointless, so settle the message honestly instead of
+		// dropping it silently.
+		if err := r.settleUnrecoverable(ctx, st, agent, env, item); err != nil {
+			return ReconcileUnrecoverable, err
+		}
+		return ReconcileUnrecoverable, nil
+	}
+
+	// Abandon the stranded turn: settle the wedged session, forget the thread's
+	// session mapping, and clear the marker so the next pass admits the message
+	// into a fresh session exactly like a new one. Nothing ran, so nothing that
+	// follows is duplicated.
+	if prober, ok := r.turn.(TurnProber); ok && strings.TrimSpace(item.OpenCodeSessionID) != "" {
+		if err := prober.Interrupt(ctx, item.OpenCodeSessionID); err != nil {
+			return ReconcileStillPending, err
+		}
+	}
+	if _, err := st.Orch().DeleteSession(env.Thread); err != nil {
+		return ReconcileStillPending, err
+	}
+	if err := st.CommTG().RecordResumeAttempt(env.ID, "abandoned a turn that never executed"); err != nil {
+		return ReconcileStillPending, err
+	}
+	return ReconcileReAdmitted, nil
+}
+
+// resumeGraceElapsed reports whether a stranded turn has waited long enough to
+// be considered dead rather than slow.
+func resumeGraceElapsed(item commtg.InboxItem, now time.Time) bool {
+	start := item.ReceivedAt
+	if item.AdmittedAt != nil {
+		start = *item.AdmittedAt
+	}
+	return now.Sub(start) >= resumeGraceWindow
+}
+
+// settleUnrecoverable stops a message from looping forever and tells the user
+// the truth: the request was not completed and nothing was delivered for it.
+func (r *Router) settleUnrecoverable(ctx context.Context, st *store.Store, agent registry.Agent, env envelope.Envelope, item commtg.InboxItem) error {
+	notice := SystemNotice(fmt.Sprintf(
+		"your message from %s could not be completed after %d recovery attempts, and no reply was delivered. Send it again to retry.",
+		item.ReceivedAt.UTC().Format("15:04 UTC"), item.ResumeAttempts))
+	if err := r.sendSystemNotice(ctx, st, agent, env, notice); err != nil {
+		return err
+	}
+	return st.CommTG().MarkInboundProcessedUnconditional(env.ID, r.now())
+}
+
+// sendSystemNotice queues an operator notice on its own outbound identity. It
+// never reuses the reply identity, so a notice can never be mistaken for, or
+// collide with, recovered agent text.
+func (r *Router) sendSystemNotice(ctx context.Context, st *store.Store, agent registry.Agent, in envelope.Envelope, text string) error {
+	if r.outbound == nil || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	out := envelope.New(envelope.DirectionOut, in.Channel, in.Thread, in.To, in.From,
+		envelope.Content{Type: envelope.ContentText, Text: text})
+	out.ID = "sys_" + in.ID
+	out.Meta = map[string]any{
+		"agent":              agent.Name,
+		"source_envelope_id": in.ID,
+		"kind":               "system-notice",
+	}
+	if in.Meta != nil {
+		if value, ok := in.Meta["telegram_message_id"]; ok {
+			out.Meta["reply_to_message_id"] = value
+		}
+	}
+	pending := PendingReply{
+		ID:      out.ID,
+		Text:    text,
+		ReplyTo: routerMetaInt64(out.Meta["reply_to_message_id"]),
+	}
+	raw, err := json.Marshal(pending)
+	if err != nil {
+		return err
+	}
+	if err := st.CommTG().SetInboundReply(in.ID, string(raw)); err != nil &&
+		!errors.Is(err, commtg.ErrInboundNotFound) {
+		return err
+	}
+	return r.outbound(ctx, agent, out)
 }
 
 const mediaPathLinePrefix = "File located at: "
@@ -226,6 +472,12 @@ func (r *Router) sendReply(ctx context.Context, st *store.Store, agent registry.
 	}
 	out := envelope.New(envelope.DirectionOut, in.Channel, in.Thread, in.To, in.From,
 		envelope.Content{Type: envelope.ContentText, Text: text})
+	// Derive a stable ID from the inbound envelope. The outbox is unique on
+	// envelope_id, so repeating or racing a reply for one inbound collapses to
+	// a single row instead of double-sending.
+	if id := replyEnvelopeID(in.ID); id != "" {
+		out.ID = id
+	}
 	out.Meta = map[string]any{"agent": agent.Name, "source_envelope_id": in.ID}
 	if result != nil {
 		if result.SessionID != "" {
@@ -258,6 +510,17 @@ func (r *Router) sendReply(ctx context.Context, st *store.Store, agent registry.
 		return err
 	}
 	return r.outbound(ctx, agent, out)
+}
+
+// replyEnvelopeID returns the stable outbox identity for the reply to an
+// inbound envelope. An empty inbound ID yields no override so a malformed
+// inbound cannot make unrelated replies collide.
+func replyEnvelopeID(inboundID string) string {
+	inboundID = strings.TrimSpace(inboundID)
+	if inboundID == "" {
+		return ""
+	}
+	return "out_" + inboundID
 }
 
 func routerResultInputID(result *opencode.TurnResult) string {

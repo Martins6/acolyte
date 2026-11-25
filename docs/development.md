@@ -66,6 +66,36 @@ suites on every PR. In `.github/workflows/test.yml` the live job runs after merg
 manual dispatch), never on PRs, because the provider credential must not be exposed to PR-controlled
 code. It has a hard 15-minute timeout.
 
+## Turn recovery
+
+Turns are resumable. The marker returned by `prompt`/`synthetic` is persisted at admission
+(`TurnConfig.OnAdmitted` → `comm_tg_inbox.opencode_message_id` + `admitted_at`), so recovery
+re-collects a finished turn instead of admitting the message a second time.
+
+Where it lives:
+
+| Concern | Location |
+|---|---|
+| Admission hook | `internal/opencode/turn.go` (`Admitted`, `admitInput`) |
+| Collect-only probe | `internal/opencode/client.go` (`CollectDelivered`, `SessionTime.InFlight`) |
+| Reconcile + escalation | `internal/comm/router.go` (`Reconcile`, `Recover`) |
+| Replay wiring | `internal/comm/telegram/replay.go` (`reconcileItem`) |
+| Store state | `internal/store/commtg/inbox.go` (`MarkInboundAdmitted`, `RecordResumeAttempt`) |
+| Cron recovery | `internal/cron/service.go` (`recoverPendingTurns`) |
+
+Behaviour worth remembering when changing this code:
+
+- A marker must be stored **while** the turn runs, not when it finishes — that invariant is what makes
+  restart recovery possible. `TestRouterPersistsMarkerBeforeTurnCompletes` guards it.
+- Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
+  and only into a fresh session for input that provably never executed.
+- Reply envelope IDs are derived from the inbound (`out_<inbound>`) so re-sending is idempotent.
+- Operator notices use `ACOLYTE SYSTEM MESSAGE:` and never claim success that did not happen.
+- Cron routine bodies are never replayed; an interrupted routine is reported as incomplete.
+
+Grace window (`resumeGraceWindow`, `cronResumeGrace`) and the attempt cap (`maxResumeAttempts`) are
+package variables so tests can shorten them.
+
 ## GitHub workflows
 
 - `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR (`test / unit`), plus

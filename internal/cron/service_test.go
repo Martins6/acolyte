@@ -171,6 +171,193 @@ func startTestService(t *testing.T, reg *registry.Registry, routines *routine.Re
 	return service
 }
 
+// collectingTurn adds the optional recovery half the cron service probes for.
+type collectingTurn struct {
+	fakeTurn
+	delivered bool
+	text      string
+	collected []string
+}
+
+func (f *collectingTurn) CollectDelivered(_ context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error) {
+	f.collected = append(f.collected, markerID)
+	return &opencode.TurnResult{SessionID: sessionID, InputID: markerID, ResponseText: f.text}, f.delivered, nil
+}
+
+func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+
+	// Mark the run pending before the service takes the store handle.
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	// Admitted an hour ago and never collected.
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_a", "msg_a", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	turn := &collectingTurn{delivered: true, text: "the recovered report"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	if len(turn.collected) != 1 || turn.collected[0] != "msg_a" {
+		t.Fatalf("collected = %v, want the admitted marker", turn.collected)
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want cleared after collection", turns)
+	}
+	if !storeLogContains(t, pair.store, "recovered output from an interrupted run") {
+		t.Errorf("logs = %v, want the recovery note", storeLogMessages(t, pair.store))
+	}
+	if turn.calls != 0 {
+		t.Errorf("synthetic turns = %d, want 0 (recovery must never re-run a job)", turn.calls)
+	}
+}
+
+func TestRecoverPendingTurnsReportsInterruptedRoutineHonestly(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "dream", Kind: "routine", Spec: "@every 72h", Routine: "dream",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("dream")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_d", "msg_d", "routine", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	turn := &collectingTurn{delivered: true, text: "analysis text"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	// The routine body cannot be resumed, so the log must say so rather than
+	// presenting the recovered text as a completed run.
+	if !storeLogContains(t, pair.store, "the routine body did not finish") {
+		t.Errorf("logs = %v, want an honest incomplete-run note", storeLogMessages(t, pair.store))
+	}
+	if turn.calls != 0 {
+		t.Errorf("synthetic turns = %d, want 0 (a routine must never be replayed)", turn.calls)
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want cleared", turns)
+	}
+}
+
+func TestRecoverPendingTurnsLeavesInFlightRunAlone(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_a", "msg_a", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	turn := &collectingTurn{delivered: true, text: "too early"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	// Simulate a live run owning the job.
+	svc.running["valet/"+job.ID] = true
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	if len(turn.collected) != 0 {
+		t.Errorf("collected = %v, want none while a run is in flight", turn.collected)
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 1 {
+		t.Errorf("pending turns = %+v, want the row untouched", turns)
+	}
+}
+
+// servicePair returns the service's own handle for an agent, so tests never open
+// a second connection to the same database.
+func servicePair(t *testing.T, svc *Service, name string) *agentStore {
+	t.Helper()
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	pair, ok := svc.agents[name]
+	if !ok {
+		t.Fatalf("service has no store for agent %q", name)
+	}
+	return pair
+}
+
+func storeLogMessages(t *testing.T, st *store.Store) []string {
+	t.Helper()
+	logs, err := st.Orch().ListLogs(0)
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	messages := make([]string, 0, len(logs))
+	for _, entry := range logs {
+		messages = append(messages, entry.Message)
+	}
+	return messages
+}
+
+func storeLogContains(t *testing.T, st *store.Store, want string) bool {
+	t.Helper()
+	for _, message := range storeLogMessages(t, st) {
+		if strings.Contains(message, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestParseJobMetaValidation(t *testing.T) {
 	if _, err := parseJobMeta(`{`); err == nil {
 		t.Fatal("parseJobMeta(invalid) error = nil, want error")

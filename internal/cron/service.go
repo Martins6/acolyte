@@ -238,6 +238,7 @@ func (s *Service) Tick(ctx context.Context) int {
 	dispatched := 0
 	for _, pair := range pairs {
 		s.retryRoutes(ctx, pair)
+		s.recoverPendingTurns(ctx, pair)
 		jobs, err := pair.store.Orch().DueCronJobs(now)
 		if err != nil {
 			log.Printf("cron: list due jobs for %s: %v", pair.agent.Name, err)
@@ -423,6 +424,9 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		return
 	}
 	text, sessionID, err := s.runJob(ctx, agent, st, job, meta)
+	// The turn, if any, is settled once runJob returns; recovery must not try to
+	// collect it again.
+	_ = st.Orch().ClearCronJobPending(job.ID)
 
 	if err != nil {
 		if strings.TrimSpace(text) == "" {
@@ -449,6 +453,76 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		}
 	}
 	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
+}
+
+// cronResumeGrace is how long an admitted cron turn may sit uncollected before
+// recovery treats the run as interrupted. A variable so tests can shorten it.
+var cronResumeGrace = 5 * time.Minute
+
+// turnCollector is the optional recovery half of the cron turn runner.
+type turnCollector interface {
+	CollectDelivered(ctx context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error)
+}
+
+// recoverPendingTurns collects the output of runs that were admitted before a
+// restart. It never re-runs a job: a routine body that did not finish cannot be
+// resumed without repeating its side effects, so recovery reports exactly what
+// it recovered and records the run as attempted.
+func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
+	collector, ok := s.turn.(turnCollector)
+	if !ok || collector == nil {
+		return
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(s.now().Add(-cronResumeGrace), 20)
+	if err != nil {
+		log.Printf("cron: list pending turns for %s: %v", pair.agent.Name, err)
+		return
+	}
+	for _, pending := range turns {
+		if s.jobRunning(pair.agent.Name, pending.JobID) {
+			// A live run owns this turn; leave it alone.
+			continue
+		}
+		job, err := pair.store.Orch().GetCronJobByID(pending.JobID)
+		if err != nil {
+			log.Printf("cron: load pending job %s: %v", pending.JobID, err)
+			_ = pair.store.Orch().ClearCronJobPending(pending.JobID)
+			continue
+		}
+		result, delivered, err := collector.CollectDelivered(ctx, pending.SessionID, pending.MarkerID)
+		if err != nil {
+			log.Printf("cron: collect pending turn for %s: %v", job.Title, err)
+			continue
+		}
+
+		_ = pair.store.Orch().ClearCronJobPending(job.ID)
+		if !delivered {
+			s.logJob(pair.store, job, "error", "run interrupted: the turn produced no output")
+			_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
+			continue
+		}
+		note := "recovered output from an interrupted run"
+		if pending.Kind == "routine" {
+			note = "recovered turn output from an interrupted routine run; the routine body did not finish"
+		}
+		s.logJob(pair.store, job, "info", note)
+		if text := strings.TrimSpace(result.ResponseText); text != "" {
+			meta, metaErr := parseJobMeta(job.Meta)
+			if metaErr != nil {
+				s.logJob(pair.store, job, "error", "recovered output could not be routed: "+metaErr.Error())
+			} else if routeErr := s.route(ctx, pair.store, pair.agent, job, meta, text, result.SessionID, true); routeErr != nil {
+				s.logJob(pair.store, job, "error", "routing recovered output failed: "+routeErr.Error())
+			}
+		}
+		_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
+	}
+}
+
+// jobRunning reports whether a run of the job is in flight in this process.
+func (s *Service) jobRunning(agentName, jobID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running[agentName+"/"+jobID]
 }
 
 func (s *Service) runJob(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob, meta jobMeta) (string, string, error) {

@@ -56,6 +56,17 @@ func (s *SessionInfo) UnmarshalJSON(data []byte) error {
 type SessionTime struct {
 	Created float64 `json:"created"`
 	Updated float64 `json:"updated"`
+	// Busy and Idle are epoch-millisecond stamps the service sets when a turn
+	// starts and when the session returns to idle.
+	Busy float64 `json:"busy,omitempty"`
+	Idle float64 `json:"idle,omitempty"`
+}
+
+// InFlight reports whether the session has an unfinished turn. The service
+// stamps Busy when a turn starts and Idle when it settles, so a Busy stamp newer
+// than the last Idle means work is still running (or wedged).
+func (t SessionTime) InFlight() bool {
+	return t.Busy > t.Idle
 }
 
 // SessionLocation is the project directory a session belongs to.
@@ -609,6 +620,13 @@ func (c *Client) Synthetic(ctx context.Context, sessionID, text, description str
 // Wait blocks until the session's agent loop is idle.
 func (c *Client) Wait(ctx context.Context, sessionID string) error {
 	path := "/api/experimental/session/" + url.PathEscape(sessionID) + "/wait"
+	return c.do(ctx, http.MethodPost, path, nil, nil)
+}
+
+// Interrupt stops the session's in-flight turn and settles it. Recovery uses it
+// when a wedged turn owns the session and its marker will never produce a reply.
+func (c *Client) Interrupt(ctx context.Context, sessionID string) error {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/interrupt"
 	return c.do(ctx, http.MethodPost, path, nil, nil)
 }
 

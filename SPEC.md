@@ -444,7 +444,7 @@ CREATE TABLE comm_tg_inbox (
   opencode_message_id TEXT DEFAULT '', received_at DATETIME,
   pending_envelope TEXT DEFAULT '', processed_at DATETIME, attempts INTEGER DEFAULT 0,
   last_error TEXT DEFAULT '', claimed_until DATETIME, claim_token TEXT DEFAULT '',
-  pending_reply TEXT DEFAULT ''
+  pending_reply TEXT DEFAULT '', admitted_at DATETIME, resume_attempts INTEGER DEFAULT 0
 );
 CREATE TABLE comm_tg_outbox (
   id TEXT PRIMARY KEY, envelope_id TEXT NOT NULL, chat_id INTEGER NOT NULL,
@@ -693,6 +693,45 @@ an inbound message, or a background notification is admitted to the mapped sessi
 `type: "synthetic"` (with `description` + `metadata`) and delivered via `queue` (next idle) or `steer`
 (interrupt now). Real user messages use `session.prompt`. **Cron** jobs either run a shell command or
 admit a synthetic event; output is routed via Communication.
+
+### 14.1 Turn recovery (durable resumability)
+
+A turn is a **resumable job**, not a request/response call. Admission is durable: `prompt`/`synthetic`
+returns a marker that lives in OpenCode's session inbox before collection starts, and the reply text is
+read back from persisted messages rather than from the stream.
+
+**The marker is persisted at admission.** The turn runner calls `TurnConfig.OnAdmitted` immediately
+after the input is admitted and before the turn is collected, and the router stores
+`opencode_session_id` + `opencode_message_id` + `admitted_at` on `comm_tg_inbox`. Recovery therefore
+never needs to re-prompt: the pair is enough to re-collect.
+
+**Recovery outcomes.** On replay, an inbound carrying a marker is reconciled, never re-admitted:
+
+| Outcome | Meaning | Action |
+|---|---|---|
+| `recovered` | The turn finished; its reply was collected | Reply queued, row settled |
+| `still-pending` | Session busy, or inside the grace window | Left alone; looked at again next pass |
+| `stranded` | Idle, marker never executed | Escalated after the grace window |
+| `unrecoverable` | Marker cannot produce a reply | Settled with an explicit notice |
+
+**Escalation is bounded and honest.** After a `resumeGraceWindow` (5 min), a stranded turn is
+abandoned: the session is interrupted, the thread→session mapping is forgotten, and the marker is
+cleared so the next pass admits the message into a fresh session. Because the abandoned input provably
+never executed, nothing is duplicated; the cost is that thread's conversation context. After
+`maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
+
+**Replies are idempotent per inbound.** The reply envelope ID is derived from the inbound envelope ID
+(`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply
+collapses to one row instead of double-sending.
+
+**Operator notices are labelled.** Text Acolyte generates about its own operation is sent as
+`ACOLYTE SYSTEM MESSAGE: <text>` on its own outbound identity (`sys_<inbound>`), never mixed into agent
+text, and never claims a request completed when it did not.
+
+**Cron runs recover output, not execution.** A job records the marker of the turn it admitted
+(`orch_cron_jobs.pending_*`). On restart, recovery collects that turn's text and routes it, then records
+the run as attempted. Routine bodies are **not** replayed: they mutate files, so a routine interrupted
+mid-body is reported as incomplete rather than re-run or presented as finished.
 
 ---
 

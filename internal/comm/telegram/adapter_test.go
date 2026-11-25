@@ -486,6 +486,162 @@ func TestReplaySkipsLinkedRow(t *testing.T) {
 	}
 }
 
+func TestAdmitLeavesLinkedRowToRecovery(t *testing.T) {
+	adapter, _, st, now := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 213, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: *now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	if err := st.CommTG().LinkInbound(env.ID, "ses_x", "msg_x"); err != nil {
+		t.Fatalf("LinkInbound() error: %v", err)
+	}
+	adapter.SetReconciler(func(context.Context, envelope.Envelope) (comm.ReconcileOutcome, error) {
+		return comm.ReconcileStillPending, nil
+	})
+	adapter.sink = func(_ context.Context, _ envelope.Envelope) error {
+		t.Error("sink ran for a row that recovery owns")
+		return nil
+	}
+
+	adapter.admit(context.Background(), env)
+
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.ProcessedAt != nil {
+		t.Error("row was settled without collecting its reply")
+	}
+	pending, err := st.CommTG().PendingInbound(now.Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("PendingInbound() error: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Errorf("pending = %+v, want the row handed back to recovery", pending)
+	}
+}
+
+func TestReplayReconcilesLinkedRow(t *testing.T) {
+	adapter, _, st, now := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 210, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: *now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	if err := st.CommTG().LinkInbound(env.ID, "ses_x", "msg_x"); err != nil {
+		t.Fatalf("LinkInbound() error: %v", err)
+	}
+
+	var seen []envelope.Envelope
+	adapter.SetReconciler(func(_ context.Context, got envelope.Envelope) (comm.ReconcileOutcome, error) {
+		seen = append(seen, got)
+		return comm.ReconcileRecovered, nil
+	})
+	adapter.replayPending(context.Background())
+
+	if len(seen) != 1 || seen[0].ID != env.ID {
+		t.Fatalf("reconciler calls = %+v, want one call for %q", seen, env.ID)
+	}
+	item, _, _ := st.CommTG().GetInboxByEnvelope(env.ID)
+	if item.ProcessedAt == nil {
+		t.Error("recovered row was not marked processed")
+	}
+}
+
+func TestReplayReconcileLeavesPendingRowForNextPass(t *testing.T) {
+	outcomes := []struct {
+		name    string
+		outcome comm.ReconcileOutcome
+	}{
+		{name: "still pending", outcome: comm.ReconcileStillPending},
+		{name: "stranded", outcome: comm.ReconcileStranded},
+		{name: "unrecoverable", outcome: comm.ReconcileUnrecoverable},
+	}
+	for _, tc := range outcomes {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter, _, st, now := newTestAdapter(t, "42")
+			env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+				envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+				envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+				envelope.Content{Type: envelope.ContentText, Text: "replay"})
+			raw, _ := json.Marshal(env)
+			if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+				TGUpdateID: 211, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: *now,
+			}); err != nil {
+				t.Fatalf("RecordInbound() error: %v", err)
+			}
+			if err := st.CommTG().LinkInbound(env.ID, "ses_x", "msg_x"); err != nil {
+				t.Fatalf("LinkInbound() error: %v", err)
+			}
+
+			adapter.SetReconciler(func(context.Context, envelope.Envelope) (comm.ReconcileOutcome, error) {
+				return tc.outcome, nil
+			})
+			adapter.replayPending(context.Background())
+
+			item, _, _ := st.CommTG().GetInboxByEnvelope(env.ID)
+			if item.ProcessedAt != nil {
+				t.Errorf("row was settled on outcome %v, want it left pending", tc.outcome)
+			}
+			if item.Attempts != 0 {
+				t.Errorf("attempts = %d, want 0 (a look is not a failure)", item.Attempts)
+			}
+			// The claim must be released so the next pass can look again.
+			pending, err := st.CommTG().PendingInbound(now.Add(time.Second), 10)
+			if err != nil {
+				t.Fatalf("PendingInbound() error: %v", err)
+			}
+			if len(pending) != 1 || pending[0].EnvelopeID != env.ID {
+				t.Errorf("pending = %+v, want the row handed back", pending)
+			}
+		})
+	}
+}
+
+func TestReplayReconcileFailureRecordsAttempt(t *testing.T) {
+	adapter, _, st, now := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 212, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: *now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	if err := st.CommTG().LinkInbound(env.ID, "ses_x", "msg_x"); err != nil {
+		t.Fatalf("LinkInbound() error: %v", err)
+	}
+
+	adapter.SetReconciler(func(context.Context, envelope.Envelope) (comm.ReconcileOutcome, error) {
+		return comm.ReconcileStillPending, errors.New("service unavailable")
+	})
+	adapter.replayPending(context.Background())
+
+	item, _, _ := st.CommTG().GetInboxByEnvelope(env.ID)
+	if item.ProcessedAt != nil {
+		t.Error("row was settled despite a reconciler error")
+	}
+	if item.Attempts != 1 {
+		t.Errorf("attempts = %d, want 1", item.Attempts)
+	}
+	if !strings.Contains(item.LastError, "service unavailable") {
+		t.Errorf("last error = %q", item.LastError)
+	}
+}
+
 func TestReplayPendingReplyEnqueuesOutbox(t *testing.T) {
 	adapter, _, st, _ := newTestAdapter(t, "42")
 	reply := comm.PendingReply{

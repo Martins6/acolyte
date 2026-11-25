@@ -208,6 +208,161 @@ func TestMigrateFromV3AddsReplayColumns(t *testing.T) {
 	}
 }
 
+func TestMigrateV9AddsAdmissionState(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE schema_meta (module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("create v2: %v", err)
+	}
+	// Bring the database to the v8 shape so only v9 is missing.
+	for _, migrate := range []func(*sql.DB) error{
+		migrateV3, migrateV4, migrateV5, migrateV6, migrateV7, migrateV8,
+	} {
+		if err := migrate(db); err != nil {
+			t.Fatalf("prepare v8: %v", err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)`, module, 8); err != nil {
+		t.Fatalf("record v8: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO comm_tg_inbox
+		(id, tg_update_id, chat_id, envelope_id, received_at)
+		VALUES (?, ?, ?, ?, ?)`, "old", 1, 10, "env_old", now); err != nil {
+		t.Fatalf("insert v8 inbox: %v", err)
+	}
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate(v8) error: %v", err)
+	}
+
+	var versionValue int
+	if err := db.QueryRow(`SELECT version FROM schema_meta WHERE module = ?`, module).Scan(&versionValue); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if versionValue != version {
+		t.Errorf("version = %d, want %d", versionValue, version)
+	}
+
+	// The pre-v9 row survives with the documented defaults.
+	store := New(db)
+	item, ok, err := store.GetInboxByEnvelope("env_old")
+	if err != nil || !ok {
+		t.Fatalf("GetInboxByEnvelope() = %+v, %v, %v", item, ok, err)
+	}
+	if item.AdmittedAt != nil {
+		t.Errorf("AdmittedAt = %v, want nil for pre-v9 row", item.AdmittedAt)
+	}
+	if item.ResumeAttempts != 0 {
+		t.Errorf("ResumeAttempts = %d, want 0", item.ResumeAttempts)
+	}
+
+	// Migrate is re-entrant.
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate() second run error: %v", err)
+	}
+}
+
+func TestMarkInboundAdmitted(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID:      1,
+		ChatID:          10,
+		EnvelopeID:      "env_1",
+		PendingEnvelope: "{}",
+		ReceivedAt:      now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+
+	admittedAt := now.Add(time.Minute)
+	if err := store.MarkInboundAdmitted("env_1", "ses_1", "msg_1", admittedAt); err != nil {
+		t.Fatalf("MarkInboundAdmitted() error: %v", err)
+	}
+	item, _, err := store.GetInboxByEnvelope("env_1")
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.OpenCodeSessionID != "ses_1" || item.OpenCodeMessageID != "msg_1" {
+		t.Errorf("linked = %q/%q, want ses_1/msg_1", item.OpenCodeSessionID, item.OpenCodeMessageID)
+	}
+	if item.AdmittedAt == nil || !item.AdmittedAt.Equal(admittedAt) {
+		t.Errorf("AdmittedAt = %v, want %v", item.AdmittedAt, admittedAt)
+	}
+
+	// A later admission replaces the marker, matching escalation semantics.
+	if err := store.MarkInboundAdmitted("env_1", "ses_2", "msg_2", admittedAt); err != nil {
+		t.Fatalf("MarkInboundAdmitted() re-admit error: %v", err)
+	}
+	item, _, err = store.GetInboxByEnvelope("env_1")
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.OpenCodeMessageID != "msg_2" {
+		t.Errorf("OpenCodeMessageID = %q, want msg_2", item.OpenCodeMessageID)
+	}
+
+	// A processed row is never resurrected.
+	if err := store.MarkInboundProcessedUnconditional("env_1", now); err != nil {
+		t.Fatalf("MarkInboundProcessedUnconditional() error: %v", err)
+	}
+	if err := store.MarkInboundAdmitted("env_1", "ses_3", "msg_3", admittedAt); !errors.Is(err, ErrInboundNotFound) {
+		t.Fatalf("MarkInboundAdmitted(processed) error = %v, want ErrInboundNotFound", err)
+	}
+}
+
+func TestRecordResumeAttempt(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID:      1,
+		ChatID:          10,
+		EnvelopeID:      "env_1",
+		PendingEnvelope: "{}",
+		ReceivedAt:      now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	if err := store.MarkInboundAdmitted("env_1", "ses_1", "msg_1", now); err != nil {
+		t.Fatalf("MarkInboundAdmitted() error: %v", err)
+	}
+
+	if err := store.RecordResumeAttempt("env_1", "turn never executed"); err != nil {
+		t.Fatalf("RecordResumeAttempt() error: %v", err)
+	}
+	item, _, err := store.GetInboxByEnvelope("env_1")
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.ResumeAttempts != 1 {
+		t.Errorf("ResumeAttempts = %d, want 1", item.ResumeAttempts)
+	}
+	if item.AdmittedAt != nil {
+		t.Errorf("AdmittedAt = %v, want nil after a resume attempt", item.AdmittedAt)
+	}
+	if item.LastError != "turn never executed" {
+		t.Errorf("LastError = %q", item.LastError)
+	}
+
+	if err := store.RecordResumeAttempt("env_1", "again"); err != nil {
+		t.Fatalf("RecordResumeAttempt() second error: %v", err)
+	}
+	item, _, err = store.GetInboxByEnvelope("env_1")
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.ResumeAttempts != 2 {
+		t.Errorf("ResumeAttempts = %d, want 2", item.ResumeAttempts)
+	}
+
+	if err := store.RecordResumeAttempt("env_missing", "nope"); !errors.Is(err, ErrInboundNotFound) {
+		t.Fatalf("RecordResumeAttempt(missing) error = %v, want ErrInboundNotFound", err)
+	}
+}
+
 func TestClaimInboundOnce(t *testing.T) {
 	store := migrateTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)

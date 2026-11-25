@@ -67,8 +67,62 @@ func (f *fakeTurn) RunUserTurn(ctx context.Context, sessionID, text string, cfg 
 	if result == nil {
 		result = &opencode.TurnResult{SessionID: "ses_fake", InputID: "msg_in", ResponseText: "reply", MessageIDs: []string{"msg_out"}}
 	}
+	// Mirror the real client: the marker is handed over before the turn is
+	// collected.
+	if cfg.OnAdmitted != nil {
+		admitted := opencode.Admitted{SessionID: result.SessionID, InputID: result.InputID}
+		if err := cfg.OnAdmitted(admitted); err != nil {
+			return nil, err
+		}
+	}
 	copy := *result
 	return &copy, err
+}
+
+// fakeProber adds the optional recovery half to the fake turn runner.
+type fakeProber struct {
+	fakeTurn
+	session      *opencode.SessionInfo
+	sessionErr   error
+	collected    *opencode.TurnResult
+	delivered    bool
+	collectErr   error
+	pending      bool
+	inboxErr     error
+	interrupted  []string
+	interruptErr error
+}
+
+func (f *fakeProber) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
+	if f.sessionErr != nil {
+		return nil, f.sessionErr
+	}
+	if f.session == nil {
+		return &opencode.SessionInfo{ID: "ses_fake"}, nil
+	}
+	return f.session, nil
+}
+
+func (f *fakeProber) CollectDelivered(context.Context, string, string) (*opencode.TurnResult, bool, error) {
+	if f.collectErr != nil {
+		return nil, false, f.collectErr
+	}
+	return f.collected, f.delivered, nil
+}
+
+func (f *fakeProber) InboxPending(context.Context, string, string) (bool, error) {
+	if f.inboxErr != nil {
+		return false, f.inboxErr
+	}
+	return f.pending, nil
+}
+
+func (f *fakeProber) Interrupt(_ context.Context, sessionID string) error {
+	if f.interruptErr != nil {
+		return f.interruptErr
+	}
+	f.interrupted = append(f.interrupted, sessionID)
+	return nil
 }
 
 type outboundRecorder struct {
@@ -135,6 +189,19 @@ func (h *routerHarness) seedInbound(t *testing.T, env envelope.Envelope, updateI
 	})
 	if err != nil || !inserted {
 		t.Fatalf("RecordInbound() = %v, %v", inserted, err)
+	}
+}
+
+func (h *routerHarness) seedAdmitted(t *testing.T, env envelope.Envelope, updateID int64, sessionID, markerID string) {
+	t.Helper()
+	h.seedInbound(t, env, updateID)
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	if err := st.CommTG().MarkInboundAdmitted(env.ID, sessionID, markerID, time.Now().UTC()); err != nil {
+		t.Fatalf("MarkInboundAdmitted() error: %v", err)
 	}
 }
 
@@ -429,6 +496,459 @@ func TestRouterBoundsDifferentThreads(t *testing.T) {
 	}
 }
 
+// markerProbeTurn records what the inbound row looks like mid-turn.
+type markerProbeTurn struct {
+	pool   *storepool.Pool
+	ws     string
+	envID  string
+	marker string
+	seen   string
+	found  bool
+}
+
+func (f *markerProbeTurn) RunUserTurn(_ context.Context, _ string, _ string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
+	if cfg.OnAdmitted == nil {
+		return nil, errors.New("OnAdmitted was not configured")
+	}
+	if err := cfg.OnAdmitted(opencode.Admitted{SessionID: "ses_new", InputID: f.marker}); err != nil {
+		return nil, err
+	}
+	st, release, err := f.pool.Acquire(f.ws)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	item, ok, err := st.CommTG().GetInboxByEnvelope(f.envID)
+	if err != nil {
+		return nil, err
+	}
+	f.found = ok
+	f.seen = item.OpenCodeMessageID
+	return &opencode.TurnResult{SessionID: "ses_new", InputID: f.marker, ResponseText: "ok"}, nil
+}
+
+// TestRouterPersistsMarkerBeforeTurnCompletes is the invariant this whole
+// recovery path depends on: the marker must be in the database while the turn
+// is still running, not only once it finishes.
+func TestRouterPersistsMarkerBeforeTurnCompletes(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(90),
+		envelope.Party{Kind: envelope.PartyUser, ID: "90"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 500)
+
+	probe := &markerProbeTurn{pool: h.pool, ws: h.store, envID: env.ID, marker: "msg_live"}
+	h.router.turn = probe
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if !probe.found {
+		t.Fatal("inbound row disappeared during the turn")
+	}
+	if probe.seen != probe.marker {
+		t.Fatalf("marker visible mid-turn = %q, want %q", probe.seen, probe.marker)
+	}
+}
+
+func TestRouterTurnSurvivesAdmittedPersistenceFailure(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(91),
+		envelope.Party{Kind: envelope.PartyUser, ID: "91"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+
+	// No inbound row: MarkInboundAdmitted reports ErrInboundNotFound, which the
+	// router tolerates so the turn is never failed for a missing bookkeeping row.
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error: %v, want tolerated ErrInboundNotFound", err)
+	}
+	if len(h.outbound.events) != 1 {
+		t.Fatalf("outbound events = %d, want 1", len(h.outbound.events))
+	}
+}
+
+// seedStranded seeds an inbound that was admitted at a given instant, so the
+// grace window can be exercised without touching package state.
+func (h *routerHarness) seedStranded(t *testing.T, env envelope.Envelope, updateID int64, sessionID, marker string, attempts int, admittedAt time.Time) {
+	t.Helper()
+	h.seedInbound(t, env, updateID)
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	if _, err := st.DB().Exec(`UPDATE comm_tg_inbox SET pending_envelope = ? WHERE envelope_id = ?`, string(raw), env.ID); err != nil {
+		t.Fatalf("store pending envelope: %v", err)
+	}
+	for i := 0; i < attempts; i++ {
+		if err := st.CommTG().MarkInboundAdmitted(env.ID, sessionID, marker, admittedAt); err != nil {
+			t.Fatalf("MarkInboundAdmitted() error: %v", err)
+		}
+		if err := st.CommTG().RecordResumeAttempt(env.ID, "prior attempt"); err != nil {
+			t.Fatalf("RecordResumeAttempt() error: %v", err)
+		}
+	}
+	if err := st.CommTG().MarkInboundAdmitted(env.ID, sessionID, marker, admittedAt); err != nil {
+		t.Fatalf("MarkInboundAdmitted() error: %v", err)
+	}
+}
+
+func TestRecoverWaitsForGraceWindow(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		pending: true,
+		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(95),
+		envelope.Party{Kind: envelope.PartyUser, ID: "95"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	// Admitted a moment ago: still inside the grace window.
+	h.seedStranded(t, env, 600, "ses_1", "msg_in", 0, time.Now().UTC().Add(-time.Second))
+	h.seedSession(t, env.Thread, "ses_1")
+
+	outcome, err := h.router.Recover(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Recover() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending inside the grace window", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want none inside the grace window", prober.interrupted)
+	}
+}
+
+func TestRecoverAbandonsStrandedTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		pending: true,
+		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(96),
+		envelope.Party{Kind: envelope.PartyUser, ID: "96"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 601, "ses_1", "msg_in", 0, time.Now().UTC().Add(-time.Hour))
+	h.seedSession(t, env.Thread, "ses_1")
+
+	outcome, err := h.router.Recover(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Recover() error: %v", err)
+	}
+	if outcome != ReconcileReAdmitted {
+		t.Fatalf("outcome = %v, want re-admitted", outcome)
+	}
+	if len(prober.interrupted) != 1 || prober.interrupted[0] != "ses_1" {
+		t.Errorf("interrupted = %v, want the stranded session", prober.interrupted)
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	if _, ok, err := st.Orch().GetSessionByThread(env.Thread); err != nil || ok {
+		t.Errorf("session mapping = %v, %v; want forgotten so a fresh session is created", ok, err)
+	}
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.OpenCodeMessageID != "" {
+		t.Errorf("marker = %q, want cleared for a fresh admission", item.OpenCodeMessageID)
+	}
+	if item.ResumeAttempts != 1 {
+		t.Errorf("ResumeAttempts = %d, want 1", item.ResumeAttempts)
+	}
+	if item.PendingEnvelope == "" {
+		t.Error("pending envelope was dropped; the row can no longer be re-admitted")
+	}
+}
+
+func TestRecoverSettlesAfterAttemptBudget(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		pending: true,
+		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(97),
+		envelope.Party{Kind: envelope.PartyUser, ID: "97"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 602, "ses_1", "msg_in", maxResumeAttempts, time.Now().UTC().Add(-time.Hour))
+	h.seedSession(t, env.Thread, "ses_1")
+
+	outcome, err := h.router.Recover(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Recover() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want no further attempts once the budget is spent", prober.interrupted)
+	}
+
+	if len(h.outbound.events) != 1 {
+		t.Fatalf("outbound events = %d, want exactly one notice", len(h.outbound.events))
+	}
+	notice := h.outbound.events[0]
+	if !strings.HasPrefix(notice.Content.Text, SystemNoticeMarker) {
+		t.Errorf("notice = %q, want the %q marker", notice.Content.Text, SystemNoticeMarker)
+	}
+	if notice.ID == replyEnvelopeID(env.ID) {
+		t.Errorf("notice id = %q, must not collide with the reply identity", notice.ID)
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.ProcessedAt == nil {
+		t.Error("settled row was not marked processed; it will loop forever")
+	}
+}
+
+func TestRecoverSettlesWhenPayloadIsGone(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = &fakeProber{
+		pending: true,
+		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(98),
+		envelope.Party{Kind: envelope.PartyUser, ID: "98"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 603, "ses_1", "msg_in", 0, time.Now().UTC().Add(-time.Hour))
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	// Without the stored payload the message can no longer be re-admitted.
+	if _, err := st.DB().Exec(`UPDATE comm_tg_inbox SET pending_envelope = '' WHERE envelope_id = ?`, env.ID); err != nil {
+		t.Fatalf("clear payload: %v", err)
+	}
+	release()
+
+	outcome, err := h.router.Recover(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Recover() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	if len(h.outbound.events) != 1 || !strings.HasPrefix(h.outbound.events[0].Content.Text, SystemNoticeMarker) {
+		t.Errorf("outbound = %+v, want one explicit notice", h.outbound.events)
+	}
+}
+
+func TestSystemNoticeWording(t *testing.T) {
+	t.Parallel()
+
+	if got := SystemNotice("  retrying shortly "); got != SystemNoticeMarker+" retrying shortly" {
+		t.Errorf("SystemNotice() = %q", got)
+	}
+}
+
+func TestReconcileRecoversDeliveredTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		delivered: true,
+		collected: &opencode.TurnResult{SessionID: "ses_1", InputID: "msg_in", ResponseText: "the answer"},
+		session:   &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	h.router.turn = prober
+
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(80),
+		envelope.Party{Kind: envelope.PartyUser, ID: "80"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedAdmitted(t, env, 400, "ses_1", "msg_in")
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileRecovered {
+		t.Fatalf("outcome = %v, want recovered", outcome)
+	}
+	if len(h.outbound.events) != 1 {
+		t.Fatalf("outbound events = %d, want 1", len(h.outbound.events))
+	}
+	got := h.outbound.events[0]
+	if got.ID != replyEnvelopeID(env.ID) {
+		t.Errorf("outbound id = %q, want %q", got.ID, replyEnvelopeID(env.ID))
+	}
+	if got.Content.Text != "the answer" {
+		t.Errorf("outbound text = %q, want %q", got.Content.Text, "the answer")
+	}
+}
+
+func TestReconcileLeavesRunningTurnAlone(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = &fakeProber{
+		delivered: true,
+		collected: &opencode.TurnResult{SessionID: "ses_1", InputID: "msg_in", ResponseText: "too early"},
+		// Busy is newer than Idle: the service still owns the turn.
+		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+	}
+
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(81),
+		envelope.Party{Kind: envelope.PartyUser, ID: "81"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedAdmitted(t, env, 401, "ses_1", "msg_in")
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending", outcome)
+	}
+	if len(h.outbound.events) != 0 {
+		t.Errorf("outbound events = %d, want 0 while the turn runs", len(h.outbound.events))
+	}
+}
+
+func TestReconcileClassifiesIdleTurn(t *testing.T) {
+	cases := []struct {
+		name    string
+		pending bool
+		want    ReconcileOutcome
+	}{
+		{name: "queued but never executed", pending: true, want: ReconcileStranded},
+		{name: "consumed with no reply", pending: false, want: ReconcileUnrecoverable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRouterHarness(t, 4)
+			h.router.turn = &fakeProber{
+				delivered: false,
+				pending:   tc.pending,
+				session:   &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+			}
+			env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(82),
+				envelope.Party{Kind: envelope.PartyUser, ID: "82"},
+				envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+				envelope.Content{Type: envelope.ContentText, Text: "hello"})
+			h.seedAdmitted(t, env, 402, "ses_1", "msg_in")
+
+			outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+			if err != nil {
+				t.Fatalf("Reconcile() error: %v", err)
+			}
+			if outcome != tc.want {
+				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
+			}
+			if len(h.outbound.events) != 0 {
+				t.Errorf("outbound events = %d, want 0", len(h.outbound.events))
+			}
+		})
+	}
+}
+
+func TestReconcileWithoutMarkerIsPending(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = &fakeProber{}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(83),
+		envelope.Party{Kind: envelope.PartyUser, ID: "83"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 403)
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending", outcome)
+	}
+}
+
+func TestReconcileWithoutProberIsUnrecoverable(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	// The harness default runner does not implement TurnProber.
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(84),
+		envelope.Party{Kind: envelope.PartyUser, ID: "84"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedAdmitted(t, env, 404, "ses_1", "msg_in")
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err == nil {
+		t.Fatal("Reconcile() error = nil, want unsupported error")
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+}
+
+func TestRouterReplyEnvelopeIDIsDeterministic(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(70),
+		envelope.Party{Kind: envelope.PartyUser, ID: "70"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+
+	// A telegram-style outbound that enqueues exactly as the adapter does.
+	h.router.outbound = func(_ context.Context, _ registry.Agent, out envelope.Envelope) error {
+		st, release, err := h.pool.Acquire(h.store)
+		if err != nil {
+			return err
+		}
+		defer release()
+		_, err = st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+			EnvelopeID: out.ID,
+			ChatID:     70,
+			Text:       out.Content.Text,
+		})
+		return err
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+
+	result := &opencode.TurnResult{SessionID: "ses_1", InputID: "msg_in", ResponseText: "reply"}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := h.router.sendReply(context.Background(), st, h.agent, env, result, "reply"); err != nil {
+			t.Fatalf("sendReply() attempt %d error: %v", attempt, err)
+		}
+	}
+
+	want := replyEnvelopeID(env.ID)
+	stored, ok, err := st.CommTG().GetOutboxByEnvelope(want)
+	if err != nil || !ok {
+		t.Fatalf("GetOutboxByEnvelope(%q) = %+v, %v, %v", want, stored, ok, err)
+	}
+	items, err := st.CommTG().DueOutbound(time.Now().UTC().Add(time.Hour), 10)
+	if err != nil {
+		t.Fatalf("DueOutbound() error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("outbox rows = %d, want 1 (duplicate reply)", len(items))
+	}
+}
+
 func TestRouterOutboundFailureKeepsPendingReply(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.router.outbound = func(context.Context, registry.Agent, envelope.Envelope) error {
@@ -455,8 +975,13 @@ func TestRouterOutboundFailureKeepsPendingReply(t *testing.T) {
 	if item.PendingReply == "" {
 		t.Error("pending reply was not recorded for replay")
 	}
-	if item.OpenCodeMessageID != "" {
-		t.Error("turn input was linked before the reply was durably queued")
+	// The marker is now persisted at admission so the turn is recoverable; the
+	// reply itself is protected by pending_reply, which replay delivers first.
+	if item.OpenCodeMessageID != "msg_in" {
+		t.Errorf("marker = %q, want the admitted marker msg_in", item.OpenCodeMessageID)
+	}
+	if item.AdmittedAt == nil {
+		t.Error("admission time was not recorded")
 	}
 }
 

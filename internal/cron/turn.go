@@ -35,7 +35,12 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		Text:        job.Prompt,
 		Description: "Scheduled prompt: " + job.Title,
 		Metadata:    map[string]any{"cron_job": job.Title},
-	}, opencode.TurnConfig{Workspace: agent.Workspace})
+	}, opencode.TurnConfig{
+		Workspace: agent.Workspace,
+		OnAdmitted: func(admitted opencode.Admitted) error {
+			return st.Orch().SetCronJobPending(job.ID, admitted.SessionID, admitted.InputID, "turn", s.now())
+		},
+	})
 	if err != nil {
 		created := ""
 		if result != nil {

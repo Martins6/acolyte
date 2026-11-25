@@ -61,6 +61,9 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		Meta:      jobMeta,
 		Now:       s.now,
 		Store:     st,
+		OnAdmitted: func(admitted opencode.Admitted) error {
+			return st.Orch().SetCronJobPending(job.ID, admitted.SessionID, admitted.InputID, "routine", s.now())
+		},
 		NotifyUser: func(ctx context.Context, text string) error {
 			return s.sink.NotifyUser(ctx, agent, text)
 		},

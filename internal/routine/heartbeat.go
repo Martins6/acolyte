@@ -62,7 +62,7 @@ func (heartbeatRoutine) Run(ctx context.Context, env Env, args map[string]any) (
 			"target":   targetSessionID,
 		},
 		Delivery: "queue",
-	}, opencode.TurnConfig{Workspace: env.Workspace, Permissions: heartbeatPermissions(env.Workspace)})
+	}, opencode.TurnConfig{Workspace: env.Workspace, Permissions: heartbeatPermissions(env.Workspace), OnAdmitted: env.OnAdmitted})
 	if err != nil {
 		return "", fmt.Errorf("routine: heartbeat turn: %w", err)
 	}

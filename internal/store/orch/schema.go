@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "orch"
-	version = 2
+	version = 3
 )
 
 // Migrate creates or upgrades the orchestrator schema.
@@ -39,11 +39,69 @@ func Migrate(db *sql.DB) error {
 		}
 		current = 2
 	}
+	if current < 3 {
+		if err := migrateV3(db); err != nil {
+			return fmt.Errorf("orch: migrate to version 3: %w", err)
+		}
+		current = 3
+	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
 		return fmt.Errorf("orch: record schema version: %w", err)
 	}
 	return nil
+}
+
+// migrateV3 records the turn a cron run last admitted, so a run interrupted by
+// a restart can have its output collected instead of being lost. Routine bodies
+// still cannot be resumed; the columns exist so recovery can report honestly
+// rather than silently re-running work with side effects.
+func migrateV3(db *sql.DB) error {
+	columns, err := tableColumns(db, "orch_cron_jobs")
+	if err != nil {
+		return err
+	}
+	additions := []struct {
+		name string
+		ddl  string
+	}{
+		{"pending_session_id", `ALTER TABLE orch_cron_jobs ADD COLUMN pending_session_id TEXT NOT NULL DEFAULT ''`},
+		{"pending_marker_id", `ALTER TABLE orch_cron_jobs ADD COLUMN pending_marker_id TEXT NOT NULL DEFAULT ''`},
+		{"pending_kind", `ALTER TABLE orch_cron_jobs ADD COLUMN pending_kind TEXT NOT NULL DEFAULT ''`},
+		{"pending_started_at", `ALTER TABLE orch_cron_jobs ADD COLUMN pending_started_at DATETIME`},
+		{"pending_attempts", `ALTER TABLE orch_cron_jobs ADD COLUMN pending_attempts INTEGER NOT NULL DEFAULT 0`},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.Exec(addition.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
 }
 
 func schemaVersion(db *sql.DB, moduleName string) (int, error) {
