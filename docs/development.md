@@ -80,7 +80,11 @@ code. It has a hard 15-minute timeout.
   this repository. Each review posts exactly one PR review whose body starts with a `## Verdict`
   heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching label, and splits findings into
   **Necessary** (must fix) and **Non-necessary** (optional). Every new commit re-runs the review on
-  the latest diff.
+  the latest diff. `NEEDS_REVIEW` is submitted as a changes-requested review, which blocks the merge
+  on protected branches; `LGTM` is a comment review (GitHub Actions is not allowed to approve pull
+  requests in this repository), and a follow-up step reads the verdict back from the review posted
+  for the head SHA and dismisses any outstanding changes-requested reviews, so a later `LGTM` always
+  unblocks the PR.
 - `.github/workflows/pr-guard.yml` — verifies that a PR to `main` comes from `dev` in this repository
   and posts a `pr-guard` commit status on the PR head SHA, from the base-branch definition via
   `pull_request_target`, so a PR cannot redefine its own gate.

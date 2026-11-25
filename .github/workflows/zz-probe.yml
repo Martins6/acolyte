@@ -23,3 +23,5 @@ jobs:
           gh pr review "$PR" --repo "$REPO" --approve --body "probe: approve" || echo "approve failed"
           echo "after_approve=$(gh pr view "$PR" --repo "$REPO" --json reviewDecision --jq .reviewDecision)" || echo "after_approve failed"
           gh pr view "$PR" --repo "$REPO" --json reviewDecision,mergeStateStatus,isDraft
+
+# probe run 1
