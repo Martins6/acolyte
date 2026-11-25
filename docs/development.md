@@ -106,9 +106,9 @@ stop-on-red trigger.
    `OPENCODE_API_KEY`, the variable the `opencode-go` provider reads.
 2. Create the `LGTM` and `NEEDS_REVIEW` labels — or skip this, the review creates them on first use.
 3. Enable *Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and
-   approve pull requests* (`can_approve_pull_request_reviews`). Without it `gh pr review --approve`
-   fails and a PR that later passes review stays stuck on the bot's earlier changes-requested
-   verdict.
+   approve pull requests* (`can_approve_pull_request_reviews`). Without it the workflow cannot
+   submit an approval, and a PR that later passes review stays stuck on the bot's earlier
+   changes-requested verdict.
 
 ## Landing changes
 
