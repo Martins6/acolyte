@@ -641,22 +641,20 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			continue
 		}
 		if pending.Kind == "turn" {
-			// Persist the thread mapping before consuming the marker; inbox
-			// route replies resolve their recipient from this mapping.
+			// Persist the route intent first: inbox replies resolve their
+			// recipient from the session's existing mapping before the cron
+			// mapping is written.
+			if err := s.addPromptRouteIntent(pair.store, pair.agent, job, pending.MarkerID, result); err != nil {
+				releaseLock()
+				log.Printf("cron: persist recovered route for %s: %v", job.Title, err)
+				continue
+			}
 			if result.SessionID != "" {
 				if _, err := pair.store.Orch().UpsertSession(cronThread(job), result.SessionID, s.now()); err != nil {
 					releaseLock()
 					log.Printf("cron: persist recovered session for %s: %v", job.Title, err)
 					continue
 				}
-			}
-			// Persist the route intent (notify-user, inbox, or log) before
-			// consuming the marker. Recovery then only needs the durable
-			// intent, and a crash cannot reroute the output.
-			if err := s.addPromptRouteIntent(pair.store, pair.agent, job, pending.MarkerID, result); err != nil {
-				releaseLock()
-				log.Printf("cron: persist recovered route for %s: %v", job.Title, err)
-				continue
 			}
 			cleared, clearErr := pair.store.Orch().ClearCronJobPendingIf(job.ID, pending.MarkerID)
 			if clearErr != nil {
@@ -764,13 +762,22 @@ func (s *Service) addPromptRouteIntent(st *store.Store, agent registry.Agent, jo
 		action = "notify-user"
 	}
 	chatID := int64(0)
-	if action == "notify-user" {
+	switch action {
+	case "notify-user":
 		chat, ok, err := st.CommTG().LatestAllowedChat()
 		if err != nil {
 			return err
 		}
 		if ok {
 			chatID = chat.ChatID
+		}
+	case "inbox":
+		if result != nil {
+			var err error
+			chatID, err = inboxRouteChat(st, result.SessionID)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	id := cronOutputID(job.ID, markerID)
@@ -1069,42 +1076,38 @@ func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch
 	}
 }
 
-// cronReplyChat resolves the chat that receives an inbox turn's response. A
-// failed session lookup is an error: falling back could send the output to a
-// different allowed user.
-func cronReplyChat(st *store.Store, sessionID string) (int64, bool, error) {
+// inboxRouteChat resolves the recipient for an inbox route at intent-creation
+// time, before the cron thread mapping is written. A user session uses its
+// authorized Telegram chat; a cron-owned/new session uses the latest allowed
+// chat. An unknown or unauthorized mapping fails closed.
+func inboxRouteChat(st *store.Store, sessionID string) (int64, error) {
 	session, ok, err := st.Orch().GetSessionByOpenCodeID(sessionID)
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
-	if !ok {
-		// A session-bound inbox response with no mapping must fail closed;
-		// falling back could disclose it to a different user.
-		return 0, false, nil
-	}
-	if chatID, parsed := envelope.ParseTelegramThread(session.Thread); parsed && chatID != 0 {
-		chat, found, err := st.CommTG().GetChat(chatID)
-		if err != nil {
-			return 0, false, err
+	if ok {
+		if chatID, parsed := envelope.ParseTelegramThread(session.Thread); parsed && chatID != 0 {
+			chat, found, err := st.CommTG().GetChat(chatID)
+			if err != nil {
+				return 0, err
+			}
+			if !found || !chat.Allowed || !chat.Private {
+				return 0, nil
+			}
+			return chatID, nil
 		}
-		if !found || !chat.Allowed || !chat.Private {
-			return 0, false, nil
+		if !strings.HasPrefix(session.Thread, "cron:") {
+			return 0, nil
 		}
-		return chatID, true, nil
-	}
-	if !strings.HasPrefix(session.Thread, "cron:") {
-		// An unknown/non-Telegram user mapping must not fall through to
-		// another allowed chat.
-		return 0, false, nil
 	}
 	chat, ok, err := st.CommTG().LatestAllowedChat()
 	if err != nil {
-		return 0, false, err
+		return 0, err
 	}
 	if !ok {
-		return 0, false, nil
+		return 0, nil
 	}
-	return chat.ChatID, true, nil
+	return chat.ChatID, nil
 }
 
 // queueInboxResponse enqueues the agent's reaction to an inbox event under a
@@ -1120,12 +1123,16 @@ func (s *Service) queueInboxResponse(pair *agentStore, route orch.CronRoute, res
 	if len(text) > maxOutputBytes {
 		text = text[:maxOutputBytes] + "\n[output truncated]"
 	}
-	chatID, ok, err := cronReplyChat(pair.store, result.SessionID)
+	chatID := route.ChatID
+	if chatID == 0 {
+		return fmt.Errorf("cron: no recipient recorded for inbox response route %s", route.ID)
+	}
+	chat, found, err := pair.store.CommTG().GetChat(chatID)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return fmt.Errorf("cron: no chat for inbox response route %s", route.ID)
+	if !found || !chat.Allowed || !chat.Private {
+		return fmt.Errorf("cron: chat %d is no longer authorized for route %s", chatID, route.ID)
 	}
 	sourceID := ""
 	if len(result.MessageIDs) > 0 {

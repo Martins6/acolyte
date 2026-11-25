@@ -369,6 +369,7 @@ func TestInboxRouteRecoversAdmittedTurn(t *testing.T) {
 		ID:                "route_inbox",
 		AgentTarget:       "valet",
 		Action:            "inbox",
+		ChatID:            10,
 		Text:              "event",
 		OpenCodeSessionID: "ses_x",
 		SourceMessageID:   "msg_x",
@@ -408,6 +409,7 @@ func TestInboxRouteLeavesInFlightTurnPending(t *testing.T) {
 		ID:                "route_inbox",
 		AgentTarget:       "valet",
 		Action:            "inbox",
+		ChatID:            10,
 		Text:              "event",
 		OpenCodeSessionID: "ses_x",
 		SourceMessageID:   "msg_x",
@@ -468,7 +470,7 @@ func TestInboxResponseCapped(t *testing.T) {
 		t.Fatalf("UpsertSession() error: %v", err)
 	}
 	big := strings.Repeat("x", maxOutputBytes+100)
-	if err := svc.queueInboxResponse(pair, orch.CronRoute{ID: "route_big"}, &opencode.TurnResult{SessionID: "ses_x", ResponseText: big}); err != nil {
+	if err := svc.queueInboxResponse(pair, orch.CronRoute{ID: "route_big", ChatID: 10}, &opencode.TurnResult{SessionID: "ses_x", ResponseText: big}); err != nil {
 		t.Fatalf("queueInboxResponse() error: %v", err)
 	}
 	outbox, err := pair.store.CommTG().ListOutbox(10)
@@ -480,7 +482,7 @@ func TestInboxResponseCapped(t *testing.T) {
 	}
 }
 
-func TestCronReplyChatRequiresAuthorizedMapping(t *testing.T) {
+func TestInboxRouteChatRequiresAuthorizedMapping(t *testing.T) {
 	ws := t.TempDir()
 	st, err := store.Open(ws)
 	if err != nil {
@@ -494,22 +496,22 @@ func TestCronReplyChatRequiresAuthorizedMapping(t *testing.T) {
 	if _, err := st.Orch().UpsertSession("telegram:10", "ses_10", now); err != nil {
 		t.Fatalf("UpsertSession() error: %v", err)
 	}
-	if chatID, ok, err := cronReplyChat(st, "ses_10"); err != nil || !ok || chatID != 10 {
-		t.Fatalf("cronReplyChat() = %d, %v, %v; want 10", chatID, ok, err)
+	if chatID, err := inboxRouteChat(st, "ses_10"); err != nil || chatID != 10 {
+		t.Fatalf("inboxRouteChat() = %d, %v; want 10", chatID, err)
 	}
 
 	if err := st.CommTG().UpsertChat(10, "alice", false, true, now); err != nil {
 		t.Fatalf("UpsertChat(revoked) error: %v", err)
 	}
-	if _, ok, err := cronReplyChat(st, "ses_10"); err != nil || ok {
-		t.Errorf("revoked mapping = ok %v, err %v; want fail closed", ok, err)
+	if chatID, err := inboxRouteChat(st, "ses_10"); err != nil || chatID != 0 {
+		t.Errorf("revoked mapping = %d, %v; want fail closed", chatID, err)
 	}
 
 	if _, err := st.Orch().UpsertSession("telegram:99", "ses_99", now); err != nil {
 		t.Fatalf("UpsertSession() error: %v", err)
 	}
-	if _, ok, err := cronReplyChat(st, "ses_99"); err != nil || ok {
-		t.Errorf("missing mapped chat = ok %v, err %v; want fail closed", ok, err)
+	if chatID, err := inboxRouteChat(st, "ses_99"); err != nil || chatID != 0 {
+		t.Errorf("missing mapped chat = %d, %v; want fail closed", chatID, err)
 	}
 
 	if _, err := st.Orch().UpsertSession("cron:job", "ses_cron", now); err != nil {
@@ -518,8 +520,8 @@ func TestCronReplyChatRequiresAuthorizedMapping(t *testing.T) {
 	if err := st.CommTG().UpsertChat(11, "bob", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
-	if chatID, ok, err := cronReplyChat(st, "ses_cron"); err != nil || !ok || chatID != 11 {
-		t.Errorf("no mapping fallback = %d, %v, %v; want 11", chatID, ok, err)
+	if chatID, err := inboxRouteChat(st, "ses_cron"); err != nil || chatID != 11 {
+		t.Errorf("cron mapping fallback = %d, %v; want 11", chatID, err)
 	}
 }
 
@@ -1226,9 +1228,6 @@ func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
 	}
 	if len(turns) != 0 {
 		t.Errorf("pending turns = %+v, want cleared after collection", turns)
-	}
-	if !storeLogContains(t, pair.store, "session mapping could not be saved") {
-		t.Errorf("logs = %v, want the mapping warning", storeLogMessages(t, pair.store))
 	}
 }
 

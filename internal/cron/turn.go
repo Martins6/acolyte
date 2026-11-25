@@ -63,6 +63,11 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 			if err := s.addPromptRouteIntent(st, agent, job, turn.InputID, turn); err != nil {
 				return err
 			}
+			if turn.SessionID != "" {
+				if _, err := st.Orch().UpsertSession(cronThread(job), turn.SessionID, s.now()); err != nil {
+					return err
+				}
+			}
 			// Still holding the session lock here: consume the exact marker
 			// before another process or recovery pass can see it.
 			cleared, clearErr := st.Orch().ClearCronJobPendingIf(job.ID, turn.InputID)
@@ -98,12 +103,6 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		return "", created, admitted, routed, generation, err
 	}
 	// The marker was consumed by OnCollected while the session lock was held.
-	if _, err := st.Orch().UpsertSession(thread, result.SessionID, s.now()); err != nil {
-		// The output is already collected and will be routed; only the thread
-		// mapping failed, so log it instead of turning a completed run into a
-		// recoverable (and already cleared) one.
-		s.logJob(st, job, "warn", "turn collected but session mapping could not be saved: "+err.Error())
-	}
 	return result.ResponseText, result.SessionID, admitted, routed, generation, nil
 }
 
