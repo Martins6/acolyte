@@ -1008,10 +1008,10 @@ var errRouteHeld = errors.New("cron: route held for manual recovery")
 var errRouteFenced = errors.New("cron: route fenced before admission")
 
 // deliverRoute performs one durable route intent according to its action.
-func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch.CronRoute, lease time.Time) error {
+func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch.CronRoute, token string) error {
 	switch route.Action {
 	case "inbox":
-		return s.deliverInboxRoute(ctx, pair, route, lease)
+		return s.deliverInboxRoute(ctx, pair, route, token)
 	case "log":
 		job, err := pair.store.Orch().GetCronJobByID(route.JobID)
 		if err != nil {
@@ -1136,7 +1136,7 @@ func persistRouteAdmitted(orchStore *orch.Store, id, sessionID, markerID string)
 // deliverInboxRoute admits the output as a synthetic input, or collects the
 // input a previous attempt already admitted. The route row stores that marker,
 // so a crash never re-admits the event.
-func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route orch.CronRoute, lease time.Time) error {
+func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route orch.CronRoute, token string) error {
 	current, ok, err := pair.store.Orch().GetCronRoute(route.ID)
 	if err != nil {
 		return err
@@ -1145,7 +1145,7 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 		return nil
 	}
 	route = current
-	if route.ClaimedUntil == nil || !route.ClaimedUntil.Equal(lease) {
+	if route.ClaimToken != token {
 		// Another worker owns the route; do not admit on a stale claim.
 		return errRouteStillPending
 	}
@@ -1219,7 +1219,7 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 			if !ok || current.DeliveredAt != nil || current.SourceMessageID != "" {
 				return errRouteFenced
 			}
-			if current.ClaimedUntil == nil || !current.ClaimedUntil.Equal(lease) {
+			if current.ClaimToken != token {
 				return errRouteFenced
 			}
 			return nil
@@ -1256,7 +1256,8 @@ func (s *Service) retryRoutes(ctx context.Context, pair *agentStore) {
 	} else {
 		for _, snapshot := range routes {
 			lease := s.now().Add(routeClaimLease)
-			claimed, claimErr := pair.store.Orch().ClaimCronRoute(snapshot.ID, s.now(), lease)
+			token := envelope.NewID()
+			claimed, claimErr := pair.store.Orch().ClaimCronRoute(snapshot.ID, token, s.now(), lease)
 			if claimErr != nil || !claimed {
 				continue
 			}
@@ -1274,24 +1275,22 @@ func (s *Service) retryRoutes(ctx context.Context, pair *agentStore) {
 				defer close(done)
 				ticker := time.NewTicker(routeClaimHeartbeat)
 				defer ticker.Stop()
-				expected := lease
 				for {
 					select {
 					case <-stop:
 						return
 					case <-ticker.C:
 						next := s.now().Add(routeClaimLease)
-						renewed, renewErr := pair.store.Orch().RenewCronRouteClaim(route.ID, expected, next)
+						renewed, renewErr := pair.store.Orch().RenewCronRouteClaim(route.ID, token, next)
 						if renewErr != nil || !renewed {
 							ownershipLost.Store(true)
 							cancelDelivery()
 							return
 						}
-						expected = next
 					}
 				}
 			}()
-			deliverErr := s.deliverRoute(deliveryCtx, pair, route, lease)
+			deliverErr := s.deliverRoute(deliveryCtx, pair, route, token)
 			close(stop)
 			<-done
 			cancelDelivery()

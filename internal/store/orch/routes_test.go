@@ -64,7 +64,7 @@ func TestDueCronRoutesSkipsLiveClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddCronRoute() error: %v", err)
 	}
-	if ok, err := store.ClaimCronRoute("route_1", now, now.Add(time.Minute)); err != nil || !ok {
+	if ok, err := store.ClaimCronRoute("route_1", "token_1", now, now.Add(time.Minute)); err != nil || !ok {
 		t.Fatalf("ClaimCronRoute() = %v, %v", ok, err)
 	}
 	routes, err := store.DueCronRoutes(now, 10)
@@ -115,19 +115,27 @@ func TestClaimCronRoute(t *testing.T) {
 		t.Fatalf("AddCronRoute() error: %v", err)
 	}
 
-	claimed, err := store.ClaimCronRoute("route_1", now, now.Add(time.Minute))
+	claimed, err := store.ClaimCronRoute("route_1", "token_1", now, now.Add(time.Minute))
 	if err != nil || !claimed {
 		t.Fatalf("ClaimCronRoute() = %v, %v; want claimed", claimed, err)
 	}
-	claimed, err = store.ClaimCronRoute("route_1", now, now.Add(time.Minute))
+	claimed, err = store.ClaimCronRoute("route_1", "token_1", now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ClaimCronRoute(second) error: %v", err)
 	}
 	if claimed {
 		t.Error("second claim succeeded while the lease was live")
 	}
-	claimed, err = store.ClaimCronRoute("route_1", now.Add(2*time.Minute), now.Add(3*time.Minute))
+	claimed, err = store.ClaimCronRoute("route_1", "token_2", now.Add(2*time.Minute), now.Add(3*time.Minute))
 	if err != nil || !claimed {
 		t.Errorf("ClaimCronRoute(after lease) = %v, %v; want claimed", claimed, err)
+	}
+	renewed, err := store.RenewCronRouteClaim("route_1", "token_1", now.Add(4*time.Minute))
+	if err != nil || renewed {
+		t.Errorf("stale token renewed = %v, %v; want false", renewed, err)
+	}
+	renewed, err = store.RenewCronRouteClaim("route_1", "token_2", now.Add(4*time.Minute))
+	if err != nil || !renewed {
+		t.Errorf("current token renewed = %v, %v; want true", renewed, err)
 	}
 }

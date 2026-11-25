@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "orch"
-	version = 5
+	version = 6
 )
 
 // Migrate creates or upgrades the orchestrator schema.
@@ -56,6 +56,12 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("orch: migrate to version 5: %w", err)
 		}
 		current = 5
+	}
+	if current < 6 {
+		if err := migrateV6(db); err != nil {
+			return fmt.Errorf("orch: migrate to version 6: %w", err)
+		}
+		current = 6
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -135,6 +141,21 @@ func migrateV5(db *sql.DB) error {
 	}
 	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_logs_dedupe ON orch_logs(dedupe_key) WHERE dedupe_key != ''`)
 	return err
+}
+
+// migrateV6 adds a stable claim token so a renewed route lease can be fenced
+// without treating the owning worker as stale.
+func migrateV6(db *sql.DB) error {
+	columns, err := tableColumns(db, "orch_cron_routes")
+	if err != nil {
+		return err
+	}
+	if !columns["claim_token"] {
+		if _, err := db.Exec(`ALTER TABLE orch_cron_routes ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
