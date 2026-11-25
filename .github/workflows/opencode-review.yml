@@ -79,6 +79,7 @@ jobs:
           fi
 
       - name: Run OpenCode review
+        id: agent
         # Hard bound on the agent itself: a looping run must not ride the
         # 6-hour job default. On timeout the step fails (no review posted),
         # and the always() cleanup step below still runs.
@@ -90,17 +91,17 @@ jobs:
           # Required by use_github_token mode and by the gh CLI.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Least privilege for the agent's shell: only the gh subcommands a
-          # review needs. gh auth/api/secret/repo are denied, and any command
-          # containing `$` is denied so no environment variable can be expanded
-          # into gh output. webfetch/websearch/task are denied so there is no
-          # direct network exfiltration channel. File-mutating tools
-          # (edit/write/apply_patch and legacy aliases) are denied: the agent is
-          # review-only, and any worktree dirt makes the action attempt
-          # `git commit && git push` against the PR branch. Residual risk:
-          # gh pr edit/review can act on any PR and gh label on any label
-          # repo-wide, and the review body itself remains a channel the agent
-          # could be steered into.
-          OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh pr review*": "allow", "gh pr edit*": "allow", "gh label*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny", "*$*": "deny" }, "edit": "deny", "write": "deny", "apply_patch": "deny", "patch": "deny", "multiedit": "deny", "webfetch": "deny", "websearch": "deny", "task": "deny" }'
+          # review needs. The agent does not publish the review itself (the
+          # workflow does), so review/edit/label writes are denied. gh
+          # auth/api/secret/repo are denied, and any command containing `$` is
+          # denied so no environment variable can be expanded into gh output.
+          # webfetch/websearch/task are denied so there is no direct network
+          # exfiltration channel. File-mutating tools (edit/write/apply_patch
+          # and legacy aliases) are denied: the agent is review-only, and any
+          # worktree dirt makes the action attempt `git commit && git push`
+          # against the PR branch. The review body itself remains a channel the
+          # agent could be steered into.
+          OPENCODE_PERMISSION: '{ "bash": { "*": "deny", "gh*": "deny", "gh pr view*": "allow", "gh pr diff*": "allow", "gh auth*": "deny", "gh api*": "deny", "gh secret*": "deny", "gh repo*": "deny", "*$*": "deny" }, "edit": "deny", "write": "deny", "apply_patch": "deny", "patch": "deny", "multiedit": "deny", "webfetch": "deny", "websearch": "deny", "task": "deny" }'
         with:
           model: opencode-go/gpt-6-luna
           agent: build
@@ -123,8 +124,8 @@ jobs:
               delete any file. Any worktree change makes the action try to
               `git commit && git push` against the PR branch.
             - Do not loop: never run the same command or re-read the same file
-              more than twice. If something keeps failing, stop, post the
-              review with the evidence gathered so far, and reply `done`.
+              more than twice. If something keeps failing, stop and reply with
+              the review, using the evidence gathered so far.
 
             Steps:
             1. Read every changed file in full context with the `read` tool
@@ -144,7 +145,13 @@ jobs:
               or dead paths, behavior not covered by tests.
             - Intent mismatches: code that does not do what the PR description claims.
 
-            Post EXACTLY ONE PR review and nothing else (no comments):
+            Do NOT post the review yourself: never run `gh pr review`, never
+            create a comment, and never touch labels. Your final reply IS the
+            review body, and the workflow publishes it as a review pinned to
+            the commit this run reviewed. Reply exactly once, with the review
+            body and nothing else - no preamble, no closing summary, no `done`.
+
+            Review body:
             ## Verdict
             LGTM or NEEDS_REVIEW
 
@@ -158,19 +165,89 @@ jobs:
             Verdict rules: NEEDS_REVIEW if any Necessary finding exists,
             otherwise LGTM.
 
-            After posting the review:
-            - Swap the verdict label on the PR: inspect current labels with
-              `gh pr view`, remove an outdated LGTM/NEEDS_REVIEW label if present,
-              create the verdict label first with `gh label create` if it does not
-              exist, then add the label matching the verdict.
-            - Reply with only the word: done
+      # The agent's final reply is the review body; it never posts the review
+      # itself. Publish it here instead, pinned to the commit this run checked
+      # out, so a push landing mid-review cannot move the verdict onto an
+      # unreviewed head: the head is re-checked and a moved head drops this
+      # review entirely (the run triggered by that push reviews the new head).
+      # The verdict also sets the merge gate: an approval supersedes the bot's
+      # earlier changes-requested review, which GitHub keeps blocking until the
+      # same reviewer approves (the Actions token cannot dismiss reviews on a
+      # protected branch). That is why this repository enables
+      # can_approve_pull_request_reviews (see docs/development.md).
+      - name: Publish review
+        id: publish
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_ID: ${{ github.run_id }}
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+        run: |
+          if [ "$AGENT_OUTCOME" != "success" ]; then
+            echo "review agent ended as '$AGENT_OUTCOME'; nothing to publish"
+            exit 0
+          fi
+
+          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          if [ "$current_sha" != "$HEAD_SHA" ]; then
+            echo "head moved from $HEAD_SHA to $current_sha; the next run reviews it"
+            exit 0
+          fi
+
+          # The action posts the final reply as its own PR comment, identified
+          # by this run's URL in the footer. --slurp: the endpoint pages at 100,
+          # so concatenate every page before picking the newest match.
+          comments=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments")
+          comment=$(printf '%s' "$comments" | jq -r --arg run "actions/runs/$RUN_ID" \
+            '[.[][] | select(.user.login == "github-actions[bot]" and (.body | contains($run)))]
+             | last | .body // empty')
+          if [ -z "$comment" ]; then
+            echo "no agent comment for run $RUN_ID" >&2
+            exit 1
+          fi
+
+          # The action appends "<blank line><footer>" after the reply; drop
+          # that last blank-line-delimited block.
+          body=${comment%$'\n\n'*}
+          verdict=$(printf '%s\n' "$body" \
+            | awk '/^## Verdict$/ { getline; gsub(/[[:space:]]/, ""); print; exit }')
+          case "$verdict" in
+            LGTM)
+              event=APPROVE label=LGTM stale=NEEDS_REVIEW
+              color=2da44e desc="Review verdict: no must-fix findings"
+              ;;
+            NEEDS_REVIEW)
+              event=REQUEST_CHANGES label=NEEDS_REVIEW stale=LGTM
+              color=d73a4a desc="Review verdict: must-fix findings present"
+              ;;
+            *)
+              echo "no LGTM/NEEDS_REVIEW verdict in the agent reply" >&2
+              exit 1
+              ;;
+          esac
+
+          # commit_id pins the review to the revision this run reviewed.
+          printf '%s\n' "$body" \
+            | jq -Rsc --arg commit "$HEAD_SHA" --arg event "$event" \
+                '{commit_id: $commit, event: $event, body: sub("\n+$"; "")}' \
+            | gh api -X POST "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --input -
+
+          gh label create "$label" --repo "$GITHUB_REPOSITORY" --force \
+            --color "$color" --description "$desc" >/dev/null
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --add-label "$label" >/dev/null
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/$stale" >/dev/null 2>&1 || true
 
       # The action auto-posts the agent's final reply as a PR comment; the
-      # review above is the single source of truth, so remove that comment.
+      # published review is the single source of truth, so remove that comment
+      # once it is published. A failed publish keeps the comment so the reply
+      # that could not be parsed is still visible.
       # --paginate: the comment is the newest one and a single API page only
       # returns the oldest 30 comments.
       - name: Remove action comment
-        if: always()
+        if: always() && steps.publish.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

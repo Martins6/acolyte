@@ -77,10 +77,16 @@ code. It has a hard 15-minute timeout.
   owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs
   from any other author never trigger the agent. Because it calls the `opencode-go` model on the PR,
   this workflow *does* receive `OPENCODE_GO_API_KEY`, but only for the owner's non-draft PRs from
-  this repository. Each review posts exactly one PR review whose body starts with a `## Verdict`
-  heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching label, and splits findings into
-  **Necessary** (must fix) and **Non-necessary** (optional). Every new commit re-runs the review on
-  the latest diff.
+  this repository. The agent replies with exactly one review body that starts with a `## Verdict`
+  heading (`LGTM` or `NEEDS_REVIEW`) and splits findings into **Necessary** (must fix) and
+  **Non-necessary** (optional). The workflow publishes that body as a PR review pinned to the commit
+  the run checked out — an approval for `LGTM`, changes-requested for `NEEDS_REVIEW` — and swaps the
+  verdict label; the agent itself cannot post reviews, comments, or labels. Every new commit re-runs
+  the review on the latest diff, and a run whose head moved before publishing is dropped, so a
+  verdict never lands on a commit that was not reviewed. The review state is the merge gate:
+  `NEEDS_REVIEW` blocks the merge on protected branches and a later `LGTM` approval supersedes it.
+  An approval is the only way to clear a changes-requested review here, because the Actions token
+  cannot dismiss reviews on a protected branch.
 - `.github/workflows/pr-guard.yml` — verifies that a PR to `main` comes from `dev` in this repository
   and posts a `pr-guard` commit status on the PR head SHA, from the base-branch definition via
   `pull_request_target`, so a PR cannot redefine its own gate.
@@ -99,6 +105,10 @@ stop-on-red trigger.
    environment — the review and E2E jobs declare that environment). The workflows map it to
    `OPENCODE_API_KEY`, the variable the `opencode-go` provider reads.
 2. Create the `LGTM` and `NEEDS_REVIEW` labels — or skip this, the review creates them on first use.
+3. Enable *Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and
+   approve pull requests* (`can_approve_pull_request_reviews`). Without it the workflow cannot
+   submit an approval, and a PR that later passes review stays stuck on the bot's earlier
+   changes-requested verdict.
 
 ## Landing changes
 
