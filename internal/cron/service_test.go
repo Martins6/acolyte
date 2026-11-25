@@ -375,6 +375,44 @@ func TestInboxRouteRecoversAdmittedTurn(t *testing.T) {
 	}
 }
 
+// TestInboxRouteLeavesInFlightTurnPending ensures a route is not settled while
+// its admitted synthetic turn is still running.
+func TestInboxRouteLeavesInFlightTurnPending(t *testing.T) {
+	reg, _, now := setupCron(t)
+	turn := &collectingTurn{
+		delivered: false,
+		session:   &opencode.SessionInfo{ID: "ses_x", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+	}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID:                "route_inbox",
+		AgentTarget:       "valet",
+		Action:            "inbox",
+		Text:              "event",
+		OpenCodeSessionID: "ses_x",
+		SourceMessageID:   "msg_x",
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes = %+v, %v", routes, err)
+	}
+	if routes[0].DeliveredAt != nil {
+		t.Error("in-flight route was marked delivered")
+	}
+	if routes[0].Attempts != 1 {
+		t.Errorf("attempts = %d, want 1", routes[0].Attempts)
+	}
+}
+
 func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{
