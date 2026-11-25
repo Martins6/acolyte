@@ -1041,18 +1041,27 @@ func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch
 	}
 }
 
-// cronReplyChat resolves the chat that receives an inbox turn's response.
-func cronReplyChat(st *store.Store, sessionID string) (int64, bool) {
-	if session, ok, err := st.Orch().GetSessionByOpenCodeID(sessionID); err == nil && ok {
+// cronReplyChat resolves the chat that receives an inbox turn's response. A
+// failed session lookup is an error: falling back could send the output to a
+// different allowed user.
+func cronReplyChat(st *store.Store, sessionID string) (int64, bool, error) {
+	session, ok, err := st.Orch().GetSessionByOpenCodeID(sessionID)
+	if err != nil {
+		return 0, false, err
+	}
+	if ok {
 		if chatID, parsed := envelope.ParseTelegramThread(session.Thread); parsed && chatID != 0 {
-			return chatID, true
+			return chatID, true, nil
 		}
 	}
 	chat, ok, err := st.CommTG().LatestAllowedChat()
-	if err != nil || !ok {
-		return 0, false
+	if err != nil {
+		return 0, false, err
 	}
-	return chat.ChatID, true
+	if !ok {
+		return 0, false, nil
+	}
+	return chat.ChatID, true, nil
 }
 
 // queueInboxResponse enqueues the agent's reaction to an inbox event under a
@@ -1065,7 +1074,10 @@ func (s *Service) queueInboxResponse(pair *agentStore, route orch.CronRoute, res
 	if text == "" {
 		return nil
 	}
-	chatID, ok := cronReplyChat(pair.store, result.SessionID)
+	chatID, ok, err := cronReplyChat(pair.store, result.SessionID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return fmt.Errorf("cron: no chat for inbox response route %s", route.ID)
 	}
@@ -1074,7 +1086,7 @@ func (s *Service) queueInboxResponse(pair *agentStore, route orch.CronRoute, res
 		sourceID = result.MessageIDs[len(result.MessageIDs)-1]
 	}
 	id := "cron_inbox_" + route.ID
-	_, err := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
+	_, err = pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
 		ID:                id,
 		EnvelopeID:        id,
 		ChatID:            chatID,
