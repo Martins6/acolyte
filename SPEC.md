@@ -444,7 +444,7 @@ CREATE TABLE comm_tg_inbox (
   opencode_message_id TEXT DEFAULT '', received_at DATETIME,
   pending_envelope TEXT DEFAULT '', processed_at DATETIME, attempts INTEGER DEFAULT 0,
   last_error TEXT DEFAULT '', claimed_until DATETIME, claim_token TEXT DEFAULT '',
-  pending_reply TEXT DEFAULT ''
+  pending_reply TEXT DEFAULT '', admitted_at DATETIME, resume_attempts INTEGER DEFAULT 0
 );
 CREATE TABLE comm_tg_outbox (
   id TEXT PRIMARY KEY, envelope_id TEXT NOT NULL, chat_id INTEGER NOT NULL,
@@ -694,6 +694,109 @@ an inbound message, or a background notification is admitted to the mapped sessi
 (interrupt now). Real user messages use `session.prompt`. **Cron** jobs either run a shell command or
 admit a synthetic event; output is routed via Communication.
 
+### 14.1 Turn recovery (durable resumability)
+
+A turn is a **resumable job**, not a request/response call. Admission is durable: `prompt`/`synthetic`
+returns a marker that lives in OpenCode's session inbox before collection starts, and the reply text is
+read back from persisted messages rather than from the stream.
+
+**The marker is persisted at admission.** The turn runner calls `TurnConfig.OnAdmitted` immediately
+after the input is admitted and before the turn is collected, and the router stores
+`opencode_session_id` + `opencode_message_id` + `admitted_at` on `comm_tg_inbox`. Recovery therefore
+never needs to re-prompt: the pair is enough to re-collect.
+
+**Admission is acknowledged durably.** The same hook enqueues an acknowledgement outbox row on its
+own identity (`ack_<inbound>`), so the user always gets feedback even if the daemon restarts before
+collection finishes. It is an outbox row rather than the typing indicator or the 👀 reaction, both of
+which are best-effort and can disappear with the process. The acknowledgement only says that work
+started; the reply, an error, or an operator notice reports what actually happened. The outbox is
+unique on the envelope ID, so repeated admissions collapse to one row. Reconciliation enqueues the
+ack too when a marker exists without one, closing the crash window between persisting the marker and
+writing the acknowledgement.
+
+**Recovery outcomes.** On replay, an inbound carrying a marker is reconciled, never re-admitted:
+
+| Outcome | Meaning | Action |
+|---|---|---|
+| `recovered` | The turn finished; its reply was collected | Reply queued, row settled |
+| `still-pending` | Session busy, or inside the grace window | Left alone; looked at again next pass |
+| `stranded` | Idle, marker never executed | Escalated after the grace window |
+| `unrecoverable` | Marker cannot produce a reply | Settled with an explicit notice |
+
+**Terminal outcomes are settled, not retried.** A finished turn with no text, a truncated output that
+exceeds the collection window, or a consumed marker that produced nothing is definitive: it is
+settled with an `ACOLYTE SYSTEM MESSAGE:` notice and marked processed. Only transient probe errors
+(service unavailable, timeout, rate limit, 5xx) stay pending for the next pass; permanent probe
+failures (missing session, rejected request) settle the same way.
+
+**Escalation is bounded and honest.** After a `resumeGraceWindow` (5 min), a stranded turn is
+abandoned: the session is interrupted, the thread→session mapping is forgotten, and the marker is
+cleared so the next pass admits the message into a fresh session. Because the abandoned input provably
+never executed, nothing is duplicated; the cost is that thread's conversation context. A session that
+is still in flight past the grace window is interrupted and the message is settled as incomplete
+instead: execution cannot be disproved, so it is never re-admitted. Recovery first establishes that
+this marker is the session's head turn (no later delivered input, or the next input is still queued);
+a later turn is never interrupted. The ownership check and interrupt take the same per-session turn
+lock as every admission (router, cron, OutboxSink), so a newer turn cannot start in between; escalation
+re-reads the row and revalidates that the marker is still queued after taking the lock. A marker outside
+the bounded timeline has unknown ownership and is left pending while the session is busy, never
+guessed. If an interrupt is rejected and cannot be confirmed, the notice says so instead of claiming
+the turn stopped, and does not tell the user to resend while the original turn may still run.
+After `maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
+
+**Collection errors do not consume the reply.** Before calling OpenCode, the router records
+`admitted_at` as durable admission intent. The callback then persists the marker; a turn error after
+admission keeps that marker and leaves the reply identity (`out_<inbound>`) free. If the marker cannot
+be saved even after a retry, the intent timestamp remains as the indeterminate signal: replay settles
+it with an honest notice instead of re-admitting and running the request twice. A prompt failure is
+only treated as pre-admission when the service definitively rejected it; transport, timeout, and 5xx
+outcomes keep the intent because the request may already have executed. Only a turn that never
+reached OpenCode clears the intent and gets an immediate error reply. Replay reconciles the turn and
+queues the real reply when it exists; only definitive failures settle with a notice.
+
+**Replies are idempotent per inbound.** The reply envelope ID is derived from the inbound envelope ID
+(`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply
+collapses to one row instead of double-sending.
+
+**Live turns are bounded.** A live user turn carries a `liveTurnTimeout` (10 min). If it expires, the
+durable marker is handed back to reconciliation instead of letting the inbound claim heartbeat renew
+forever; recovery then applies the normal busy/grace policy.
+
+**Operator notices are labelled.** Text Acolyte generates about its own operation is sent as
+`ACOLYTE SYSTEM MESSAGE: <text>` on its own outbound identity (`sys_<inbound>`), never mixed into agent
+text, and never claims a request completed when it did not.
+
+**Recovery is wired before polling.** The daemon installs the adapter's reconciler before starting the
+adapter, so an initial replay can never mark a marker-bearing row processed while recovery is missing.
+
+**Cron runs recover output, not execution.** A job records the marker of the turn it admitted
+(`orch_cron_jobs.pending_*`). A live turn consumes that marker in `TurnConfig.OnCollected` before
+releasing the session lock. On restart, recovery takes the same lock, revalidates the marker, checks
+that the session is not still in flight, collects the turn's text, and consumes the marker before
+releasing the lock. Non-collectable states (`indeterminate`, `routine-run`) carry a unique generation,
+and recovery clears only the generation it revalidated, so a stale pass cannot delete a newer run.
+
+A collected prompt result becomes a durable `orch_cron_routes` intent with a deterministic ID before
+its marker is consumed. The intent records the job's route policy (`notify-user`, `inbox`, or `log`) and
+the route loop claims it atomically, renews the claim during delivery, then delivers it: `notify-user`
+resolves the chat lazily and enqueues the deterministic outbox row, `inbox` persists the admitted
+synthetic marker and collects it instead of re-admitting, then enqueues the agent reaction under its own
+deterministic ID, and `log` appends the output. If an inbox admission marker cannot be persisted, the
+route is parked rather than retried into a duplicate. Recovery creates the same intent, so a crash
+between collection and delivery neither loses nor duplicates the response. A completed execution never clears pending state unconditionally:
+prompt turns consume their exact marker under the lock, routine runs compare-and-clear their generation,
+and a post-collection cleanup error still routes the collected output instead of turning it into a
+failure.
+The marker is cleared only after a successful collection; a run that errored after admission leaves it
+for the next pass and logs the transient error without routing a terminal failure, so recovery cannot
+later contradict it. An admission whose marker cannot be saved is retried first, then recorded as an
+indeterminate pending run and settled as untracked. Permanent probe failures (missing session, truncated
+output), a delivered turn with no text, and a consumed marker with nothing pending settle the run as
+incomplete instead of retrying forever; a marker still queued in the inbox stays recoverable for the
+next pass. Routine bodies are **not** replayed: a collected turn leaves a run-level `routine-run`
+pending state until the body finishes, and recovery settles an unfinished routine as incomplete rather
+than re-running it.
+
 ---
 
 ## 15. Decisions & Open Questions
@@ -770,8 +873,9 @@ notify-user`** = user-only, never agent, never session (v0 `notify`) (§10.4).
     OpenCode/communication history. Full communication config is exposed by
     `acolyte config <agent> get`; the `agent_status` cache and any OpenCode stats integration
     remain deferred.
-32. **Telegram inbound UX is best-effort and adapter-local.** An accepted message gets a 👀 reaction,
-    and `typing` is sent immediately and refreshed every 4s until the reply is enqueued.
+32. **Telegram inbound UX mixes durable and best-effort feedback.** Admission enqueues a durable
+    acknowledgement (`ack_<inbound>`, outbox-backed, retried like any reply) so a running or
+    interrupted turn is never silent; the 👀 reaction and `typing` are adapter-local and best-effort.
     `setMyCommands` registers `/new`, which clears the `telegram:<chat_id>` → session mapping under
     the thread lock and replies without a model turn (an `@mention` must name this bot);
     multi-message replies are joined with `\n\n`.

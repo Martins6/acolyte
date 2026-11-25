@@ -46,6 +46,13 @@ type Env struct {
 	// InboxSession delivers an external event to a specific session.
 	InboxSession func(ctx context.Context, sessionID, text string, meta map[string]any) (string, string, error)
 	Log          func(level, message string, meta map[string]any)
+	// OnAdmitted persists the marker of a turn the routine just admitted, so a
+	// run interrupted by a restart can still have its output collected. It is
+	// optional and must not change routine behavior.
+	OnAdmitted func(opencode.Admitted) error
+	// OnCollected consumes that marker while the turn still holds the session
+	// lock, so recovery cannot collect the same output concurrently.
+	OnCollected func(*opencode.TurnResult) error
 }
 
 func (e Env) Clock() time.Time {

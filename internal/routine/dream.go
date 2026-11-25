@@ -95,7 +95,7 @@ func (dreamRoutine) Run(ctx context.Context, env Env, args map[string]any) (stri
 			"sessions": len(selected),
 		},
 		Delivery: "queue",
-	}, opencode.TurnConfig{Workspace: env.Workspace, Permissions: dreamAnalysisPermissions(env.Workspace)})
+	}, opencode.TurnConfig{Workspace: env.Workspace, Permissions: dreamAnalysisPermissions(env.Workspace), OnAdmitted: env.OnAdmitted, OnCollected: env.OnCollected})
 	analysisText := ""
 	if analysisResult != nil {
 		analysisText = strings.TrimSpace(analysisResult.ResponseText)
@@ -149,7 +149,7 @@ func (dreamRoutine) Run(ctx context.Context, env Env, args map[string]any) (stri
 			"phase":   "writer",
 		},
 		Delivery: "queue",
-	}, opencode.TurnConfig{Workspace: env.Workspace, Permissions: dreamWriterPermissions(env.Workspace)})
+	}, opencode.TurnConfig{Workspace: env.Workspace, Permissions: dreamWriterPermissions(env.Workspace), OnAdmitted: env.OnAdmitted, OnCollected: env.OnCollected})
 	writerText := ""
 	if writerResult != nil {
 		writerText = strings.TrimSpace(writerResult.ResponseText)

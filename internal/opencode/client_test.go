@@ -196,6 +196,47 @@ func TestMessagesAfterStopsAtLaterInput(t *testing.T) {
 	}
 }
 
+func TestNextInputID(t *testing.T) {
+	t.Parallel()
+
+	// Newest first: idle2, reply2, input2, reply1, marker, old.
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[
+			{"id":"msg_idle2","type":"idle","time":{"created":7},"outcome":"succeeded"},
+			{"id":"msg_b2","type":"assistant","time":{"created":6},"content":[{"type":"text","text":"later turn reply"}]},
+			{"id":"msg_input2","type":"user","time":{"created":5},"text":"later question"},
+			{"id":"msg_a2","type":"assistant","time":{"created":4},"content":[{"type":"text","text":"second part"}]},
+			{"id":"msg_a1","type":"assistant","time":{"created":3},"content":[{"type":"text","text":"first part"}]},
+			{"id":"msg_marker","type":"synthetic","time":{"created":2},"text":"event"},
+			{"id":"msg_old","type":"assistant","time":{"created":1},"content":[{"type":"text","text":"older turn"}]}
+		],"cursor":{"previous":null,"next":null}}`)
+	})
+
+	next, found, err := client.NextInputID(context.Background(), "ses_x", "msg_marker")
+	if err != nil {
+		t.Fatalf("NextInputID: %v", err)
+	}
+	if !found || next != "msg_input2" {
+		t.Errorf("next = %q, found = %v; want msg_input2", next, found)
+	}
+
+	next, found, err = client.NextInputID(context.Background(), "ses_x", "msg_input2")
+	if err != nil {
+		t.Fatalf("NextInputID(latest): %v", err)
+	}
+	if !found || next != "" {
+		t.Errorf("latest input next = %q, found = %v; want empty", next, found)
+	}
+
+	_, found, err = client.NextInputID(context.Background(), "ses_x", "msg_missing")
+	if err != nil {
+		t.Fatalf("NextInputID(missing): %v", err)
+	}
+	if found {
+		t.Error("missing marker reported as found")
+	}
+}
+
 func TestMessagesAfterUndelivered(t *testing.T) {
 	t.Parallel()
 

@@ -4,9 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/martins6/acolyte/internal/comm"
 	"github.com/martins6/acolyte/internal/comm/telegram"
 	"github.com/martins6/acolyte/internal/comm/telegram/telegramtest"
 	"github.com/martins6/acolyte/internal/paths"
@@ -78,11 +80,18 @@ func TestDaemonRoutesThroughEmulatedTelegram(t *testing.T) {
 	}
 
 	update := server.SendText(10, 42, "alice", "hello from the emulator")
-	messages, err := server.WaitForChatMessages(ctx, 10, 1)
+	messages, err := server.WaitForChatMessages(ctx, 10, 2)
 	if err != nil {
-		t.Fatalf("wait for reply: %v", err)
+		t.Fatalf("wait for ack and reply: %v", err)
 	}
-	reply := messages[0]
+	ack := messages[0]
+	if !strings.HasPrefix(ack.Text, comm.SystemNoticeMarker) || !strings.Contains(ack.Text, "working") {
+		t.Errorf("ack text = %q, want a durable working notice", ack.Text)
+	}
+	if ack.ReplyTo == nil || *ack.ReplyTo != int64(update.Message.ID) {
+		t.Errorf("ack reply_to = %v, want %d", ack.ReplyTo, update.Message.ID)
+	}
+	reply := messages[1]
 	if reply.Text != "reply" {
 		t.Errorf("reply text = %q, want fake turn response", reply.Text)
 	}
@@ -138,11 +147,17 @@ func TestDaemonRoutesThroughEmulatedTelegram(t *testing.T) {
 	outboxDeadline := time.Now().Add(15 * time.Second)
 	for {
 		outbox, listErr := st.CommTG().ListOutbox(10)
-		if listErr == nil && len(outbox) == 1 && outbox[0].Delivery == "sent" && outbox[0].Text == "" {
+		sent := 0
+		for _, item := range outbox {
+			if item.Delivery == "sent" && item.Text == "" {
+				sent++
+			}
+		}
+		if listErr == nil && len(outbox) == 2 && sent == 2 {
 			break
 		}
 		if time.Now().After(outboxDeadline) {
-			t.Fatalf("outbox = %+v, %v; want one sent row", outbox, listErr)
+			t.Fatalf("outbox = %+v, %v; want two sent rows", outbox, listErr)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

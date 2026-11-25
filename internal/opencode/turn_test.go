@@ -18,6 +18,31 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestPromptOutcomeUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "definitive bad request", err: &APIError{Status: http.StatusBadRequest}, want: false},
+		{name: "definitive not found", err: &APIError{Status: http.StatusNotFound}, want: false},
+		{name: "server error", err: &APIError{Status: http.StatusServiceUnavailable}, want: true},
+		{name: "rate limited", err: &APIError{Status: http.StatusTooManyRequests}, want: true},
+		{name: "request timeout", err: &APIError{Status: http.StatusRequestTimeout}, want: true},
+		{name: "transport", err: errors.New("connection reset"), want: true},
+		{name: "deadline", err: context.DeadlineExceeded, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := promptOutcomeUnknown(tc.err); got != tc.want {
+				t.Errorf("promptOutcomeUnknown(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunTurnTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -93,6 +118,214 @@ func TestRunUserTurnExplicitShortTimeoutCancels(t *testing.T) {
 	_, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{Timeout: 20 * time.Millisecond})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunUserTurn() error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestCollectDeliveredReturnsCompletedTurn(t *testing.T) {
+	t.Parallel()
+
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/session/ses_x/message" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `{"data":[
+			{"id":"msg_reply","type":"assistant","time":{"created":2},"content":[
+				{"type":"tool","id":"tool_1","name":"bash","state":{"status":"completed"}},
+				{"type":"text","text":"recovered"}
+			]},
+			{"id":"msg_in","type":"user","time":{"created":1},"text":"question"}
+		],"cursor":{"previous":null,"next":null}}`)
+	})
+
+	result, delivered, err := client.CollectDelivered(context.Background(), "ses_x", "msg_in")
+	if err != nil {
+		t.Fatalf("CollectDelivered() error: %v", err)
+	}
+	if !delivered {
+		t.Fatal("CollectDelivered() delivered = false, want true")
+	}
+	if result.SessionID != "ses_x" || result.InputID != "msg_in" {
+		t.Errorf("result = %+v, want session ses_x and input msg_in", result)
+	}
+	if result.ResponseText != "recovered" {
+		t.Errorf("response = %q, want recovered", result.ResponseText)
+	}
+	wantActivity := []ToolActivity{{Name: "bash", Status: "completed", ID: "tool_1"}}
+	if !reflect.DeepEqual(result.ToolActivity, wantActivity) {
+		t.Errorf("tool activity = %+v, want %+v", result.ToolActivity, wantActivity)
+	}
+}
+
+func TestCollectDeliveredReportsPendingMarker(t *testing.T) {
+	t.Parallel()
+
+	var inboxCalls int
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/session/ses_x/message":
+			// The marker is not in the window: the turn never produced output.
+			fmt.Fprint(w, `{"data":[
+				{"id":"msg_in","type":"user","time":{"created":1},"text":"question"}
+			],"cursor":{"previous":null,"next":null}}`)
+		case "/api/session/ses_x/inbox":
+			inboxCalls++
+			t.Errorf("inbox should not be consulted without truncation")
+			fmt.Fprint(w, `{"data":[]}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	result, delivered, err := client.CollectDelivered(context.Background(), "ses_x", "msg_missing")
+	if err != nil {
+		t.Fatalf("CollectDelivered() error: %v", err)
+	}
+	if delivered {
+		t.Fatal("CollectDelivered() delivered = true, want false")
+	}
+	if result != nil {
+		t.Errorf("result = %+v, want nil while pending", result)
+	}
+	if inboxCalls != 0 {
+		t.Errorf("inbox calls = %d, want 0", inboxCalls)
+	}
+}
+
+func TestCollectDeliveredRequiresIDs(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("http://opencode.test", "")
+	if _, _, err := client.CollectDelivered(context.Background(), "", "msg_in"); err == nil {
+		t.Fatal("CollectDelivered() error = nil, want missing session id error")
+	}
+	if _, _, err := client.CollectDelivered(context.Background(), "ses_x", "  "); err == nil {
+		t.Fatal("CollectDelivered() error = nil, want missing marker error")
+	}
+}
+
+func TestSessionTimeInFlight(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		time SessionTime
+		want bool
+	}{
+		{name: "idle", time: SessionTime{Busy: 10, Idle: 20}},
+		{name: "running", time: SessionTime{Busy: 20, Idle: 10}, want: true},
+		{name: "never started", time: SessionTime{}},
+		{name: "settled at same instant", time: SessionTime{Busy: 10, Idle: 10}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.time.InFlight(); got != tc.want {
+				t.Errorf("InFlight() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunUserTurnCallsOnAdmittedBeforeCollect(t *testing.T) {
+	t.Parallel()
+
+	var order []string
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x":
+			order = append(order, "session")
+			fmt.Fprint(w, `{"data":{"id":"ses_x","agent":"build"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_x/prompt":
+			order = append(order, "prompt")
+			fmt.Fprint(w, `{"data":{"id":"msg_in","sessionID":"ses_x","type":"user"}}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/wait"):
+			order = append(order, "wait")
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x/message":
+			order = append(order, "message")
+			fmt.Fprint(w, `{"data":[
+				{"id":"msg_reply","type":"assistant","time":{"created":2},"content":[{"type":"text","text":"hi"}]},
+				{"id":"msg_in","type":"user","time":{"created":1},"text":"hello"}
+			],"cursor":{"previous":null,"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	var admitted Admitted
+	result, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{
+		OnAdmitted: func(a Admitted) error {
+			order = append(order, "admitted")
+			admitted = a
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunUserTurn() error: %v", err)
+	}
+	if admitted.SessionID != "ses_x" || admitted.InputID != "msg_in" {
+		t.Fatalf("admitted = %+v, want ses_x/msg_in", admitted)
+	}
+	if result.ResponseText != "hi" {
+		t.Errorf("response = %q, want hi", result.ResponseText)
+	}
+
+	indexOf := func(name string) int {
+		for i, value := range order {
+			if value == name {
+				return i
+			}
+		}
+		return -1
+	}
+	if indexOf("prompt") < 0 || indexOf("admitted") < 0 || indexOf("message") < 0 {
+		t.Fatalf("order = %v, want prompt, admitted and message to all occur", order)
+	}
+	if indexOf("admitted") < indexOf("prompt") {
+		t.Errorf("order = %v, want admission after the prompt", order)
+	}
+	if indexOf("admitted") > indexOf("message") {
+		t.Errorf("order = %v, want admission before collection", order)
+	}
+}
+
+func TestRunUserTurnOnAdmittedErrorPreservesMarker(t *testing.T) {
+	t.Parallel()
+
+	var collected bool
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x":
+			fmt.Fprint(w, `{"data":{"id":"ses_x","agent":"build"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_x/prompt":
+			fmt.Fprint(w, `{"data":{"id":"msg_in","sessionID":"ses_x","type":"user"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session/ses_x/message":
+			collected = true
+			fmt.Fprint(w, `{"data":[],"cursor":{"previous":null,"next":null}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	result, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{
+		OnAdmitted: func(Admitted) error { return errors.New("store unavailable") },
+	})
+	if err == nil {
+		t.Fatal("RunUserTurn() error = nil, want persistence error")
+	}
+	if result == nil {
+		t.Fatal("RunUserTurn() result = nil, want partial result carrying the marker")
+	}
+	if result.SessionID != "ses_x" || result.InputID != "msg_in" {
+		t.Errorf("result = %+v, want session ses_x and input msg_in", result)
+	}
+	if collected {
+		t.Error("turn was collected despite a failed admission hook")
 	}
 }
 

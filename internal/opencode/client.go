@@ -56,6 +56,17 @@ func (s *SessionInfo) UnmarshalJSON(data []byte) error {
 type SessionTime struct {
 	Created float64 `json:"created"`
 	Updated float64 `json:"updated"`
+	// Busy and Idle are epoch-millisecond stamps the service sets when a turn
+	// starts and when the session returns to idle.
+	Busy float64 `json:"busy,omitempty"`
+	Idle float64 `json:"idle,omitempty"`
+}
+
+// InFlight reports whether the session has an unfinished turn. The service
+// stamps Busy when a turn starts and Idle when it settles, so a Busy stamp newer
+// than the last Idle means work is still running (or wedged).
+func (t SessionTime) InFlight() bool {
+	return t.Busy > t.Idle
 }
 
 // SessionLocation is the project directory a session belongs to.
@@ -207,6 +218,32 @@ func (e *APIError) Error() string {
 	default:
 		return fmt.Sprintf("opencode: status %d: %s", e.Status, e.Message)
 	}
+}
+
+// Permanent reports whether the service rejected the request in a way that
+// retrying cannot fix. Every 4xx is permanent except 408 (request timeout) and
+// 429 (rate limited), which may succeed later; 5xx responses are not permanent.
+func (e *APIError) Permanent() bool {
+	if e == nil || e.Status < 400 || e.Status >= 500 {
+		return false
+	}
+	switch e.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	default:
+		return true
+	}
+}
+
+// IsPermanentError reports whether err is a definitive API rejection. Errors
+// that are not *APIError (transport failures, timeouts, cancellations) are not
+// permanent and should be retried.
+func IsPermanentError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Permanent()
 }
 
 // Restart-window retry policy. The managed service answers with 503
@@ -612,6 +649,13 @@ func (c *Client) Wait(ctx context.Context, sessionID string) error {
 	return c.do(ctx, http.MethodPost, path, nil, nil)
 }
 
+// Interrupt stops the session's in-flight turn and settles it. Recovery uses it
+// when a wedged turn owns the session and its marker will never produce a reply.
+func (c *Client) Interrupt(ctx context.Context, sessionID string) error {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/interrupt"
+	return c.do(ctx, http.MethodPost, path, nil, nil)
+}
+
 // Context returns the session's active context messages (all messages after
 // the last compaction) — exactly what the model sees on the next turn.
 func (c *Client) Context(ctx context.Context, sessionID string) ([]Message, error) {
@@ -751,6 +795,57 @@ func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) 
 		after[i], after[j] = after[j], after[i]
 	}
 	return after, found, truncated, nil
+}
+
+// NextInputID returns the oldest user/synthetic input newer than markerID, and
+// whether markerID itself was found in the session timeline. Recovery uses it
+// to tell whether an aged marker's turn is still the one owning a busy session.
+func (c *Client) NextInputID(ctx context.Context, sessionID, markerID string) (string, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	markerID = strings.TrimSpace(markerID)
+	if sessionID == "" || markerID == "" {
+		return "", false, fmt.Errorf("opencode: session id and marker id are required")
+	}
+	next := ""
+	found := false
+	cursor := ""
+	for page := 0; page < messageMaxPages; page++ {
+		path := fmt.Sprintf("/api/session/%s/message?limit=%d", url.PathEscape(sessionID), messagePageSize)
+		if cursor == "" {
+			path += "&order=desc"
+		} else {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		var resp struct {
+			Data   []Message `json:"data"`
+			Cursor struct {
+				Previous string `json:"previous"`
+				Next     string `json:"next"`
+			} `json:"cursor"`
+		}
+		if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+			return "", false, err
+		}
+		for _, m := range resp.Data {
+			if m.ID == markerID {
+				found = true
+				break
+			}
+			if m.Type == "user" || m.Type == "synthetic" {
+				// Walking newest-first: the last input seen before the marker
+				// is the oldest input newer than it.
+				next = m.ID
+			}
+		}
+		if found || resp.Cursor.Next == "" {
+			break
+		}
+		cursor = resp.Cursor.Next
+	}
+	if !found {
+		return "", false, nil
+	}
+	return next, true, nil
 }
 
 // InboxPending reports whether the given inbox item is still awaiting

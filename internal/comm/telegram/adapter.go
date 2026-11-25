@@ -104,6 +104,9 @@ type Adapter struct {
 	api  API
 	bot  *bot.Bot
 	sink comm.InboundSink
+	// reconcile settles inbounds whose turn was admitted before a restart. It
+	// is optional: without it, replay keeps its historical behavior.
+	reconcile comm.Reconciler
 
 	mu     sync.Mutex
 	ctx    context.Context
@@ -187,6 +190,14 @@ func normalizeUsername(name string) string {
 
 // Name returns the channel name.
 func (a *Adapter) Name() string { return Channel }
+
+// SetReconciler installs the recovery hook used for inbound rows that already
+// carry an OpenCode marker. It is safe to call before or after Start.
+func (a *Adapter) SetReconciler(reconcile comm.Reconciler) {
+	a.mu.Lock()
+	a.reconcile = reconcile
+	a.mu.Unlock()
+}
 
 // Start begins Telegram polling and the outbox retry loop.
 func (a *Adapter) Start(ctx context.Context, sink comm.InboundSink) error {

@@ -301,6 +301,18 @@ func (s *Service) startAgent(agent registry.Agent, seenTokens map[string]string)
 		}
 		return nil
 	}
+	// Install recovery before polling starts. A reconnect/replay can otherwise
+	// observe a marker-bearing error row while the reconciler is still nil and
+	// settle it without collecting the reply.
+	if setter, ok := adapter.(comm.ReconcilerSetter); ok {
+		setter.SetReconciler(func(ctx context.Context, env envelope.Envelope) (comm.ReconcileOutcome, error) {
+			outcome, err := s.router.Recover(ctx, agent, env)
+			if err != nil {
+				log.Printf("daemon: recover for %s (%s): %v", agent.Name, outcome, err)
+			}
+			return outcome, err
+		})
+	}
 	if err := adapter.Start(s.ctx, sink); err != nil {
 		log.Printf("daemon: start communication for %s: %v", agent.Name, err)
 		_ = adapter.Stop()

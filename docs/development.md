@@ -66,6 +66,79 @@ suites on every PR. In `.github/workflows/test.yml` the live job runs after merg
 manual dispatch), never on PRs, because the provider credential must not be exposed to PR-controlled
 code. It has a hard 15-minute timeout.
 
+## Turn recovery
+
+Turns are resumable. The marker returned by `prompt`/`synthetic` is persisted at admission
+(`TurnConfig.OnAdmitted` → `comm_tg_inbox.opencode_message_id` + `admitted_at`), so recovery
+re-collects a finished turn instead of admitting the message a second time.
+
+Where it lives:
+
+| Concern | Location |
+|---|---|
+| Admission hook | `internal/opencode/turn.go` (`Admitted`, `admitInput`) |
+| Collect-only probe | `internal/opencode/client.go` (`CollectDelivered`, `SessionTime.InFlight`) |
+| Reconcile + escalation | `internal/comm/router.go` (`Reconcile`, `Recover`) |
+| Replay wiring | `internal/comm/telegram/replay.go` (`reconcileItem`) |
+| Store state | `internal/store/commtg/inbox.go` (`MarkInboundAdmitted`, `RecordResumeAttempt`) |
+| Cron recovery | `internal/cron/service.go` (`recoverPendingTurns`) |
+
+Behaviour worth remembering when changing this code:
+
+- A marker must be stored **while** the turn runs, not when it finishes — that invariant is what makes
+  restart recovery possible. `TestRouterPersistsMarkerBeforeTurnCompletes` guards it.
+- Admission also enqueues a durable acknowledgement (`ack_<inbound>`), so a running turn is never
+  silent even though the typing indicator and 👀 reaction are best-effort. It says only that work
+  started; the reply, an error, or an operator notice reports the outcome. Reconciliation heals a
+  missing ack (crash between marker and ack) using the same stable identity.
+- Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
+  and only into a fresh session for input that provably never executed. A session still in flight past
+  the grace window is interrupted and settled as incomplete, but only when this marker is the head
+  turn; a later delivered turn is left alone. The ownership check and interrupt take the per-session
+  turn lock shared by router, cron, and OutboxSink turns. Unknown ownership (marker outside the bounded
+  timeline) stays pending while the session is busy. An unconfirmed interrupt settles without claiming
+  the turn stopped or asking the user to retry while it may still run.
+- A collection error after admission keeps the marker and the reply identity free. Admission intent is
+  recorded before the prompt; if the marker write fails, that timestamp is the durable indeterminate
+  signal and replay settles instead of re-admitting. An ambiguous prompt failure (transport, timeout,
+  5xx) keeps the intent; only a definitive rejection clears it and replies immediately.
+- Escalation takes the session lock, re-reads the row, and revalidates that the marker is still queued
+  before interrupting; a marker that executed while waiting is handed back for a fresh reconcile.
+- The daemon installs the adapter's reconciler before the adapter starts polling, so an initial replay
+  cannot settle a marker-bearing row while recovery is missing. Live user turns are bounded by
+  `liveTurnTimeout`; an expired turn hands its durable marker back to reconciliation.
+- Cron recovery takes the shared session lock, revalidates the database marker, and consumes it before
+  releasing the lock, so concurrent passes cannot route the same output twice. Live turns consume their
+  marker in `TurnConfig.OnCollected` while still holding that lock. A run that errors after admission
+  keeps its marker and logs the transient error without routing a terminal failure, so recovery cannot
+  later contradict that notification. An unsavable marker is retried, then stored as an indeterminate
+  pending run and settled as untracked. A routine keeps a run-level `routine-run` pending state after
+  each collected turn until the body finishes, so a crash in post-turn work is settled as incomplete,
+  never replayed.
+  Non-collectable pending states carry a unique generation and are cleared with compare-and-clear, so a
+  stale recovery pass cannot delete a newer run. A collected prompt result is stored as an action-aware
+  `orch_cron_routes` intent (notify-user, inbox, or log) with a deterministic ID before its marker is
+  consumed; the route loop claims it atomically and renews the claim during delivery, inbox routes
+  persist the admitted synthetic marker and enqueue the agent reaction under its own deterministic ID
+  rather than re-admitting, an unpersistable inbox marker parks the route, and recovery creates the
+  same intent. Nothing clears pending state unconditionally after a turn, and a post-collection cleanup
+  error still routes the collected output.
+- Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
+  output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
+  rejected request). Only transient probe errors stay pending.
+- Cron recovery checks `SessionTime.InFlight()` before collecting, and a run that errors after
+  admission keeps its `pending_*` marker until a successful collection clears it. Permanent probe
+  errors, truncated output, and an empty delivered turn settle the run as incomplete; a marker still
+  queued in the inbox stays recoverable.
+- Reply envelope IDs are derived from the inbound (`out_<inbound>`) so re-sending is idempotent.
+  Acknowledgements (`ack_`) and operator notices (`sys_`) use their own identities so they can never
+  occupy or suppress the reply slot.
+- Operator notices use `ACOLYTE SYSTEM MESSAGE:` and never claim success that did not happen.
+- Cron routine bodies are never replayed; an interrupted routine is reported as incomplete.
+
+Grace window (`resumeGraceWindow`, `cronResumeGrace`) and the attempt cap (`maxResumeAttempts`) are
+package variables so tests can shorten them.
+
 ## GitHub workflows
 
 - `.github/workflows/test.yml` — `go vet` and `go test -race ./...` on every PR (`test / unit`), plus

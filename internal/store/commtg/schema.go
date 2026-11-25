@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "comm_tg"
-	version = 8
+	version = 9
 )
 
 // Migrate creates or upgrades the Telegram communication schema.
@@ -76,6 +76,12 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("comm_tg: migrate to version 8: %w", err)
 		}
 		current = 8
+	}
+	if current < 9 {
+		if err := migrateV9(db); err != nil {
+			return fmt.Errorf("comm_tg: migrate to version 9: %w", err)
+		}
+		current = 9
 	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
@@ -292,6 +298,32 @@ func migrateV8(db *sql.DB) error {
 	}
 	_, err = db.Exec(`ALTER TABLE comm_tg_outbox ADD COLUMN media_path TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+// migrateV9 adds turn-resume state: when the current OpenCode marker was
+// admitted and how many resume attempts it has already used. Pre-v9 rows keep a
+// NULL admitted_at, which callers read as "fall back to received_at".
+func migrateV9(db *sql.DB) error {
+	columns, err := tableColumns(db, "comm_tg_inbox")
+	if err != nil {
+		return err
+	}
+	additions := []struct {
+		name string
+		ddl  string
+	}{
+		{"admitted_at", `ALTER TABLE comm_tg_inbox ADD COLUMN admitted_at DATETIME`},
+		{"resume_attempts", `ALTER TABLE comm_tg_inbox ADD COLUMN resume_attempts INTEGER NOT NULL DEFAULT 0`},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.Exec(addition.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func tableColumns(db *sql.DB, table string) (map[string]bool, error) {

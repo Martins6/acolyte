@@ -4,6 +4,7 @@ package comm
 
 import (
 	"context"
+	"strings"
 
 	"github.com/martins6/acolyte/internal/envelope"
 )
@@ -18,6 +19,26 @@ type Communication interface {
 	Start(ctx context.Context, sink InboundSink) error
 	Send(envelope.Envelope) error
 	Stop() error
+}
+
+// Reconciler settles an inbound whose turn was admitted before a restart. It
+// never admits a new turn; it inspects the marker already recorded.
+type Reconciler func(ctx context.Context, env envelope.Envelope) (ReconcileOutcome, error)
+
+// ReconcilerSetter is implemented by channel adapters that can route admitted
+// turns through the reconciler.
+type ReconcilerSetter interface {
+	SetReconciler(Reconciler)
+}
+
+// SystemNoticeMarker prefixes text that Acolyte generated about its own
+// operation, so a reader can always tell it apart from what the agent said.
+const SystemNoticeMarker = "ACOLYTE SYSTEM MESSAGE:"
+
+// SystemNotice formats an operator-facing notice. Callers must keep the wording
+// factual: a retry is reported as a retry, never as a completed request.
+func SystemNotice(text string) string {
+	return SystemNoticeMarker + " " + strings.TrimSpace(text)
 }
 
 // PendingReply is the durable reply payload stored on an inbound row when

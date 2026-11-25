@@ -16,11 +16,46 @@ import (
 // than the newest collection window, so its reply cannot be bounded reliably.
 var ErrTurnTruncated = errors.New("opencode: turn output exceeded the collection window")
 
+// PromptError is a failed admission request. Ambiguous is true when the request
+// may have reached the service (transport failure, timeout, cancellation, or a
+// 5xx), so retrying could execute it twice. It is false for a definitive
+// rejection that proves the input was not admitted.
+type PromptError struct {
+	Err       error
+	Ambiguous bool
+}
+
+func (e *PromptError) Error() string { return e.Err.Error() }
+func (e *PromptError) Unwrap() error { return e.Err }
+
+// promptOutcomeUnknown reports whether a failed prompt may still have been
+// accepted by the service.
+func promptOutcomeUnknown(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return !apiErr.Permanent()
+	}
+	// Transport errors, timeouts, and cancellations can happen after the
+	// request was sent, so the conservative answer is yes.
+	return true
+}
+
 // syntheticRecheckGap is how long to pause before re-waiting when a queued
 // input has not been delivered yet (a var so tests can shorten it).
 var syntheticRecheckGap = 2 * time.Second
 
 // TurnConfig carries the per-turn settings the callers already hold.
+// Admitted identifies an input that is durably queued on a session before the
+// turn is collected. It is the recovery handle for a turn interrupted by a
+// restart: the pair can be re-collected without admitting the input again.
+type Admitted struct {
+	SessionID string
+	InputID   string
+}
+
 type TurnConfig struct {
 	Workspace string
 	Agent     string
@@ -40,6 +75,20 @@ type TurnConfig struct {
 	// turn waits a bounded time for the subscription to be established before
 	// admitting the prompt, but a subscription failure never fails the turn.
 	OnEvent EventHandler
+	// OnAdmitted, when non-nil, runs after the input is durably admitted and
+	// before the turn is collected. Callers persist the marker here so the turn
+	// can be re-collected after a restart. An error aborts the turn, and the
+	// returned result still carries the admitted marker.
+	OnAdmitted func(Admitted) error
+	// OnCollected, when non-nil, runs after the turn's output is collected and
+	// before the session lock is released. Callers use it to consume a recovery
+	// marker while the turn still owns the session, so recovery cannot collect
+	// the same output concurrently.
+	OnCollected func(*TurnResult) error
+	// OnLockAcquired, when non-nil, runs after the per-session turn lock is
+	// held and before the input is admitted. Callers use it to fence a stale
+	// owner (for example an expired route claim) before OpenCode accepts work.
+	OnLockAcquired func() error
 }
 
 // SyntheticEvent is an external/background event admitted to a session
@@ -120,6 +169,10 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 		}
 	}
 
+	if err := callLockHook(cfg); err != nil {
+		return &TurnResult{SessionID: info.ID}, err
+	}
+
 	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID}, err
@@ -135,11 +188,22 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 
 	item, err := c.Prompt(ctx, info.ID, text)
 	if err != nil {
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, &PromptError{
+			Err:       err,
+			Ambiguous: promptOutcomeUnknown(err),
+		}
+	}
+	if err := admitInput(cfg, info.ID, item); err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
 	}
 	turn, err := c.collectTurn(ctx, info.ID, item.ID)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(turn); err != nil {
+			return turn, err
+		}
 	}
 	return turn, nil
 }
@@ -183,6 +247,10 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 		}
 	}
 
+	if err := callLockHook(cfg); err != nil {
+		return &TurnResult{SessionID: info.ID}, err
+	}
+
 	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID}, err
@@ -198,11 +266,22 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 
 	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, &PromptError{
+			Err:       err,
+			Ambiguous: promptOutcomeUnknown(err),
+		}
+	}
+	if err := admitInput(cfg, info.ID, item); err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
 	}
 	turn, err := c.collectTurn(ctx, info.ID, item.ID)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(turn); err != nil {
+			return turn, err
+		}
 	}
 	return turn, nil
 }
@@ -212,6 +291,21 @@ func inboxID(item *InboxItem) string {
 		return ""
 	}
 	return item.ID
+}
+
+// admitInput hands the newly admitted marker to the caller's persistence hook.
+func admitInput(cfg TurnConfig, sessionID string, item *InboxItem) error {
+	if cfg.OnAdmitted == nil {
+		return nil
+	}
+	return cfg.OnAdmitted(Admitted{SessionID: sessionID, InputID: inboxID(item)})
+}
+
+func callLockHook(cfg TurnConfig) error {
+	if cfg.OnLockAcquired == nil {
+		return nil
+	}
+	return cfg.OnLockAcquired()
 }
 
 // ensureSession creates the session when missing and brings its agent/model in
@@ -327,13 +421,7 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 			return nil, err
 		}
 		if delivered {
-			return &TurnResult{
-				SessionID:    sessionID,
-				ResponseText: assistantText(msgs),
-				InputID:      markerID,
-				MessageIDs:   assistantMessageIDs(msgs),
-				ToolActivity: assistantToolActivity(msgs),
-			}, nil
+			return newTurnResult(sessionID, markerID, msgs), nil
 		}
 		if truncated {
 			// The marker lies beyond the collection window: it is either
@@ -352,6 +440,51 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 			return nil, fmt.Errorf("opencode: timed out waiting for turn %s: %w", markerID, ctx.Err())
 		case <-time.After(syntheticRecheckGap):
 		}
+	}
+}
+
+// CollectDelivered re-collects a turn that was admitted earlier without waiting
+// for it. It performs a single probe, which makes it safe to call from recovery
+// paths: a completed turn is returned in full, and a still-running or
+// still-queued one reports delivered=false instead of blocking or re-prompting.
+func (c *Client) CollectDelivered(ctx context.Context, sessionID, markerID string) (*TurnResult, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	markerID = strings.TrimSpace(markerID)
+	if sessionID == "" || markerID == "" {
+		return nil, false, fmt.Errorf("opencode: session id and marker id are required")
+	}
+	msgs, delivered, truncated, err := c.messagesAfter(ctx, sessionID, markerID)
+	if err != nil {
+		return nil, false, err
+	}
+	if delivered {
+		return newTurnResult(sessionID, markerID, msgs), true, nil
+	}
+	if truncated {
+		// The marker fell outside the collection window. It is either still
+		// queued or buried under a turn too large to bound; only the queue
+		// can tell them apart.
+		pending, err := c.InboxPending(ctx, sessionID, markerID)
+		if err != nil {
+			return nil, false, err
+		}
+		if !pending {
+			return nil, false, ErrTurnTruncated
+		}
+	}
+	return nil, false, nil
+}
+
+// newTurnResult projects the collected messages after a marker into the turn
+// result. Both the waiting and the re-collecting paths use it so a recovered
+// turn is shaped exactly like a live one.
+func newTurnResult(sessionID, markerID string, msgs []Message) *TurnResult {
+	return &TurnResult{
+		SessionID:    sessionID,
+		ResponseText: assistantText(msgs),
+		InputID:      markerID,
+		MessageIDs:   assistantMessageIDs(msgs),
+		ToolActivity: assistantToolActivity(msgs),
 	}
 }
 

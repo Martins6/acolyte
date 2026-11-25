@@ -61,6 +61,28 @@ func (s *Store) GetSessionByOpenCodeID(opencodeSessionID string) (Session, bool,
 	return session, true, nil
 }
 
+// GetTelegramSessionByOpenCodeID returns the newest Telegram-thread mapping for
+// an OpenCode session, ignoring cron-owned mappings that may shadow it.
+func (s *Store) GetTelegramSessionByOpenCodeID(opencodeSessionID string) (Session, bool, error) {
+	opencodeSessionID = strings.TrimSpace(opencodeSessionID)
+	if opencodeSessionID == "" {
+		return Session{}, false, nil
+	}
+	var session Session
+	err := s.db.QueryRow(`SELECT `+sessionColumns+` FROM orch_sessions
+		WHERE opencode_session_id = ? AND thread LIKE 'telegram:%'
+		ORDER BY last_active_at DESC LIMIT 1`, opencodeSessionID).Scan(
+		&session.ID, &session.Thread, &session.OpenCodeSessionID, &session.CreatedAt, &session.LastActiveAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, false, nil
+	}
+	if err != nil {
+		return Session{}, false, fmt.Errorf("orch: get telegram session by opencode id %q: %w", opencodeSessionID, err)
+	}
+	return session, true, nil
+}
+
 // ListSessions returns every thread mapping ordered by last activity.
 func (s *Store) ListSessions() ([]Session, error) {
 	rows, err := s.db.Query(`SELECT ` + sessionColumns + ` FROM orch_sessions
