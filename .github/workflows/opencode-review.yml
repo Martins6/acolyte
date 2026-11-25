@@ -144,7 +144,19 @@ jobs:
               or dead paths, behavior not covered by tests.
             - Intent mismatches: code that does not do what the PR description claims.
 
-            Post EXACTLY ONE PR review and nothing else (no comments):
+            Post EXACTLY ONE PR review - no standalone comments and no issue
+            comments. The review state is the merge gate, so it must match the
+            verdict:
+            - LGTM: `gh pr review <number> --approve --body '<review body>'`
+            - NEEDS_REVIEW: `gh pr review <number> --request-changes --body '<review body>'`
+            Never use `--comment`: a comment review neither requests changes
+            nor clears an earlier changes-requested verdict. The repository
+            allows GitHub Actions to approve pull requests, so `--approve`
+            works.
+            Pass the whole body as one single-quoted argument; never use
+            --body-file, a heredoc, or a file.
+
+            Review body:
             ## Verdict
             LGTM or NEEDS_REVIEW
 
@@ -164,6 +176,45 @@ jobs:
               create the verdict label first with `gh label create` if it does not
               exist, then add the label matching the verdict.
             - Reply with only the word: done
+
+      # The verdict must drive the merge gate deterministically. GitHub keeps a
+      # CHANGES_REQUESTED review blocking until the same reviewer supersedes it
+      # with an approval; the Actions token cannot dismiss reviews on a
+      # protected branch, so an approval is the only way out. That is why this
+      # repository enables can_approve_pull_request_reviews (see
+      # docs/development.md): a later LGTM replaces the earlier
+      # changes-requested verdict. Read the verdict back from the review the
+      # agent submitted for this exact head SHA and make sure the state matches
+      # it. Skipped when the agent posted no review for this revision, so an
+      # agent failure never rewrites the gate for an unreviewed commit.
+      - name: Enforce review verdict
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # One review per run; 100 covers any realistic number of pushes.
+          reviews=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100")
+          latest=$(printf '%s' "$reviews" | jq -c --arg sha "$HEAD_SHA" \
+            '[.[] | select(.user.login == "github-actions[bot]" and .commit_id == $sha)] | last // empty')
+          if [ -z "$latest" ]; then
+            echo "no bot review for $HEAD_SHA; leaving the merge state untouched"
+            exit 0
+          fi
+
+          verdict=$(printf '%s' "$latest" | jq -r '.body' \
+            | awk '/^## Verdict$/ { getline; gsub(/[[:space:]]/, ""); print; exit }')
+          state=$(printf '%s' "$latest" | jq -r '.state')
+          echo "verdict=$verdict state=$state"
+
+          if [ "$verdict" = "LGTM" ] && [ "$state" != "APPROVED" ]; then
+            gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
+              --body "Re-submitted as an approval: this revision returned LGTM. See the review above for details."
+          elif [ "$verdict" = "NEEDS_REVIEW" ] && [ "$state" != "CHANGES_REQUESTED" ]; then
+            gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --request-changes \
+              --body "Re-submitted as a changes-requested review: this revision returned NEEDS_REVIEW. See the review above for the findings."
+          fi
 
       # The action auto-posts the agent's final reply as a PR comment; the
       # review above is the single source of truth, so remove that comment.

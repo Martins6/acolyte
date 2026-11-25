@@ -80,7 +80,13 @@ code. It has a hard 15-minute timeout.
   this repository. Each review posts exactly one PR review whose body starts with a `## Verdict`
   heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching label, and splits findings into
   **Necessary** (must fix) and **Non-necessary** (optional). Every new commit re-runs the review on
-  the latest diff.
+  the latest diff. The review state is the merge gate: `NEEDS_REVIEW` is submitted as a
+  changes-requested review, which blocks the merge on protected branches, and `LGTM` as an approval,
+  which supersedes the bot's earlier changes-requested verdict. A follow-up step reads the verdict
+  back from the review posted for the head SHA and re-submits it in the matching state if the agent
+  used the wrong one, so the gate always follows the verdict. An approval is the only way to clear a
+  changes-requested review here, because the Actions token cannot dismiss reviews on a protected
+  branch.
 - `.github/workflows/pr-guard.yml` — verifies that a PR to `main` comes from `dev` in this repository
   and posts a `pr-guard` commit status on the PR head SHA, from the base-branch definition via
   `pull_request_target`, so a PR cannot redefine its own gate.
@@ -99,6 +105,10 @@ stop-on-red trigger.
    environment — the review and E2E jobs declare that environment). The workflows map it to
    `OPENCODE_API_KEY`, the variable the `opencode-go` provider reads.
 2. Create the `LGTM` and `NEEDS_REVIEW` labels — or skip this, the review creates them on first use.
+3. Enable *Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and
+   approve pull requests* (`can_approve_pull_request_reviews`). Without it `gh pr review --approve`
+   fails and a PR that later passes review stays stuck on the bot's earlier changes-requested
+   verdict.
 
 ## Landing changes
 
