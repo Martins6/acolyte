@@ -51,6 +51,15 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 			}
 			return nil
 		},
+		OnCollected: func(*opencode.TurnResult) error {
+			// Still holding the session lock here: consume the marker before
+			// another process or recovery pass can see it.
+			if err := st.Orch().ClearCronJobPending(job.ID); err != nil {
+				return err
+			}
+			admitted = false
+			return nil
+		},
 	})
 	if err != nil {
 		created := ""
@@ -62,9 +71,7 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		}
 		return "", created, admitted, err
 	}
-	// The turn was collected, so recovery must not collect it again even if
-	// persisting the session mapping below fails.
-	_ = st.Orch().ClearCronJobPending(job.ID)
+	// The marker was consumed by OnCollected while the session lock was held.
 	if _, err := st.Orch().UpsertSession(thread, result.SessionID, s.now()); err != nil {
 		// The output is already collected and will be routed; only the thread
 		// mapping failed, so log it instead of turning a completed run into a

@@ -323,6 +323,110 @@ func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	}
 }
 
+// liveLockingTurn simulates a real turn that holds the session lock through
+// admission and collection, then consumes the marker before releasing it.
+type liveLockingTurn struct {
+	mu            sync.Mutex
+	locked        chan struct{}
+	release       chan struct{}
+	recoveryCalls int
+}
+
+func (t *liveLockingTurn) RunSyntheticTurn(ctx context.Context, _ string, _ opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
+	held, err := lock.AcquireSession(ctx, "ses_live")
+	if err != nil {
+		return nil, err
+	}
+	defer held.Release()
+
+	result := &opencode.TurnResult{SessionID: "ses_live", InputID: "msg_live", ResponseText: "once"}
+	if cfg.OnAdmitted != nil {
+		if err := cfg.OnAdmitted(opencode.Admitted{SessionID: result.SessionID, InputID: result.InputID}); err != nil {
+			return nil, err
+		}
+	}
+	close(t.locked)
+	<-t.release
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(result); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func (t *liveLockingTurn) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
+	return &opencode.SessionInfo{ID: "ses_live"}, nil
+}
+
+func (t *liveLockingTurn) CollectDelivered(_ context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error) {
+	t.mu.Lock()
+	t.recoveryCalls++
+	t.mu.Unlock()
+	return &opencode.TurnResult{SessionID: sessionID, InputID: markerID, ResponseText: "once"}, true, nil
+}
+
+func (t *liveLockingTurn) InboxPending(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+func (t *liveLockingTurn) recoveryCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.recoveryCalls
+}
+
+// TestLiveCollectionConsumesMarkerBeforeSessionLockRelease ensures recovery
+// cannot collect a live turn's output in the gap before the marker is cleared.
+func TestLiveCollectionConsumesMarkerBeforeSessionLockRelease(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	turn := &liveLockingTurn{locked: make(chan struct{}), release: make(chan struct{})}
+	sink := &countingSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	executeDone := make(chan struct{})
+	go func() {
+		svc.execute(context.Background(), pair, job)
+		close(executeDone)
+	}()
+	<-turn.locked
+
+	// Recovery sees the marker while the live turn holds the lock, then waits.
+	recoverDone := make(chan struct{})
+	go func() {
+		svc.recoverPendingTurns(context.Background(), pair)
+		close(recoverDone)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(turn.release)
+	<-executeDone
+	<-recoverDone
+
+	if got := turn.recoveryCount(); got != 0 {
+		t.Errorf("recovery collected %d time(s), want 0 after the live turn consumed its marker", got)
+	}
+	if got := sink.count(); got != 1 {
+		t.Errorf("notifications = %d, want exactly one", got)
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want cleared by the live turn", turns)
+	}
+}
+
 // TestExecuteRoutesCollectedOutputWhenSessionMappingFails ensures a collected
 // turn is still delivered when only persisting the thread mapping fails.
 func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {

@@ -73,6 +73,13 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 			}
 			return nil
 		},
+		OnCollected: func(*opencode.TurnResult) error {
+			if err := st.Orch().ClearCronJobPending(job.ID); err != nil {
+				return err
+			}
+			admitted = false
+			return nil
+		},
 		NotifyUser: func(ctx context.Context, text string) error {
 			return s.sink.NotifyUser(ctx, agent, text)
 		},
