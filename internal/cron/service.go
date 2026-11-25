@@ -1102,6 +1102,9 @@ func (s *Service) queueInboxResponse(pair *agentStore, route orch.CronRoute, res
 	if text == "" {
 		return nil
 	}
+	if len(text) > maxOutputBytes {
+		text = text[:maxOutputBytes] + "\n[output truncated]"
+	}
 	chatID, ok, err := cronReplyChat(pair.store, result.SessionID)
 	if err != nil {
 		return err

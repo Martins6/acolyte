@@ -453,6 +453,27 @@ func TestPromptRouteIntentTruncatesOutput(t *testing.T) {
 	}
 }
 
+func TestInboxResponseCapped(t *testing.T) {
+	reg, _, now := setupCron(t)
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	big := strings.Repeat("x", maxOutputBytes+100)
+	if err := svc.queueInboxResponse(pair, orch.CronRoute{ID: "route_big"}, &opencode.TurnResult{SessionID: "ses_x", ResponseText: big}); err != nil {
+		t.Fatalf("queueInboxResponse() error: %v", err)
+	}
+	outbox, err := pair.store.CommTG().ListOutbox(10)
+	if err != nil || len(outbox) != 1 {
+		t.Fatalf("outbox = %+v, %v", outbox, err)
+	}
+	if len(outbox[0].Text) > maxOutputBytes+len("\n[output truncated]") || !strings.Contains(outbox[0].Text, "truncated") {
+		t.Errorf("outbox text len = %d, want capped and marked", len(outbox[0].Text))
+	}
+}
+
 func TestCronReplyChatRequiresAuthorizedMapping(t *testing.T) {
 	ws := t.TempDir()
 	st, err := store.Open(ws)
