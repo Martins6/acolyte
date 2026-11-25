@@ -96,7 +96,8 @@ func (s *Store) ClaimCronRoute(id, token string, now, leaseUntil time.Time) (boo
 	}
 	result, err := s.db.Exec(`UPDATE orch_cron_routes SET claimed_until = ?, claim_token = ?
 		WHERE id = ? AND delivered_at IS NULL
-		AND (claimed_until IS NULL OR claimed_until <= ?)`, leaseUntil, token, id, now)
+		AND (claimed_until IS NULL OR claimed_until <= ?)
+		AND COALESCE(next_attempt_at, created_at) <= ?`, leaseUntil, token, id, now, now)
 	if err != nil {
 		return false, fmt.Errorf("orch: claim cron route %q: %w", id, err)
 	}

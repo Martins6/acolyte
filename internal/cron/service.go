@@ -1154,6 +1154,24 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 		if !supportsRecovery {
 			return fmt.Errorf("cron: turn runner does not support inbox route recovery")
 		}
+		// Serialize the state recheck and collection with every producer of
+		// this session, as recoverPendingTurns does.
+		release, lockErr := acquireCronSessionLock(ctx, route.OpenCodeSessionID)
+		if lockErr != nil {
+			return lockErr
+		}
+		defer release()
+		current, ok, err = pair.store.Orch().GetCronRoute(route.ID)
+		if err != nil {
+			return err
+		}
+		if !ok || current.DeliveredAt != nil {
+			return nil
+		}
+		if current.ClaimToken != token || current.SourceMessageID != route.SourceMessageID {
+			return errRouteFenced
+		}
+		route = current
 		// An in-flight session may expose partial text; do not accept it.
 		info, err := prober.GetSession(ctx, route.OpenCodeSessionID)
 		if err != nil {
