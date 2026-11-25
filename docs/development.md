@@ -98,7 +98,8 @@ Behaviour worth remembering when changing this code:
   rejected request). Only transient probe errors stay pending.
 - Cron recovery checks `SessionTime.InFlight()` before collecting, and a run that errors after
   admission keeps its `pending_*` marker until a successful collection clears it. Permanent probe
-  errors and truncated output settle the run as incomplete instead of probing forever.
+  errors, truncated output, and an empty delivered turn settle the run as incomplete; a marker still
+  queued in the inbox stays recoverable.
 - Reply envelope IDs are derived from the inbound (`out_<inbound>`) so re-sending is idempotent.
   Acknowledgements (`ack_`) and operator notices (`sys_`) use their own identities so they can never
   occupy or suppress the reply slot.

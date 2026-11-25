@@ -466,6 +466,7 @@ var cronResumeGrace = 5 * time.Minute
 type turnCollector interface {
 	GetSession(ctx context.Context, sessionID string) (*opencode.SessionInfo, error)
 	CollectDelivered(ctx context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error)
+	InboxPending(ctx context.Context, sessionID, itemID string) (bool, error)
 }
 
 // recoverPendingTurns collects the output of runs that were admitted before a
@@ -521,6 +522,28 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			continue
 		}
 		if !delivered {
+			// Not finding the marker in the timeline does not mean the input
+			// was consumed: it may still be queued on an idle session and
+			// execute later. Only settle once the inbox says it is gone.
+			queued, probeErr := collector.InboxPending(ctx, pending.SessionID, pending.MarkerID)
+			if probeErr != nil {
+				if opencode.IsPermanentError(probeErr) {
+					s.settleInterruptedRun(pair.store, job, "the turn could no longer be inspected")
+					continue
+				}
+				log.Printf("cron: inspect pending input for %s: %v", job.Title, probeErr)
+				continue
+			}
+			if queued {
+				continue
+			}
+			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
+			continue
+		}
+		if result == nil || strings.TrimSpace(result.ResponseText) == "" {
+			// The marker was delivered but the turn produced no text: there is
+			// nothing to route, so settle it as incomplete instead of logging
+			// a recovered-output note for empty content.
 			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
 			continue
 		}

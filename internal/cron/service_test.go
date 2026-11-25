@@ -182,12 +182,14 @@ func startTestService(t *testing.T, reg *registry.Registry, routines *routine.Re
 // collectingTurn adds the optional recovery half the cron service probes for.
 type collectingTurn struct {
 	fakeTurn
-	delivered  bool
-	text       string
-	collected  []string
-	session    *opencode.SessionInfo
-	sessionErr error
-	collectErr error
+	delivered    bool
+	text         string
+	collected    []string
+	session      *opencode.SessionInfo
+	sessionErr   error
+	collectErr   error
+	inboxPending bool
+	inboxErr     error
 }
 
 func (f *collectingTurn) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
@@ -206,6 +208,10 @@ func (f *collectingTurn) CollectDelivered(_ context.Context, sessionID, markerID
 		return nil, false, f.collectErr
 	}
 	return &opencode.TurnResult{SessionID: sessionID, InputID: markerID, ResponseText: f.text}, f.delivered, nil
+}
+
+func (f *collectingTurn) InboxPending(context.Context, string, string) (bool, error) {
+	return f.inboxPending, f.inboxErr
 }
 
 func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
@@ -475,6 +481,23 @@ func TestRecoverPendingTurnsSettlesDefinitiveErrors(t *testing.T) {
 			turn:        &collectingTurn{collectErr: opencode.ErrTurnTruncated},
 			wantPending: 0,
 			wantLog:     "exceeded the collection window",
+		},
+		{
+			name:        "empty delivered output",
+			turn:        &collectingTurn{delivered: true, text: "   "},
+			wantPending: 0,
+			wantLog:     "the turn produced no output",
+		},
+		{
+			name:        "queued marker",
+			turn:        &collectingTurn{delivered: false, inboxPending: true},
+			wantPending: 1,
+		},
+		{
+			name:        "consumed with no output",
+			turn:        &collectingTurn{delivered: false, inboxPending: false},
+			wantPending: 0,
+			wantLog:     "the turn produced no output",
 		},
 		{
 			name:        "transient service error",
