@@ -442,7 +442,8 @@ func (s *Store) PendingCronTurns(before time.Time, limit int) ([]PendingTurn, er
 	rows, err := s.db.Query(`SELECT id, pending_session_id, pending_marker_id, pending_kind,
 			pending_started_at, pending_attempts
 		FROM orch_cron_jobs
-		WHERE pending_marker_id != '' AND pending_started_at <= ?
+		WHERE (pending_marker_id != '' OR pending_kind = 'indeterminate')
+		AND pending_started_at <= ?
 		ORDER BY pending_started_at LIMIT ?`, before, limit)
 	if err != nil {
 		return nil, fmt.Errorf("orch: list pending cron turns: %w", err)
@@ -466,6 +467,31 @@ func (s *Store) PendingCronTurns(before time.Time, limit int) ([]PendingTurn, er
 		return nil, fmt.Errorf("orch: scan pending cron turns: %w", err)
 	}
 	return turns, nil
+}
+
+// CronJobPending returns the job's current pending turn. The second result is
+// false when the job has no recoverable pending marker.
+func (s *Store) CronJobPending(id string) (PendingTurn, bool, error) {
+	row := s.db.QueryRow(`SELECT id, pending_session_id, pending_marker_id, pending_kind,
+			pending_started_at, pending_attempts
+		FROM orch_cron_jobs WHERE id = ?`, strings.TrimSpace(id))
+	var turn PendingTurn
+	var startedAt sql.NullTime
+	err := row.Scan(&turn.JobID, &turn.SessionID, &turn.MarkerID, &turn.Kind, &startedAt, &turn.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PendingTurn{}, false, nil
+	}
+	if err != nil {
+		return PendingTurn{}, false, fmt.Errorf("orch: get pending cron turn for %q: %w", id, err)
+	}
+	if startedAt.Valid {
+		value := startedAt.Time
+		turn.StartedAt = &value
+	}
+	if turn.MarkerID == "" && turn.Kind != "indeterminate" {
+		return PendingTurn{}, false, nil
+	}
+	return turn, true, nil
 }
 
 // GetCronJobByID returns one job by its identifier.

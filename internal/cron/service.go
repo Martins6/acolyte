@@ -506,6 +506,16 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			_ = pair.store.Orch().ClearCronJobPending(pending.JobID)
 			continue
 		}
+		if pending.Kind == "indeterminate" || strings.TrimSpace(pending.MarkerID) == "" {
+			// Admission was confirmed but no marker could be saved. There is
+			// nothing to collect; settle the run honestly. Re-check first so a
+			// concurrent pass cannot settle it twice.
+			current, ok, checkErr := pair.store.Orch().CronJobPending(job.ID)
+			if checkErr == nil && ok && current.Kind == "indeterminate" {
+				s.settleInterruptedRun(pair.store, job, "the run could not be tracked reliably")
+			}
+			continue
+		}
 		// Take the shared session lock around the state recheck and collection.
 		// A router, OutboxSink, or another cron turn can otherwise start
 		// between the in-flight check and CollectDelivered, making a busy turn
@@ -515,13 +525,26 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			log.Printf("cron: wait for session lock for %s: %v", job.Title, lockErr)
 			continue
 		}
+		// A concurrent recovery pass may have consumed this marker while we
+		// waited for the lock. Re-read the database state before probing.
+		current, ok, checkErr := pair.store.Orch().CronJobPending(job.ID)
+		if checkErr != nil {
+			releaseLock()
+			log.Printf("cron: recheck pending turn for %s: %v", job.Title, checkErr)
+			continue
+		}
+		if !ok || current.MarkerID != pending.MarkerID || current.SessionID != pending.SessionID || current.Kind != pending.Kind {
+			releaseLock()
+			continue
+		}
 		info, err := collector.GetSession(ctx, pending.SessionID)
 		if err != nil {
-			releaseLock()
 			if opencode.IsPermanentError(err) {
 				s.settleInterruptedRun(pair.store, job, "the session is no longer available")
+				releaseLock()
 				continue
 			}
+			releaseLock()
 			log.Printf("cron: inspect pending session for %s: %v", job.Title, err)
 			continue
 		}
@@ -531,15 +554,17 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		}
 		result, delivered, err := collector.CollectDelivered(ctx, pending.SessionID, pending.MarkerID)
 		if err != nil {
-			releaseLock()
 			if errors.Is(err, opencode.ErrTurnTruncated) {
 				s.settleInterruptedRun(pair.store, job, "the turn output exceeded the collection window")
+				releaseLock()
 				continue
 			}
 			if opencode.IsPermanentError(err) {
 				s.settleInterruptedRun(pair.store, job, "the turn could no longer be collected")
+				releaseLock()
 				continue
 			}
+			releaseLock()
 			log.Printf("cron: collect pending turn for %s: %v", job.Title, err)
 			continue
 		}
@@ -548,31 +573,41 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			// was consumed: it may still be queued on an idle session and
 			// execute later. Only settle once the inbox says it is gone.
 			queued, probeErr := collector.InboxPending(ctx, pending.SessionID, pending.MarkerID)
-			releaseLock()
 			if probeErr != nil {
 				if opencode.IsPermanentError(probeErr) {
 					s.settleInterruptedRun(pair.store, job, "the turn could no longer be inspected")
+					releaseLock()
 					continue
 				}
+				releaseLock()
 				log.Printf("cron: inspect pending input for %s: %v", job.Title, probeErr)
 				continue
 			}
 			if queued {
+				releaseLock()
 				continue
 			}
 			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
+			releaseLock()
 			continue
 		}
-		releaseLock()
 		if result == nil || strings.TrimSpace(result.ResponseText) == "" {
 			// The marker was delivered but the turn produced no text: there is
 			// nothing to route, so settle it as incomplete instead of logging
 			// a recovered-output note for empty content.
 			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
+			releaseLock()
 			continue
 		}
+		// Consume the marker while still holding the session lock, so a
+		// concurrent recovery pass cannot collect and route the same output.
+		if err := pair.store.Orch().ClearCronJobPending(job.ID); err != nil {
+			releaseLock()
+			log.Printf("cron: consume pending turn for %s: %v", job.Title, err)
+			continue
+		}
+		releaseLock()
 
-		_ = pair.store.Orch().ClearCronJobPending(job.ID)
 		note := "recovered output from an interrupted run"
 		if pending.Kind == "routine" {
 			note = "recovered turn output from an interrupted routine run; the routine body did not finish"

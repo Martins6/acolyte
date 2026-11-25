@@ -39,10 +39,16 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 	}, opencode.TurnConfig{
 		Workspace: agent.Workspace,
 		OnAdmitted: func(admittedTurn opencode.Admitted) error {
+			// The callback means OpenCode accepted the input even if the marker
+			// write below fails, so the run is never misclassified as
+			// pre-admission.
+			admitted = true
 			if err := st.Orch().SetCronJobPending(job.ID, admittedTurn.SessionID, admittedTurn.InputID, "turn", s.now()); err != nil {
+				// Keep a durable indeterminate marker so recovery settles the
+				// run instead of routing a terminal failure while it runs.
+				_ = st.Orch().SetCronJobPending(job.ID, "", "", "indeterminate", s.now())
 				return err
 			}
-			admitted = true
 			return nil
 		},
 	})
@@ -60,9 +66,12 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 	// persisting the session mapping below fails.
 	_ = st.Orch().ClearCronJobPending(job.ID)
 	if _, err := st.Orch().UpsertSession(thread, result.SessionID, s.now()); err != nil {
-		return result.ResponseText, result.SessionID, admitted, err
+		// The output is already collected and will be routed; only the thread
+		// mapping failed, so log it instead of turning a completed run into a
+		// recoverable (and already cleared) one.
+		s.logJob(st, job, "warn", "turn collected but session mapping could not be saved: "+err.Error())
 	}
-	return result.ResponseText, result.SessionID, admitted, nil
+	return result.ResponseText, result.SessionID, false, nil
 }
 
 func cronThread(job orch.CronJob) string {

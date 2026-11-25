@@ -107,9 +107,11 @@ Behaviour worth remembering when changing this code:
 - The daemon installs the adapter's reconciler before the adapter starts polling, so an initial replay
   cannot settle a marker-bearing row while recovery is missing. Live user turns are bounded by
   `liveTurnTimeout`; an expired turn hands its durable marker back to reconciliation.
-- Cron recovery takes the shared session lock around the in-flight recheck and collection. A run that
-  errors after admission keeps its marker and logs the transient error without routing a terminal
-  failure, so recovery cannot later contradict that notification.
+- Cron recovery takes the shared session lock, revalidates the database marker, and consumes it before
+  releasing the lock, so concurrent passes cannot route the same output twice. A run that errors after
+  admission keeps its marker and logs the transient error without routing a terminal failure, so
+  recovery cannot later contradict that notification. An unsavable marker is stored as an
+  indeterminate pending run and settled as untracked.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.

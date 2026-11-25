@@ -63,10 +63,14 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 		Now:       s.now,
 		Store:     st,
 		OnAdmitted: func(admittedTurn opencode.Admitted) error {
+			// The callback means OpenCode accepted the input even if the marker
+			// write below fails, so the run is never misclassified as
+			// pre-admission.
+			admitted = true
 			if err := st.Orch().SetCronJobPending(job.ID, admittedTurn.SessionID, admittedTurn.InputID, "routine", s.now()); err != nil {
+				_ = st.Orch().SetCronJobPending(job.ID, "", "", "indeterminate", s.now())
 				return err
 			}
-			admitted = true
 			return nil
 		},
 		NotifyUser: func(ctx context.Context, text string) error {

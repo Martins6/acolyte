@@ -770,15 +770,17 @@ text, and never claims a request completed when it did not.
 adapter, so an initial replay can never mark a marker-bearing row processed while recovery is missing.
 
 **Cron runs recover output, not execution.** A job records the marker of the turn it admitted
-(`orch_cron_jobs.pending_*`). On restart, recovery takes the shared per-session turn lock, checks that
-the session is not still in flight, collects the turn's text, and routes it, then records the run as
-attempted. The marker is cleared only after a successful collection; a run that errored after
+(`orch_cron_jobs.pending_*`). On restart, recovery takes the shared per-session turn lock, revalidates
+the marker, checks that the session is not still in flight, collects the turn's text, and consumes the
+marker before releasing the lock, then routes it. Concurrent passes therefore cannot route the same
+output twice. The marker is cleared only after a successful collection; a run that errored after
 admission leaves it for the next pass and logs the transient error without routing a terminal failure,
-so recovery cannot later contradict it. Permanent probe failures (missing session, truncated output),
-a delivered turn with no text, and a consumed marker with nothing pending settle the run as
-incomplete instead of retrying forever; a marker still queued in the inbox stays recoverable for the
-next pass. Routine bodies are **not** replayed: they mutate files, so a routine interrupted mid-body
-is reported as incomplete rather than re-run or presented as finished.
+so recovery cannot later contradict it. An admission whose marker cannot be saved is recorded as an
+indeterminate pending run and settled as untracked. Permanent probe failures (missing session,
+truncated output), a delivered turn with no text, and a consumed marker with nothing pending settle
+the run as incomplete instead of retrying forever; a marker still queued in the inbox stays recoverable
+for the next pass. Routine bodies are **not** replayed: they mutate files, so a routine interrupted
+mid-body is reported as incomplete rather than re-run or presented as finished.
 
 ---
 
