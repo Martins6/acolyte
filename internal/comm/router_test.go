@@ -1017,28 +1017,80 @@ func TestReconcileSettlesTruncatedTurn(t *testing.T) {
 }
 
 // TestReconcileLeavesTransientProbeErrorPending ensures only definitive
-// outcomes settle; a service error must be retried.
+// outcomes settle; transport, timeout, rate-limit, and 5xx errors stay pending.
 func TestReconcileLeavesTransientProbeErrorPending(t *testing.T) {
-	h := newRouterHarness(t, 4)
-	h.router.turn = &fakeProber{
-		collectErr: errors.New("service unavailable"),
-		session:    &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "transport error", err: errors.New("service unavailable")},
+		{name: "service unavailable", err: &opencode.APIError{Status: 503}},
+		{name: "rate limited", err: &opencode.APIError{Status: 429}},
 	}
-	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(88),
-		envelope.Party{Kind: envelope.PartyUser, ID: "88"},
-		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
-		envelope.Content{Type: envelope.ContentText, Text: "hello"})
-	h.seedAdmitted(t, env, 408, "ses_1", "msg_in")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRouterHarness(t, 4)
+			h.router.turn = &fakeProber{
+				collectErr: tc.err,
+				session:    &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+			}
+			env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(88),
+				envelope.Party{Kind: envelope.PartyUser, ID: "88"},
+				envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+				envelope.Content{Type: envelope.ContentText, Text: "hello"})
+			h.seedAdmitted(t, env, 408, "ses_1", "msg_in")
 
-	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
-	if err == nil {
-		t.Fatal("Reconcile() error = nil, want the transient error surfaced")
+			outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+			if err == nil {
+				t.Fatal("Reconcile() error = nil, want the transient error surfaced")
+			}
+			if outcome != ReconcileStillPending {
+				t.Fatalf("outcome = %v, want still-pending", outcome)
+			}
+			if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+				t.Errorf("outbound events = %+v, want only the healed ack", h.outbound.events)
+			}
+		})
 	}
-	if outcome != ReconcileStillPending {
-		t.Fatalf("outcome = %v, want still-pending", outcome)
+}
+
+// TestReconcileSettlesPermanentProbeError covers probes that cannot heal by
+// retrying: a deleted session or a rejected request must settle with a notice.
+func TestReconcileSettlesPermanentProbeError(t *testing.T) {
+	cases := []struct {
+		name       string
+		sessionErr error
+		collectErr error
+		inboxErr   error
+	}{
+		{name: "missing session", sessionErr: &opencode.APIError{Status: 404}},
+		{name: "rejected collect", collectErr: &opencode.APIError{Status: 400}},
+		{name: "rejected inbox probe", inboxErr: &opencode.APIError{Status: 404}},
 	}
-	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
-		t.Errorf("outbound events = %+v, want only the healed ack", h.outbound.events)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRouterHarness(t, 4)
+			h.router.turn = &fakeProber{
+				sessionErr: tc.sessionErr,
+				collectErr: tc.collectErr,
+				inboxErr:   tc.inboxErr,
+				session:    &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+			}
+			env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(89),
+				envelope.Party{Kind: envelope.PartyUser, ID: "89"},
+				envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+				envelope.Content{Type: envelope.ContentText, Text: "hello"})
+			h.seedAdmitted(t, env, 409, "ses_1", "msg_in")
+
+			outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v, want the permanent error settled", err)
+			}
+			if outcome != ReconcileUnrecoverable {
+				t.Fatalf("outcome = %v, want unrecoverable", outcome)
+			}
+			assertSettledWithNotice(t, h, env)
+		})
 	}
 }
 

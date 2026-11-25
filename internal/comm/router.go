@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -292,6 +293,9 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 
 	info, err := prober.GetSession(ctx, sessionID)
 	if err != nil {
+		if permanentProbeError(err) {
+			return r.settleProbeFailure(ctx, st, agent, env)
+		}
 		// A transient service error must not settle the message; look again.
 		return ReconcileStillPending, err
 	}
@@ -311,6 +315,9 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 				return ReconcileUnrecoverable, settleErr
 			}
 			return ReconcileUnrecoverable, nil
+		}
+		if permanentProbeError(err) {
+			return r.settleProbeFailure(ctx, st, agent, env)
 		}
 		return ReconcileStillPending, err
 	}
@@ -335,6 +342,9 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 	// or it was consumed and produced nothing.
 	pending, err := prober.InboxPending(ctx, sessionID, marker)
 	if err != nil {
+		if permanentProbeError(err) {
+			return r.settleProbeFailure(ctx, st, agent, env)
+		}
 		return ReconcileStillPending, err
 	}
 	if pending {
@@ -411,6 +421,33 @@ func resumeGraceElapsed(item commtg.InboxItem, now time.Time) bool {
 		start = *item.AdmittedAt
 	}
 	return now.Sub(start) >= resumeGraceWindow
+}
+
+// permanentProbeError reports whether a recovery probe failed in a way that
+// retrying cannot fix: a missing session or a rejected request. Transport
+// failures, timeouts, rate limits, and 5xx responses remain pending.
+func permanentProbeError(err error) bool {
+	var apiErr *opencode.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+		http.StatusNotFound, http.StatusGone, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
+// settleProbeFailure turns a permanent probe failure into a terminal notice.
+// The session or marker is gone, so retrying can never produce a reply.
+func (r *Router) settleProbeFailure(ctx context.Context, st *store.Store, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
+	notice := SystemNotice("your message could not be recovered because its session can no longer be read. Send it again to retry.")
+	if err := r.settleNotice(ctx, st, agent, env, notice); err != nil {
+		return ReconcileUnrecoverable, err
+	}
+	return ReconcileUnrecoverable, nil
 }
 
 // settleNotice sends a terminal operator notice and marks the inbound

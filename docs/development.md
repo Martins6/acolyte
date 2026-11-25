@@ -94,7 +94,8 @@ Behaviour worth remembering when changing this code:
 - Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
   and only into a fresh session for input that provably never executed.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
-  output, or a consumed marker with nothing to collect. Only transient probe errors stay pending.
+  output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
+  rejected request). Only transient probe errors stay pending.
 - Cron recovery checks `SessionTime.InFlight()` before collecting, and a run that errors after
   admission keeps its `pending_*` marker until a successful collection clears it.
 - Reply envelope IDs are derived from the inbound (`out_<inbound>`) so re-sending is idempotent.

@@ -726,7 +726,8 @@ writing the acknowledgement.
 **Terminal outcomes are settled, not retried.** A finished turn with no text, a truncated output that
 exceeds the collection window, or a consumed marker that produced nothing is definitive: it is
 settled with an `ACOLYTE SYSTEM MESSAGE:` notice and marked processed. Only transient probe errors
-(service unavailable, timeout) stay pending for the next pass.
+(service unavailable, timeout, rate limit, 5xx) stay pending for the next pass; permanent probe
+failures (missing session, rejected request) settle the same way.
 
 **Escalation is bounded and honest.** After a `resumeGraceWindow` (5 min), a stranded turn is
 abandoned: the session is interrupted, the thread→session mapping is forgotten, and the marker is
