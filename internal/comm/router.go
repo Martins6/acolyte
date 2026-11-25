@@ -204,10 +204,15 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	// by this pair instead of admitting the message a second time. The same
 	// hook enqueues the durable acknowledgement, so even a turn that never
 	// finishes leaves the user with a retryable outbox row instead of silence.
-	cfg.OnAdmitted = func(admitted opencode.Admitted) error {
-		if err := st.CommTG().MarkInboundAdmitted(env.ID, admitted.SessionID, admitted.InputID, r.now()); err != nil &&
-			!errors.Is(err, commtg.ErrInboundNotFound) {
-			return err
+	admitted := false
+	cfg.OnAdmitted = func(admittedTurn opencode.Admitted) error {
+		if err := st.CommTG().MarkInboundAdmitted(env.ID, admittedTurn.SessionID, admittedTurn.InputID, r.now()); err != nil {
+			if !errors.Is(err, commtg.ErrInboundNotFound) {
+				return err
+			}
+		} else {
+			// Only a successful write proves recovery can re-collect the turn.
+			admitted = true
 		}
 		if err := r.sendAck(ctx, agent, env); err != nil {
 			// The marker is already durable, so the turn is recoverable.
@@ -225,7 +230,7 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 
 	if turnErr != nil {
-		if r.inboundAdmitted(st, env.ID) {
+		if admitted {
 			// The marker is durable, so recovery can still collect the real
 			// reply. Do not send an error on the reply identity: it would both
 			// settle the row and make the outbox suppress the recovered reply.
@@ -644,17 +649,6 @@ func hasMediaPathLine(text, path string) bool {
 		}
 	}
 	return false
-}
-
-// inboundAdmitted reports whether the inbound already carries a durable turn
-// marker. Recovery can re-collect such a turn, so it must not be settled by the
-// admission error path.
-func (r *Router) inboundAdmitted(st *store.Store, envelopeID string) bool {
-	item, found, err := st.CommTG().GetInboxByEnvelope(envelopeID)
-	if err != nil || !found {
-		return false
-	}
-	return strings.TrimSpace(item.OpenCodeMessageID) != "" && strings.TrimSpace(item.OpenCodeSessionID) != ""
 }
 
 func (r *Router) linkInbound(st *store.Store, env envelope.Envelope, result *opencode.TurnResult) error {
