@@ -473,6 +473,11 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		}
 	}
 	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
+	if routed {
+		// Deliver the just-persisted route intent now instead of waiting for
+		// the next tick.
+		s.retryRoutes(ctx, pair)
+	}
 }
 
 // cronResumeGrace is how long an admitted cron turn may sit uncollected before
@@ -626,59 +631,49 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			releaseLock()
 			continue
 		}
-		meta, metaErr := parseJobMeta(job.Meta)
-		if metaErr != nil {
+		if pending.Kind == "turn" {
+			// Persist the route intent (notify-user, inbox, or log) before
+			// consuming the marker. Recovery then only needs the durable
+			// intent, and a crash cannot reroute the output.
+			if err := s.addPromptRouteIntent(pair.store, pair.agent, job, pending.MarkerID, result); err != nil {
+				releaseLock()
+				log.Printf("cron: persist recovered route for %s: %v", job.Title, err)
+				continue
+			}
+			cleared, clearErr := pair.store.Orch().ClearCronJobPendingIf(job.ID, pending.MarkerID)
+			if clearErr != nil {
+				releaseLock()
+				log.Printf("cron: consume pending turn for %s: %v", job.Title, clearErr)
+				continue
+			}
+			if !cleared {
+				releaseLock()
+				continue
+			}
 			releaseLock()
-			s.settleInterruptedRun(pair.store, job, pending.MarkerID, "recovered output could not be routed: "+metaErr.Error())
+			s.logJob(pair.store, job, "info", "recovered output from an interrupted run")
+			_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
 			continue
 		}
-		notify := pending.Kind == "turn" && (meta.OnSuccess == "" || meta.OnSuccess == "notify-user")
-		if notify {
-			// Queue the user notification with the deterministic outbox ID
-			// before consuming the marker; a crash cannot lose the response.
-			routed, enqueueErr := s.enqueuePromptOutput(pair.store, job, pending.MarkerID, result)
-			if enqueueErr != nil {
-				releaseLock()
-				log.Printf("cron: queue recovered output for %s: %v", job.Title, enqueueErr)
-				continue
-			}
-			if routed {
-				cleared, clearErr := pair.store.Orch().ClearCronJobPendingIf(job.ID, pending.MarkerID)
-				if clearErr != nil {
-					releaseLock()
-					log.Printf("cron: consume pending turn for %s: %v", job.Title, clearErr)
-					continue
-				}
-				if !cleared {
-					releaseLock()
-					continue
-				}
-				releaseLock()
-				s.logJob(pair.store, job, "info", "recovered output from an interrupted run")
-				_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
-				continue
-			}
-			// No allowed chat yet: fall through to the normal route, keeping
-			// the marker pending until that route succeeds.
-		}
-		// Non-notify routes (and notify-user with no chat) keep the marker as
-		// their durable intent. Release the session lock before routing: inbox
-		// routing may start a turn on this same session.
+
+		// Routine output has no user-facing route. Keep the marker until the
+		// configured route (normally a log) succeeds.
 		releaseLock()
-		note := "recovered output from an interrupted run"
-		if pending.Kind == "routine" {
-			note = "recovered turn output from an interrupted routine run; the routine body did not finish"
-		}
+		note := "recovered turn output from an interrupted routine run; the routine body did not finish"
 		s.logJob(pair.store, job, "info", note)
 		if text := strings.TrimSpace(result.ResponseText); text != "" {
-			routeErr := s.route(ctx, pair.store, pair.agent, job, meta, text, result.SessionID, true)
-			routed := routeErr == nil
-			if routeErr != nil {
-				routed, _ = s.persistRoute(pair.store, pair.agent, job, routeErr)
-			}
-			if !routed {
-				s.logJob(pair.store, job, "error", "routing recovered output failed: "+routeErr.Error())
+			meta, metaErr := parseJobMeta(job.Meta)
+			if metaErr != nil {
+				log.Printf("cron: parse recovered routine meta for %s: %v", job.Title, metaErr)
 				continue
+			}
+			routed := true
+			if routeErr := s.route(ctx, pair.store, pair.agent, job, meta, text, result.SessionID, true); routeErr != nil {
+				routed, _ = s.persistRoute(pair.store, pair.agent, job, routeErr)
+				if !routed {
+					s.logJob(pair.store, job, "error", "routing recovered output failed: "+routeErr.Error())
+					continue
+				}
 			}
 		}
 		cleared, clearErr := pair.store.Orch().ClearCronJobPendingIf(job.ID, pending.MarkerID)
@@ -715,43 +710,67 @@ func cronOutputID(jobID, markerID string) string {
 // enqueuePromptOutput durably queues a prompt result before its recovery marker
 // is consumed. It returns false when there is no allowed chat to deliver to, so
 // the caller falls back to its normal route.
-func (s *Service) enqueuePromptOutput(st *store.Store, job orch.CronJob, markerID string, result *opencode.TurnResult) (bool, error) {
+// addPromptRouteIntent durably records what should happen to a collected
+// prompt result before its recovery marker is consumed. Every route policy is
+// represented, so a crash at any point can be recovered idempotently.
+func (s *Service) addPromptRouteIntent(st *store.Store, agent registry.Agent, job orch.CronJob, markerID string, result *opencode.TurnResult) error {
+	markerID = strings.TrimSpace(markerID)
+	if markerID == "" {
+		return fmt.Errorf("cron: prompt marker is required")
+	}
 	text := ""
+	sessionID := ""
+	sourceID := ""
 	if result != nil {
 		text = strings.TrimSpace(result.ResponseText)
-	}
-	if text == "" || strings.TrimSpace(markerID) == "" {
-		return false, nil
-	}
-	chat, ok, err := st.CommTG().LatestAllowedChat()
-	if err != nil {
-		return false, err
-	}
-	if !ok || chat.ChatID == 0 {
-		return false, nil
-	}
-	sourceID := ""
-	sessionID := ""
-	if result != nil {
 		sessionID = result.SessionID
 		if len(result.MessageIDs) > 0 {
 			sourceID = result.MessageIDs[len(result.MessageIDs)-1]
 		}
 	}
+	if text == "" {
+		return nil
+	}
+	meta, metaErr := parseJobMeta(job.Meta)
+	if metaErr != nil {
+		return metaErr
+	}
+	action := meta.OnSuccess
+	if action == "" {
+		action = "notify-user"
+	}
+	switch action {
+	case "notify-user", "inbox", "log":
+	default:
+		action = "notify-user"
+	}
+	chatID := int64(0)
+	if action == "notify-user" {
+		chat, ok, err := st.CommTG().LatestAllowedChat()
+		if err != nil {
+			return err
+		}
+		if ok {
+			chatID = chat.ChatID
+		}
+	}
 	id := cronOutputID(job.ID, markerID)
-	_, err = st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+	routeMeta, _ := json.Marshal(map[string]any{"cron_job": job.Title, "cron_route": id})
+	route := orch.CronRoute{
 		ID:                id,
-		EnvelopeID:        id,
-		ChatID:            chat.ChatID,
+		AgentTarget:       agent.Name,
+		Action:            action,
+		JobID:             job.ID,
+		ChatID:            chatID,
 		Text:              text,
 		OpenCodeSessionID: sessionID,
-		SourceMessageID:   sourceID,
+		Meta:              string(routeMeta),
 		CreatedAt:         s.now(),
-	})
-	if err != nil {
-		return false, err
 	}
-	return true, nil
+	if action == "notify-user" {
+		route.SourceMessageID = sourceID
+	}
+	return st.Orch().AddCronRoute(route)
 }
 
 // cronPendingToken returns a unique generation for a non-collectable pending
@@ -967,23 +986,121 @@ func (s *Service) removeMemoryRoute(workspace, id string) {
 	}
 }
 
-func (s *Service) retryRoutes(_ context.Context, pair *agentStore) {
+// errRouteStillPending means a route's admitted input is still queued; retry
+// later without re-admitting it.
+var errRouteStillPending = errors.New("cron: route input still pending")
+
+// deliverRoute performs one durable route intent according to its action.
+func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch.CronRoute) error {
+	switch route.Action {
+	case "inbox":
+		return s.deliverInboxRoute(ctx, pair, route)
+	case "log":
+		job, err := pair.store.Orch().GetCronJobByID(route.JobID)
+		if err != nil {
+			job = orch.CronJob{ID: route.JobID, Title: route.JobID}
+		}
+		s.logJob(pair.store, job, "info", "output: "+route.Text)
+		return nil
+	default:
+		chatID := route.ChatID
+		if chatID == 0 {
+			chat, ok, err := pair.store.CommTG().LatestAllowedChat()
+			if err != nil {
+				return err
+			}
+			if !ok {
+				// No registered Telegram chat: let the configured sink try
+				// (tests and alternate sinks), then retry if it fails.
+				return s.sink.NotifyUser(ctx, pair.agent, route.Text)
+			}
+			chatID = chat.ChatID
+		}
+		_, err := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
+			ID:                route.ID,
+			EnvelopeID:        route.ID,
+			ChatID:            chatID,
+			Text:              route.Text,
+			OpenCodeSessionID: route.OpenCodeSessionID,
+			SourceMessageID:   route.SourceMessageID,
+			CreatedAt:         s.now(),
+		})
+		return err
+	}
+}
+
+// deliverInboxRoute admits the output as a synthetic input, or collects the
+// input a previous attempt already admitted. The route row stores that marker,
+// so a crash never re-admits the event.
+func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route orch.CronRoute) error {
+	prober, supportsRecovery := s.turn.(turnCollector)
+	if route.SourceMessageID != "" {
+		if !supportsRecovery {
+			return fmt.Errorf("cron: turn runner does not support inbox route recovery")
+		}
+		result, delivered, err := prober.CollectDelivered(ctx, route.OpenCodeSessionID, route.SourceMessageID)
+		if err != nil {
+			if errors.Is(err, opencode.ErrTurnTruncated) || opencode.IsPermanentError(err) {
+				// The admitted turn cannot produce bounded output; settle the
+				// route instead of re-admitting it.
+				return nil
+			}
+			return err
+		}
+		if delivered {
+			_ = result
+			return nil
+		}
+		pending, err := prober.InboxPending(ctx, route.OpenCodeSessionID, route.SourceMessageID)
+		if err != nil {
+			return err
+		}
+		if pending {
+			return errRouteStillPending
+		}
+		return nil
+	}
+	if s.turn == nil {
+		return fmt.Errorf("cron: turn runner is not configured")
+	}
+	sessionID := route.OpenCodeSessionID
+	if sessionID == "" {
+		if session, ok, err := pair.store.Orch().LatestSession(); err == nil && ok {
+			sessionID = session.OpenCodeSessionID
+		}
+	}
+	if sessionID == "" {
+		return fmt.Errorf("cron: inbox route has no session")
+	}
+	meta := map[string]any{}
+	if route.Meta != "" {
+		_ = json.Unmarshal([]byte(route.Meta), &meta)
+	}
+	_, err := s.turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
+		Text:        route.Text,
+		Description: "Cron inbox event",
+		Metadata:    meta,
+		Delivery:    "queue",
+	}, opencode.TurnConfig{
+		Workspace: pair.agent.Workspace,
+		OnAdmitted: func(admitted opencode.Admitted) error {
+			return pair.store.Orch().SetCronRouteAdmitted(route.ID, admitted.SessionID, admitted.InputID)
+		},
+		OnCollected: func(*opencode.TurnResult) error {
+			return pair.store.Orch().MarkCronRouteDelivered(route.ID, s.now())
+		},
+	})
+	return err
+}
+
+func (s *Service) retryRoutes(ctx context.Context, pair *agentStore) {
 	if routes, err := pair.store.Orch().DueCronRoutes(s.now(), 20); err != nil {
 		log.Printf("cron: list due routes for %s: %v", pair.agent.Name, err)
 	} else {
 		for _, route := range routes {
-			_, enqueueErr := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
-				ID:                route.ID,
-				EnvelopeID:        route.ID,
-				ChatID:            route.ChatID,
-				Text:              route.Text,
-				OpenCodeSessionID: route.OpenCodeSessionID,
-				SourceMessageID:   route.SourceMessageID,
-				CreatedAt:         s.now(),
-			})
-			if enqueueErr != nil {
+			if err := s.deliverRoute(ctx, pair, route); err != nil {
 				attempts := route.Attempts + 1
-				_ = pair.store.Orch().MarkCronRouteRetry(route.ID, attempts, s.now().Add(routeBackoff(attempts)), enqueueErr.Error())
+				_ = pair.store.Orch().MarkCronRouteRetry(route.ID, attempts, s.now().Add(routeBackoff(attempts)), err.Error())
 				continue
 			}
 			_ = pair.store.Orch().MarkCronRouteDelivered(route.ID, s.now())

@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "orch"
-	version = 3
+	version = 4
 )
 
 // Migrate creates or upgrades the orchestrator schema.
@@ -45,6 +45,12 @@ func Migrate(db *sql.DB) error {
 		}
 		current = 3
 	}
+	if current < 4 {
+		if err := migrateV4(db); err != nil {
+			return fmt.Errorf("orch: migrate to version 4: %w", err)
+		}
+		current = 4
+	}
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
 		ON CONFLICT(module) DO UPDATE SET version = excluded.version`, module, version); err != nil {
 		return fmt.Errorf("orch: record schema version: %w", err)
@@ -70,6 +76,32 @@ func migrateV3(db *sql.DB) error {
 		{"pending_kind", `ALTER TABLE orch_cron_jobs ADD COLUMN pending_kind TEXT NOT NULL DEFAULT ''`},
 		{"pending_started_at", `ALTER TABLE orch_cron_jobs ADD COLUMN pending_started_at DATETIME`},
 		{"pending_attempts", `ALTER TABLE orch_cron_jobs ADD COLUMN pending_attempts INTEGER NOT NULL DEFAULT 0`},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.Exec(addition.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV4 makes cron route intents action-aware and ties them to a job so
+// inbox/log delivery can be recovered idempotently.
+func migrateV4(db *sql.DB) error {
+	columns, err := tableColumns(db, "orch_cron_routes")
+	if err != nil {
+		return err
+	}
+	additions := []struct {
+		name string
+		ddl  string
+	}{
+		{"action", `ALTER TABLE orch_cron_routes ADD COLUMN action TEXT NOT NULL DEFAULT 'notify-user'`},
+		{"job_id", `ALTER TABLE orch_cron_routes ADD COLUMN job_id TEXT NOT NULL DEFAULT ''`},
+		{"meta", `ALTER TABLE orch_cron_routes ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'`},
 	}
 	for _, addition := range additions {
 		if columns[addition.name] {

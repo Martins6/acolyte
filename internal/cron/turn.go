@@ -31,8 +31,6 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		}
 	}
 
-	meta, _ := parseJobMeta(job.Meta)
-	durableRoute := meta.OnSuccess == "" || meta.OnSuccess == "notify-user"
 	admitted := false
 	collected := false
 	routed := false
@@ -59,20 +57,11 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		OnCollected: func(turn *opencode.TurnResult) error {
 			collected = true
 			generation = turn.InputID
-			// For the user notification route, queue the output with a
-			// deterministic ID before consuming the marker. For every other
-			// route, keep the marker pending until execute has routed the
-			// output; the marker itself is the durable recovery handle.
-			if durableRoute {
-				var routeErr error
-				routed, routeErr = s.enqueuePromptOutput(st, job, turn.InputID, turn)
-				if routeErr != nil {
-					return routeErr
-				}
-			}
-			if !routed {
-				admitted = true
-				return nil
+			// Persist the route intent first, with a deterministic ID both live
+			// execution and recovery derive. The marker is consumed only after
+			// the intent exists, so a crash cannot lose or reroute the output.
+			if err := s.addPromptRouteIntent(st, agent, job, turn.InputID, turn); err != nil {
+				return err
 			}
 			// Still holding the session lock here: consume the exact marker
 			// before another process or recovery pass can see it.
@@ -84,6 +73,7 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 				return fmt.Errorf("cron: pending marker for %s was replaced", job.Title)
 			}
 			admitted = false
+			routed = true
 			generation = ""
 			return nil
 		},

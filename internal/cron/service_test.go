@@ -337,6 +337,41 @@ func TestRoutineKeepsRunPendingAfterTurnCollected(t *testing.T) {
 	}
 }
 
+// TestInboxRouteRecoversAdmittedTurn ensures a route whose synthetic input was
+// already admitted is collected instead of re-admitted.
+func TestInboxRouteRecoversAdmittedTurn(t *testing.T) {
+	reg, _, now := setupCron(t)
+	turn := &collectingTurn{delivered: true, text: "the event result"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID:                "route_inbox",
+		AgentTarget:       "valet",
+		Action:            "inbox",
+		Text:              "event",
+		OpenCodeSessionID: "ses_x",
+		SourceMessageID:   "msg_x",
+		CreatedAt:         now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	if len(turn.collected) != 1 || turn.collected[0] != "msg_x" {
+		t.Errorf("collected = %v, want the already-admitted marker", turn.collected)
+	}
+	if turn.calls != 0 {
+		t.Errorf("synthetic turns = %d, want 0 (never re-admit)", turn.calls)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 || routes[0].DeliveredAt == nil {
+		t.Errorf("routes = %+v, %v; want delivered after collection", routes, err)
+	}
+}
+
 func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{
@@ -792,8 +827,9 @@ func TestPromptInboxRouteKeepsMarkerUntilRouted(t *testing.T) {
 		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
 		Enabled: true, CreatedAt: now, Meta: `{"on_success":"inbox"}`,
 	})
+	turn := &fakeTurn{response: "the answer"}
 	sink := &fakeSink{}
-	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "the answer"}, "", now)
+	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
@@ -803,17 +839,21 @@ func TestPromptInboxRouteKeepsMarkerUntilRouted(t *testing.T) {
 
 	svc.execute(context.Background(), pair, job)
 
-	if len(sink.inboxed) != 1 || sink.inboxed[0] != "the answer" {
-		t.Errorf("inboxed = %v, want the collected answer", sink.inboxed)
+	if len(turn.events) != 2 || turn.events[1].Text != "the answer" {
+		t.Errorf("events = %+v, want the prompt and the inbox event", turn.events)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 || routes[0].DeliveredAt == nil || routes[0].Action != "inbox" {
+		t.Errorf("routes = %+v, %v; want one delivered inbox route", routes, err)
 	}
 	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
 		t.Errorf("pending turns = %+v, %v; want cleared after routing", turns, err)
 	}
 }
 
-// TestPromptWithoutChatKeepsMarkerPending ensures the marker survives when the
-// notification route cannot deliver, so recovery can retry instead of losing it.
-func TestPromptWithoutChatKeepsMarkerPending(t *testing.T) {
+// TestPromptWithoutChatKeepsDurableRouteIntent ensures the output survives as
+// a durable route intent even when no notification chat exists yet.
+func TestPromptWithoutChatKeepsDurableRouteIntent(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{
 		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
@@ -830,12 +870,12 @@ func TestPromptWithoutChatKeepsMarkerPending(t *testing.T) {
 
 	svc.execute(context.Background(), pair, job)
 
-	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
-	if err != nil {
-		t.Fatalf("CronJobPending() error: %v", err)
+	if _, ok, err := pair.store.Orch().CronJobPending(job.ID); err != nil || ok {
+		t.Errorf("pending marker = ok %v, err %v; want it consumed after the route intent", ok, err)
 	}
-	if !ok || pending.MarkerID != "msg_fake" {
-		t.Errorf("pending = %+v, ok = %v; want the marker kept for recovery", pending, ok)
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 || routes[0].Action != "notify-user" || routes[0].Text != "the answer" || routes[0].DeliveredAt != nil {
+		t.Errorf("routes = %+v, %v; want one pending notify-user route intent", routes, err)
 	}
 }
 
@@ -922,6 +962,7 @@ func TestAdmittedPendingRetriesTransientWrite(t *testing.T) {
 
 	svc.turn = &collectingTurn{delivered: true, text: "recovered"}
 	svc.recoverPendingTurns(context.Background(), pair)
+	svc.retryRoutes(context.Background(), pair)
 	if len(sink.notified) != 1 || sink.notified[0] != "recovered" {
 		t.Errorf("notified = %v, want the recovered output", sink.notified)
 	}
@@ -1059,6 +1100,7 @@ func TestRecoverPendingTurnsConcurrentPassesRouteOnce(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	svc.retryRoutes(context.Background(), pair)
 
 	if got := collector.count(); got != 1 {
 		t.Errorf("collect calls = %d, want 1", got)

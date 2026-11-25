@@ -11,10 +11,13 @@ import (
 type CronRoute struct {
 	ID                string     `json:"id"`
 	AgentTarget       string     `json:"agent_target"`
-	ChatID            int64      `json:"chat_id"`
+	Action            string     `json:"action"`
+	JobID             string     `json:"job_id,omitempty"`
+	ChatID            int64      `json:"chat_id,omitempty"`
 	Text              string     `json:"text"`
 	OpenCodeSessionID string     `json:"opencode_session_id,omitempty"`
 	SourceMessageID   string     `json:"source_message_id,omitempty"`
+	Meta              string     `json:"meta,omitempty"`
 	Attempts          int        `json:"attempts"`
 	NextAttemptAt     *time.Time `json:"next_attempt_at,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
@@ -22,16 +25,20 @@ type CronRoute struct {
 	DeliveredAt       *time.Time `json:"delivered_at,omitempty"`
 }
 
-const cronRouteColumns = `id, agent_target, chat_id, text, opencode_session_id,
-	source_message_id, attempts, next_attempt_at, last_error, created_at, delivered_at`
+const cronRouteColumns = `id, agent_target, action, job_id, chat_id, text, opencode_session_id,
+	source_message_id, meta, attempts, next_attempt_at, last_error, created_at, delivered_at`
 
 // AddCronRoute persists a delivery intent. The ID is idempotent.
 func (s *Store) AddCronRoute(route CronRoute) error {
 	if strings.TrimSpace(route.Text) == "" {
 		return fmt.Errorf("orch: cron route text is required")
 	}
-	if route.ChatID == 0 {
-		return fmt.Errorf("orch: cron route chat id is required")
+	route.Action = strings.TrimSpace(route.Action)
+	if route.Action == "" {
+		route.Action = "notify-user"
+	}
+	if route.Meta == "" {
+		route.Meta = "{}"
 	}
 	if route.ID == "" {
 		route.ID = newID()
@@ -44,14 +51,27 @@ func (s *Store) AddCronRoute(route CronRoute) error {
 		route.NextAttemptAt = &next
 	}
 	_, err := s.db.Exec(`INSERT OR IGNORE INTO orch_cron_routes
-		(id, agent_target, chat_id, text, opencode_session_id, source_message_id,
-		 attempts, next_attempt_at, last_error, created_at, delivered_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-		route.ID, route.AgentTarget, route.ChatID, route.Text, route.OpenCodeSessionID,
-		route.SourceMessageID, route.Attempts, route.NextAttemptAt, route.LastError, route.CreatedAt,
+		(id, agent_target, action, job_id, chat_id, text, opencode_session_id, source_message_id,
+		 meta, attempts, next_attempt_at, last_error, created_at, delivered_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+		route.ID, route.AgentTarget, route.Action, route.JobID, route.ChatID, route.Text,
+		route.OpenCodeSessionID, route.SourceMessageID, route.Meta, route.Attempts,
+		route.NextAttemptAt, route.LastError, route.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("orch: add cron route: %w", err)
+	}
+	return nil
+}
+
+// SetCronRouteAdmitted records the session and marker of an inbox route's
+// synthetic turn, so a retry collects instead of re-admitting it.
+func (s *Store) SetCronRouteAdmitted(id, sessionID, markerID string) error {
+	_, err := s.db.Exec(`UPDATE orch_cron_routes
+		SET opencode_session_id = ?, source_message_id = ?
+		WHERE id = ? AND delivered_at IS NULL`, sessionID, markerID, id)
+	if err != nil {
+		return fmt.Errorf("orch: set cron route admitted %q: %w", id, err)
 	}
 	return nil
 }
@@ -73,9 +93,9 @@ func (s *Store) DueCronRoutes(now time.Time, limit int) ([]CronRoute, error) {
 	for rows.Next() {
 		var route CronRoute
 		var nextAttempt, deliveredAt sql.NullTime
-		if err := rows.Scan(&route.ID, &route.AgentTarget, &route.ChatID, &route.Text,
-			&route.OpenCodeSessionID, &route.SourceMessageID, &route.Attempts,
-			&nextAttempt, &route.LastError, &route.CreatedAt, &deliveredAt); err != nil {
+		if err := rows.Scan(&route.ID, &route.AgentTarget, &route.Action, &route.JobID, &route.ChatID,
+			&route.Text, &route.OpenCodeSessionID, &route.SourceMessageID, &route.Meta,
+			&route.Attempts, &nextAttempt, &route.LastError, &route.CreatedAt, &deliveredAt); err != nil {
 			return nil, fmt.Errorf("orch: scan cron route: %w", err)
 		}
 		route.NextAttemptAt = timePtr(nextAttempt)
@@ -101,9 +121,9 @@ func (s *Store) ListCronRoutes() ([]CronRoute, error) {
 	for rows.Next() {
 		var route CronRoute
 		var nextAttempt, deliveredAt sql.NullTime
-		if err := rows.Scan(&route.ID, &route.AgentTarget, &route.ChatID, &route.Text,
-			&route.OpenCodeSessionID, &route.SourceMessageID, &route.Attempts,
-			&nextAttempt, &route.LastError, &route.CreatedAt, &deliveredAt); err != nil {
+		if err := rows.Scan(&route.ID, &route.AgentTarget, &route.Action, &route.JobID, &route.ChatID,
+			&route.Text, &route.OpenCodeSessionID, &route.SourceMessageID, &route.Meta,
+			&route.Attempts, &nextAttempt, &route.LastError, &route.CreatedAt, &deliveredAt); err != nil {
 			return nil, fmt.Errorf("orch: scan cron route: %w", err)
 		}
 		route.NextAttemptAt = timePtr(nextAttempt)
