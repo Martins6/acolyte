@@ -46,7 +46,7 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 			if err := st.Orch().SetCronJobPending(job.ID, admittedTurn.SessionID, admittedTurn.InputID, "turn", s.now()); err != nil {
 				// Keep a durable indeterminate marker so recovery settles the
 				// run instead of routing a terminal failure while it runs.
-				_ = st.Orch().SetCronJobPending(job.ID, "", "", "indeterminate", s.now())
+				_ = st.Orch().SetCronJobPending(job.ID, "", cronPendingToken(), "indeterminate", s.now())
 				return err
 			}
 			return nil

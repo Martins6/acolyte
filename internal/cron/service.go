@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/martins6/acolyte/internal/comm"
+	"github.com/martins6/acolyte/internal/envelope"
 	"github.com/martins6/acolyte/internal/lock"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
@@ -517,7 +518,7 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			}
 			current, ok, checkErr := pair.store.Orch().CronJobPending(job.ID)
 			if checkErr == nil && ok && current.Kind == pending.Kind {
-				s.settleInterruptedRun(pair.store, job, reason)
+				s.settleInterruptedRun(pair.store, job, pending.MarkerID, reason)
 			}
 			continue
 		}
@@ -545,7 +546,7 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		info, err := collector.GetSession(ctx, pending.SessionID)
 		if err != nil {
 			if opencode.IsPermanentError(err) {
-				s.settleInterruptedRun(pair.store, job, "the session is no longer available")
+				s.settleInterruptedRun(pair.store, job, pending.MarkerID, "the session is no longer available")
 				releaseLock()
 				continue
 			}
@@ -560,12 +561,12 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		result, delivered, err := collector.CollectDelivered(ctx, pending.SessionID, pending.MarkerID)
 		if err != nil {
 			if errors.Is(err, opencode.ErrTurnTruncated) {
-				s.settleInterruptedRun(pair.store, job, "the turn output exceeded the collection window")
+				s.settleInterruptedRun(pair.store, job, pending.MarkerID, "the turn output exceeded the collection window")
 				releaseLock()
 				continue
 			}
 			if opencode.IsPermanentError(err) {
-				s.settleInterruptedRun(pair.store, job, "the turn could no longer be collected")
+				s.settleInterruptedRun(pair.store, job, pending.MarkerID, "the turn could no longer be collected")
 				releaseLock()
 				continue
 			}
@@ -580,7 +581,7 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			queued, probeErr := collector.InboxPending(ctx, pending.SessionID, pending.MarkerID)
 			if probeErr != nil {
 				if opencode.IsPermanentError(probeErr) {
-					s.settleInterruptedRun(pair.store, job, "the turn could no longer be inspected")
+					s.settleInterruptedRun(pair.store, job, pending.MarkerID, "the turn could no longer be inspected")
 					releaseLock()
 					continue
 				}
@@ -592,7 +593,7 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 				releaseLock()
 				continue
 			}
-			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
+			s.settleInterruptedRun(pair.store, job, pending.MarkerID, "the turn produced no output")
 			releaseLock()
 			continue
 		}
@@ -600,7 +601,7 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			// The marker was delivered but the turn produced no text: there is
 			// nothing to route, so settle it as incomplete instead of logging
 			// a recovered-output note for empty content.
-			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
+			s.settleInterruptedRun(pair.store, job, pending.MarkerID, "the turn produced no output")
 			releaseLock()
 			continue
 		}
@@ -642,11 +643,21 @@ func acquireCronSessionLock(ctx context.Context, sessionID string) (func(), erro
 	return func() { _ = held.Release() }, nil
 }
 
+// cronPendingToken returns a unique generation for a non-collectable pending
+// state (indeterminate admission or routine-run).
+func cronPendingToken() string {
+	return envelope.NewID()
+}
+
 // settleInterruptedRun stops a marker that can never produce output from being
-// probed forever. It clears the pending turn, records an honest incomplete
-// note, and marks the run as attempted.
-func (s *Service) settleInterruptedRun(st *store.Store, job orch.CronJob, reason string) {
-	_ = st.Orch().ClearCronJobPending(job.ID)
+// probed forever. It clears the pending turn only if the generation still
+// matches, records an honest incomplete note, and marks the run as attempted.
+func (s *Service) settleInterruptedRun(st *store.Store, job orch.CronJob, generation, reason string) {
+	cleared, err := st.Orch().ClearCronJobPendingIf(job.ID, generation)
+	if err != nil || !cleared {
+		// A newer run owns the pending state now; leave it alone.
+		return
+	}
 	s.logJob(st, job, "error", "run interrupted: "+reason)
 	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 }

@@ -323,7 +323,7 @@ func TestRoutineKeepsRunPendingAfterTurnCollected(t *testing.T) {
 	if !ok {
 		t.Fatal("pending run was lost after the turn was collected")
 	}
-	if pending.Kind != "routine-run" || pending.MarkerID != "" {
+	if pending.Kind != "routine-run" || pending.MarkerID == "" {
 		t.Errorf("pending = %+v, want a run-level routine-run state", pending)
 	}
 }
@@ -481,6 +481,79 @@ func TestLiveCollectionConsumesMarkerBeforeSessionLockRelease(t *testing.T) {
 	}
 }
 
+// staleCollector simulates a new run replacing the pending generation while a
+// recovery pass is probing the old one.
+type staleCollector struct {
+	orch    *orch.Store
+	jobID   string
+	updated bool
+}
+
+func (c *staleCollector) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, errors.New("staleCollector does not run turns")
+}
+
+func (c *staleCollector) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
+	return &opencode.SessionInfo{ID: "ses_old"}, nil
+}
+
+func (c *staleCollector) CollectDelivered(context.Context, string, string) (*opencode.TurnResult, bool, error) {
+	if !c.updated {
+		c.updated = true
+		if err := c.orch.SetCronJobPending(c.jobID, "ses_new", "msg_new", "turn", time.Now().UTC()); err != nil {
+			return nil, false, err
+		}
+	}
+	return nil, false, nil
+}
+
+func (c *staleCollector) InboxPending(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+// TestRecoverPendingTurnsDoesNotClearNewerRun ensures a stale snapshot cannot
+// clear a generation that a later run installed while recovery was probing.
+func TestRecoverPendingTurnsDoesNotClearNewerRun(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_old", "msg_old", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	collector := &staleCollector{orch: pair.store.Orch(), jobID: job.ID}
+	svc.turn = collector
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok || pending.MarkerID != "msg_new" || pending.SessionID != "ses_new" {
+		t.Errorf("pending = %+v, ok = %v; want the newer generation intact", pending, ok)
+	}
+	if storeLogContains(t, pair.store, "the turn produced no output") {
+		t.Errorf("logs = %v, stale pass settled a newer run", storeLogMessages(t, pair.store))
+	}
+}
+
 // TestExecuteRoutesCollectedOutputWhenSessionMappingFails ensures a collected
 // turn is still delivered when only persisting the thread mapping fails.
 func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
@@ -532,7 +605,7 @@ func TestRecoverPendingTurnsSettlesIndeterminateRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
 	}
-	if err := st.Orch().SetCronJobPending(job.ID, "", "", "indeterminate", now.Add(-time.Hour)); err != nil {
+	if err := st.Orch().SetCronJobPending(job.ID, "", "run_indeterminate", "indeterminate", now.Add(-time.Hour)); err != nil {
 		t.Fatalf("SetCronJobPending() error: %v", err)
 	}
 	if err := st.Close(); err != nil {
@@ -578,7 +651,7 @@ func TestRecoverPendingTurnsSettlesUnfinishedRoutine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
 	}
-	if err := st.Orch().SetCronJobPending(job.ID, "", "", "routine-run", now.Add(-time.Hour)); err != nil {
+	if err := st.Orch().SetCronJobPending(job.ID, "", "run_routine", "routine-run", now.Add(-time.Hour)); err != nil {
 		t.Fatalf("SetCronJobPending() error: %v", err)
 	}
 	if err := st.Close(); err != nil {

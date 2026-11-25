@@ -434,6 +434,24 @@ func (s *Store) ClearCronJobPending(id string) error {
 	return nil
 }
 
+// ClearCronJobPendingIf clears the pending state only when its marker still
+// matches generation. It returns false when a newer run has replaced it, so a
+// stale recovery pass cannot clear work it no longer owns.
+func (s *Store) ClearCronJobPendingIf(id, generation string) (bool, error) {
+	result, err := s.db.Exec(`UPDATE orch_cron_jobs
+		SET pending_session_id = '', pending_marker_id = '', pending_kind = '',
+		    pending_started_at = NULL, pending_attempts = 0
+		WHERE id = ? AND pending_marker_id = ?`, id, generation)
+	if err != nil {
+		return false, fmt.Errorf("orch: clear pending turn for job %q: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: clear pending turn for job %q: %w", id, err)
+	}
+	return affected > 0, nil
+}
+
 // PendingCronTurns returns jobs whose admitted turn started at or before before.
 func (s *Store) PendingCronTurns(before time.Time, limit int) ([]PendingTurn, error) {
 	if limit <= 0 {

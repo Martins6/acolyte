@@ -114,6 +114,8 @@ Behaviour worth remembering when changing this code:
   later contradict that notification. An unsavable marker is stored as an indeterminate pending run and
   settled as untracked. A routine keeps a run-level `routine-run` pending state after each collected
   turn until the body finishes, so a crash in post-turn work is settled as incomplete, never replayed.
+  Non-collectable pending states carry a unique generation and are cleared with compare-and-clear, so a
+  stale recovery pass cannot delete a newer run.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.
