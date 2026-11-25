@@ -282,6 +282,14 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 		return ReconcileStillPending, nil
 	}
 
+	// OnAdmitted enqueues the acknowledgement, but a crash between persisting
+	// the marker and that enqueue would leave an admitted message silent.
+	// Reconcile heals that window; the stable `ack_<inbound>` identity makes
+	// this a no-op once the row exists.
+	if err := r.sendAck(ctx, agent, env); err != nil {
+		log.Printf("comm: heal acknowledgment for %s: %v", env.ID, err)
+	}
+
 	info, err := prober.GetSession(ctx, sessionID)
 	if err != nil {
 		// A transient service error must not settle the message; look again.

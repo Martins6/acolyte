@@ -89,7 +89,8 @@ Behaviour worth remembering when changing this code:
   restart recovery possible. `TestRouterPersistsMarkerBeforeTurnCompletes` guards it.
 - Admission also enqueues a durable acknowledgement (`ack_<inbound>`), so a running turn is never
   silent even though the typing indicator and 👀 reaction are best-effort. It says only that work
-  started; the reply, an error, or an operator notice reports the outcome.
+  started; the reply, an error, or an operator notice reports the outcome. Reconciliation heals a
+  missing ack (crash between marker and ack) using the same stable identity.
 - Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
   and only into a fresh session for input that provably never executed.
 - Reply envelope IDs are derived from the inbound (`out_<inbound>`) so re-sending is idempotent.

@@ -857,15 +857,18 @@ func TestRecoverSettlesAfterAttemptBudget(t *testing.T) {
 		t.Errorf("interrupted = %v, want no further attempts once the budget is spent", prober.interrupted)
 	}
 
-	if len(h.outbound.events) != 1 {
-		t.Fatalf("outbound events = %d, want exactly one notice", len(h.outbound.events))
+	if len(h.outbound.events) != 2 {
+		t.Fatalf("outbound events = %d, want healed ack and notice", len(h.outbound.events))
 	}
-	notice := h.outbound.events[0]
+	if h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Errorf("first outbound = %q, want healed ack %q", h.outbound.events[0].ID, ackEnvelopeID(env.ID))
+	}
+	notice := h.outbound.events[1]
 	if !strings.HasPrefix(notice.Content.Text, SystemNoticeMarker) {
 		t.Errorf("notice = %q, want the %q marker", notice.Content.Text, SystemNoticeMarker)
 	}
-	if notice.ID == replyEnvelopeID(env.ID) {
-		t.Errorf("notice id = %q, must not collide with the reply identity", notice.ID)
+	if notice.ID == replyEnvelopeID(env.ID) || notice.ID == ackEnvelopeID(env.ID) {
+		t.Errorf("notice id = %q, must not collide with the reply or ack identities", notice.ID)
 	}
 
 	st, release, err := h.pool.Acquire(h.store)
@@ -911,8 +914,11 @@ func TestRecoverSettlesWhenPayloadIsGone(t *testing.T) {
 	if outcome != ReconcileUnrecoverable {
 		t.Fatalf("outcome = %v, want unrecoverable", outcome)
 	}
-	if len(h.outbound.events) != 1 || !strings.HasPrefix(h.outbound.events[0].Content.Text, SystemNoticeMarker) {
-		t.Errorf("outbound = %+v, want one explicit notice", h.outbound.events)
+	if len(h.outbound.events) != 2 || !strings.HasPrefix(h.outbound.events[1].Content.Text, SystemNoticeMarker) {
+		t.Errorf("outbound = %+v, want healed ack and one explicit notice", h.outbound.events)
+	}
+	if h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Errorf("first outbound = %q, want healed ack %q", h.outbound.events[0].ID, ackEnvelopeID(env.ID))
 	}
 }
 
@@ -946,10 +952,13 @@ func TestReconcileRecoversDeliveredTurn(t *testing.T) {
 	if outcome != ReconcileRecovered {
 		t.Fatalf("outcome = %v, want recovered", outcome)
 	}
-	if len(h.outbound.events) != 1 {
-		t.Fatalf("outbound events = %d, want 1", len(h.outbound.events))
+	if len(h.outbound.events) != 2 {
+		t.Fatalf("outbound events = %d, want healed ack and reply", len(h.outbound.events))
 	}
-	got := h.outbound.events[0]
+	if h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Errorf("first outbound = %q, want healed ack %q", h.outbound.events[0].ID, ackEnvelopeID(env.ID))
+	}
+	got := h.outbound.events[1]
 	if got.ID != replyEnvelopeID(env.ID) {
 		t.Errorf("outbound id = %q, want %q", got.ID, replyEnvelopeID(env.ID))
 	}
@@ -980,8 +989,59 @@ func TestReconcileLeavesRunningTurnAlone(t *testing.T) {
 	if outcome != ReconcileStillPending {
 		t.Fatalf("outcome = %v, want still-pending", outcome)
 	}
-	if len(h.outbound.events) != 0 {
-		t.Errorf("outbound events = %d, want 0 while the turn runs", len(h.outbound.events))
+	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Errorf("outbound events = %+v, want only the healed ack while the turn runs", h.outbound.events)
+	}
+}
+
+// TestReconcileHealsMissingAdmissionAck covers the crash window between
+// persisting the marker and enqueuing the ack. Recovery must enqueue it, and
+// repeated passes must still leave exactly one row.
+func TestReconcileHealsMissingAdmissionAck(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = &fakeProber{
+		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+	}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(85),
+		envelope.Party{Kind: envelope.PartyUser, ID: "85"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedAdmitted(t, env, 405, "ses_1", "msg_in")
+
+	h.router.outbound = func(_ context.Context, _ registry.Agent, out envelope.Envelope) error {
+		st, release, err := h.pool.Acquire(h.store)
+		if err != nil {
+			return err
+		}
+		defer release()
+		_, err = st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+			EnvelopeID: out.ID,
+			ChatID:     85,
+			Text:       out.Content.Text,
+		})
+		return err
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+		if err != nil {
+			t.Fatalf("Reconcile() attempt %d error: %v", attempt, err)
+		}
+		if outcome != ReconcileStillPending {
+			t.Fatalf("attempt %d outcome = %v, want still-pending", attempt, outcome)
+		}
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	outbox, err := st.CommTG().ListOutbox(85)
+	if err != nil {
+		t.Fatalf("ListOutbox() error: %v", err)
+	}
+	if len(outbox) != 1 || outbox[0].EnvelopeID != ackEnvelopeID(env.ID) {
+		t.Fatalf("outbox = %+v, want exactly one healed ack", outbox)
 	}
 }
 
@@ -1015,8 +1075,8 @@ func TestReconcileClassifiesIdleTurn(t *testing.T) {
 			if outcome != tc.want {
 				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
 			}
-			if len(h.outbound.events) != 0 {
-				t.Errorf("outbound events = %d, want 0", len(h.outbound.events))
+			if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+				t.Errorf("outbound events = %+v, want only the healed ack", h.outbound.events)
 			}
 		})
 	}

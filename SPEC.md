@@ -710,7 +710,9 @@ own identity (`ack_<inbound>`), so the user always gets feedback even if the dae
 collection finishes. It is an outbox row rather than the typing indicator or the 👀 reaction, both of
 which are best-effort and can disappear with the process. The acknowledgement only says that work
 started; the reply, an error, or an operator notice reports what actually happened. The outbox is
-unique on the envelope ID, so repeated admissions collapse to one row.
+unique on the envelope ID, so repeated admissions collapse to one row. Reconciliation enqueues the
+ack too when a marker exists without one, closing the crash window between persisting the marker and
+writing the acknowledgement.
 
 **Recovery outcomes.** On replay, an inbound carrying a marker is reconciled, never re-admitted:
 
