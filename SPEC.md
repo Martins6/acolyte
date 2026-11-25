@@ -743,13 +743,13 @@ interrupt is rejected and cannot be confirmed, the notice says so instead of cla
 and does not tell the user to resend while the original turn may still run.
 After `maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
 
-**Collection errors do not consume the reply.** A turn error after admission keeps the marker and
-leaves the reply identity (`out_<inbound>`) free. The admission callback proves OpenCode accepted the
-input even if persisting the marker failed; the error path retries that write from the returned marker.
-If it still cannot be saved, the row keeps `admitted_at` without a marker as a durable indeterminate
-state: replay settles it with an honest notice instead of re-admitting and running the request twice.
-Only an unadmitted turn gets an immediate error reply. Replay reconciles the turn and queues the real
-reply when it exists; only definitive failures settle with a notice.
+**Collection errors do not consume the reply.** Before calling OpenCode, the router records
+`admitted_at` as durable admission intent. The callback then persists the marker; a turn error after
+admission keeps that marker and leaves the reply identity (`out_<inbound>`) free. If the marker cannot
+be saved even after a retry, the intent timestamp remains as the indeterminate signal: replay settles
+it with an honest notice instead of re-admitting and running the request twice. Only a turn that never
+reached OpenCode clears the intent and gets an immediate error reply. Replay reconciles the turn and
+queues the real reply when it exists; only definitive failures settle with a notice.
 
 **Replies are idempotent per inbound.** The reply envelope ID is derived from the inbound envelope ID
 (`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply

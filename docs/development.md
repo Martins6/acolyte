@@ -97,10 +97,10 @@ Behaviour worth remembering when changing this code:
   turn; a later delivered turn is left alone. The ownership check and interrupt take the per-session
   turn lock shared by router, cron, and OutboxSink turns. An unconfirmed interrupt settles without
   claiming the turn stopped or asking the user to retry while it may still run.
-- A collection error after admission keeps the marker and the reply identity free. The admission
-  callback proves OpenCode accepted the input even if the marker write failed; the error path retries
-  the write, and `admitted_at` without a marker is the durable indeterminate state that replay settles
-  instead of re-admitting.
+- A collection error after admission keeps the marker and the reply identity free. Admission intent is
+  recorded before the prompt; if the marker write fails, that timestamp is the durable indeterminate
+  signal and replay settles instead of re-admitting. A turn that never reached OpenCode clears the
+  intent and replies immediately.
 - Escalation takes the session lock, re-reads the row, and revalidates that the marker is still queued
   before interrupting; a marker that executed while waiting is handed back for a fresh reconcile.
 - The daemon installs the adapter's reconciler before the adapter starts polling, so an initial replay

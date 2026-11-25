@@ -314,6 +314,42 @@ func TestMarkInboundAdmitted(t *testing.T) {
 	}
 }
 
+func TestMarkInboundAdmissionStartedAndClear(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID:      3,
+		ChatID:          10,
+		EnvelopeID:      "env_1",
+		PendingEnvelope: "{}",
+		ReceivedAt:      now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+
+	if err := store.MarkInboundAdmissionStarted("env_1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("MarkInboundAdmissionStarted() error: %v", err)
+	}
+	item, _, err := store.GetInboxByEnvelope("env_1")
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.AdmittedAt == nil || item.OpenCodeMessageID != "" {
+		t.Errorf("admission state = %v/%q, want intent only", item.AdmittedAt, item.OpenCodeMessageID)
+	}
+
+	if err := store.ClearInboundAdmission("env_1"); err != nil {
+		t.Fatalf("ClearInboundAdmission() error: %v", err)
+	}
+	item, _, err = store.GetInboxByEnvelope("env_1")
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.AdmittedAt != nil || item.OpenCodeMessageID != "" {
+		t.Errorf("admission state = %v/%q, want cleared", item.AdmittedAt, item.OpenCodeMessageID)
+	}
+}
+
 func TestMarkInboundAdmissionIndeterminate(t *testing.T) {
 	store := migrateTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)

@@ -477,6 +477,18 @@ func TestRouterPreAdmissionErrorReplies(t *testing.T) {
 	if !strings.Contains(h.outbound.events[0].Content.Text, "Error:") {
 		t.Errorf("reply = %q, want an error reply", h.outbound.events[0].Content.Text)
 	}
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.AdmittedAt != nil || item.OpenCodeMessageID != "" {
+		t.Errorf("admission state = %v/%q, want the intent cleared for normal replay", item.AdmittedAt, item.OpenCodeMessageID)
+	}
 }
 
 // TestRouterPostAdmissionErrorLeavesTurnForRecovery ensures a collection error

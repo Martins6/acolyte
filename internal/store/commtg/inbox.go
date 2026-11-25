@@ -142,6 +142,55 @@ func (s *Store) MarkInboundAdmitted(envelopeID, opencodeSessionID, opencodeMessa
 	return nil
 }
 
+// MarkInboundAdmissionStarted records admission intent before OpenCode is
+// called. If every later marker write fails, admitted_at is the durable signal
+// that replay must not re-admit the message: the prompt may already be running.
+func (s *Store) MarkInboundAdmissionStarted(envelopeID string, at time.Time) error {
+	envelopeID = strings.TrimSpace(envelopeID)
+	if envelopeID == "" {
+		return fmt.Errorf("comm_tg: envelope id is required")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	result, err := s.db.Exec(`UPDATE comm_tg_inbox SET admitted_at = ?
+		WHERE envelope_id = ? AND processed_at IS NULL`, at, envelopeID)
+	if err != nil {
+		return fmt.Errorf("comm_tg: mark inbound admission started %q: %w", envelopeID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("comm_tg: mark inbound admission started %q: %w", envelopeID, err)
+	}
+	if affected == 0 {
+		return ErrInboundNotFound
+	}
+	return nil
+}
+
+// ClearInboundAdmission removes the admission intent when the turn never
+// reached OpenCode, so replay may admit it normally. It never touches a row
+// that already has a marker.
+func (s *Store) ClearInboundAdmission(envelopeID string) error {
+	envelopeID = strings.TrimSpace(envelopeID)
+	if envelopeID == "" {
+		return fmt.Errorf("comm_tg: envelope id is required")
+	}
+	result, err := s.db.Exec(`UPDATE comm_tg_inbox SET admitted_at = NULL
+		WHERE envelope_id = ? AND processed_at IS NULL AND opencode_message_id = ''`, envelopeID)
+	if err != nil {
+		return fmt.Errorf("comm_tg: clear inbound admission %q: %w", envelopeID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("comm_tg: clear inbound admission %q: %w", envelopeID, err)
+	}
+	if affected == 0 {
+		return ErrInboundNotFound
+	}
+	return nil
+}
+
 // MarkInboundAdmissionIndeterminate records that OpenCode accepted an input
 // whose marker could not be persisted. admitted_at without a marker is the
 // durable signal that replay must not re-admit the message: the turn may be

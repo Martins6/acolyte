@@ -202,6 +202,14 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 	defer func() { <-r.sem }()
 
+	// Record admission intent before the prompt. If every later marker write
+	// fails, this durable timestamp stops replay from re-admitting a message
+	// that OpenCode may already be executing.
+	if err := st.CommTG().MarkInboundAdmissionStarted(env.ID, r.now()); err != nil &&
+		!errors.Is(err, commtg.ErrInboundNotFound) {
+		return fmt.Errorf("comm: record admission intent: %w", err)
+	}
+
 	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
 	if r.events != nil {
 		cfg.OnEvent = r.events(agent, st)
@@ -258,12 +266,20 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 				if indErr := st.CommTG().MarkInboundAdmissionIndeterminate(env.ID, sessionID, r.now()); indErr != nil {
 					return fmt.Errorf("%v: persist admitted marker: %v (indeterminate state: %w)", turnErr, markerErr, indErr)
 				}
-				notice := SystemNotice("your message was accepted, but its recovery marker could not be saved. It was not retried automatically to avoid running it twice. Send it again if you need a reply.")
+				notice := SystemNotice(indeterminateNotice)
 				if settleErr := r.settleNotice(ctx, st, agent, env, notice); settleErr != nil {
 					return fmt.Errorf("%v: %w", turnErr, settleErr)
 				}
 			}
 			return turnErr
+		}
+		// No callback means OpenCode never accepted the input. Clear the intent
+		// so replay may admit it; if clearing fails, leave the row for recovery
+		// rather than risk a second execution.
+		if clearErr := st.CommTG().ClearInboundAdmission(env.ID); clearErr != nil &&
+			!errors.Is(clearErr, commtg.ErrInboundNotFound) {
+			log.Printf("comm: clear admission intent for %s: %v", env.ID, clearErr)
+			return fmt.Errorf("%v: clear admission intent: %w", turnErr, clearErr)
 		}
 		if sendErr := r.sendReply(ctx, st, agent, env, result, fmt.Sprintf("Error: %v", turnErr)); sendErr != nil {
 			return fmt.Errorf("%v: %w", turnErr, sendErr)
@@ -341,7 +357,7 @@ func (r *Router) reconcile(ctx context.Context, agent registry.Agent, env envelo
 			// OpenCode accepted this input but its marker was never saved.
 			// Re-admitting could run the same request twice, so settle with an
 			// honest notice instead.
-			notice := SystemNotice("your message was accepted, but its recovery marker could not be saved. It was not retried automatically to avoid running it twice. Send it again if you need a reply.")
+			notice := SystemNotice(indeterminateNotice)
 			if err := r.settleNotice(ctx, st, agent, env, notice); err != nil {
 				return ReconcileUnrecoverable, err
 			}
@@ -670,6 +686,10 @@ func (r *Router) settleUnrecoverable(ctx context.Context, st *store.Store, agent
 // that work started: the reply, an error, or a later operator notice reports
 // what actually happened.
 const acknowledgementText = "working on your message."
+
+// indeterminateNotice is used when admission was confirmed but no marker can be
+// persisted. It must not promise a safe retry while the original turn may run.
+const indeterminateNotice = "your message could not be tracked reliably, so it was not retried automatically to avoid running it twice. Check whether it is still running before sending it again."
 
 // sendAck enqueues the user-facing acknowledgement for an admitted inbound. The
 // ID is stable (`ack_<inbound>`) and the outbox is unique on it, so a repeated
