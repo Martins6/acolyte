@@ -77,16 +77,16 @@ code. It has a hard 15-minute timeout.
   owner: on open, on each new commit (`synchronize`), on reopen, and when moved out of draft. PRs
   from any other author never trigger the agent. Because it calls the `opencode-go` model on the PR,
   this workflow *does* receive `OPENCODE_GO_API_KEY`, but only for the owner's non-draft PRs from
-  this repository. Each review posts exactly one PR review whose body starts with a `## Verdict`
-  heading (`LGTM` or `NEEDS_REVIEW`), swaps the matching label, and splits findings into
-  **Necessary** (must fix) and **Non-necessary** (optional). Every new commit re-runs the review on
-  the latest diff. The review state is the merge gate: `NEEDS_REVIEW` is submitted as a
-  changes-requested review, which blocks the merge on protected branches, and `LGTM` as an approval,
-  which supersedes the bot's earlier changes-requested verdict. A follow-up step reads the verdict
-  back from the review posted for the head SHA and re-submits it in the matching state if the agent
-  used the wrong one, so the gate always follows the verdict. An approval is the only way to clear a
-  changes-requested review here, because the Actions token cannot dismiss reviews on a protected
-  branch.
+  this repository. The agent replies with exactly one review body that starts with a `## Verdict`
+  heading (`LGTM` or `NEEDS_REVIEW`) and splits findings into **Necessary** (must fix) and
+  **Non-necessary** (optional). The workflow publishes that body as a PR review pinned to the commit
+  the run checked out — an approval for `LGTM`, changes-requested for `NEEDS_REVIEW` — and swaps the
+  verdict label; the agent itself cannot post reviews, comments, or labels. Every new commit re-runs
+  the review on the latest diff, and a run whose head moved before publishing is dropped, so a
+  verdict never lands on a commit that was not reviewed. The review state is the merge gate:
+  `NEEDS_REVIEW` blocks the merge on protected branches and a later `LGTM` approval supersedes it.
+  An approval is the only way to clear a changes-requested review here, because the Actions token
+  cannot dismiss reviews on a protected branch.
 - `.github/workflows/pr-guard.yml` — verifies that a PR to `main` comes from `dev` in this repository
   and posts a `pr-guard` commit status on the PR head SHA, from the base-branch definition via
   `pull_request_target`, so a PR cannot redefine its own gate.
