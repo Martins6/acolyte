@@ -105,6 +105,71 @@ func (s *Store) ClaimCronRoute(id string, now, leaseUntil time.Time) (bool, erro
 	return affected > 0, nil
 }
 
+func scanCronRoutes(rows *sql.Rows) ([]CronRoute, error) {
+	var routes []CronRoute
+	for rows.Next() {
+		var route CronRoute
+		var nextAttempt, claimedUntil, deliveredAt sql.NullTime
+		if err := rows.Scan(&route.ID, &route.AgentTarget, &route.Action, &route.JobID, &route.ChatID,
+			&route.Text, &route.OpenCodeSessionID, &route.SourceMessageID, &route.Meta,
+			&route.Attempts, &nextAttempt, &route.LastError, &route.CreatedAt, &claimedUntil, &deliveredAt); err != nil {
+			return nil, fmt.Errorf("orch: scan cron route: %w", err)
+		}
+		route.NextAttemptAt = timePtr(nextAttempt)
+		route.ClaimedUntil = timePtr(claimedUntil)
+		route.DeliveredAt = timePtr(deliveredAt)
+		routes = append(routes, route)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("orch: scan cron routes: %w", err)
+	}
+	return routes, nil
+}
+
+// GetCronRoute returns one route by ID.
+func (s *Store) GetCronRoute(id string) (CronRoute, bool, error) {
+	rows, err := s.db.Query(`SELECT `+cronRouteColumns+` FROM orch_cron_routes WHERE id = ? LIMIT 1`, id)
+	if err != nil {
+		return CronRoute{}, false, fmt.Errorf("orch: get cron route %q: %w", id, err)
+	}
+	defer rows.Close()
+	routes, err := scanCronRoutes(rows)
+	if err != nil {
+		return CronRoute{}, false, err
+	}
+	if len(routes) == 0 {
+		return CronRoute{}, false, nil
+	}
+	return routes[0], true, nil
+}
+
+// HoldCronRoute parks a route with an unpersisted admission marker so no worker
+// re-admits it. It stays held until the lease expires (operator recovery can
+// shorten it directly in the store).
+func (s *Store) HoldCronRoute(id string, until time.Time) error {
+	_, err := s.db.Exec(`UPDATE orch_cron_routes SET claimed_until = ?
+		WHERE id = ? AND delivered_at IS NULL`, until, id)
+	if err != nil {
+		return fmt.Errorf("orch: hold cron route %q: %w", id, err)
+	}
+	return nil
+}
+
+// RenewCronRouteClaim extends a lease only if expected is still the claimed
+// value, so a worker that lost the route cannot renew it.
+func (s *Store) RenewCronRouteClaim(id string, expected, next time.Time) (bool, error) {
+	result, err := s.db.Exec(`UPDATE orch_cron_routes SET claimed_until = ?
+		WHERE id = ? AND delivered_at IS NULL AND claimed_until = ?`, next, id, expected)
+	if err != nil {
+		return false, fmt.Errorf("orch: renew cron route claim %q: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: renew cron route claim %q: %w", id, err)
+	}
+	return affected > 0, nil
+}
+
 // DueCronRoutes returns undelivered routes whose next attempt is due.
 func (s *Store) DueCronRoutes(now time.Time, limit int) ([]CronRoute, error) {
 	if limit <= 0 {

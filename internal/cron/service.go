@@ -492,6 +492,10 @@ var cronSessionLockWait = 10 * time.Second
 // not admit the same inbox intent twice.
 var routeClaimLease = 2 * time.Minute
 
+// routeClaimHeartbeat keeps a long delivery (for example a slow synthetic turn)
+// from letting another worker claim the route.
+var routeClaimHeartbeat = 30 * time.Second
+
 // turnCollector is the optional recovery half of the cron turn runner.
 type turnCollector interface {
 	GetSession(ctx context.Context, sessionID string) (*opencode.SessionInfo, error)
@@ -994,6 +998,10 @@ func (s *Service) removeMemoryRoute(workspace, id string) {
 // later without re-admitting it.
 var errRouteStillPending = errors.New("cron: route input still pending")
 
+// errRouteHeld means an admission marker could not be persisted and the route
+// was parked; do not clear the hold with a normal retry.
+var errRouteHeld = errors.New("cron: route held for manual recovery")
+
 // deliverRoute performs one durable route intent according to its action.
 func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch.CronRoute) error {
 	switch route.Action {
@@ -1078,6 +1086,19 @@ func (s *Service) queueInboxResponse(pair *agentStore, route orch.CronRoute, res
 	return err
 }
 
+// persistRouteAdmitted retries storing an inbox route's admission marker. A
+// transient write failure must not leave the route eligible for re-admission.
+func persistRouteAdmitted(orchStore *orch.Store, id, sessionID, markerID string) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err = orchStore.SetCronRouteAdmitted(id, sessionID, markerID); err == nil {
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return err
+}
+
 // deliverInboxRoute admits the output as a synthetic input, or collects the
 // input a previous attempt already admitted. The route row stores that marker,
 // so a crash never re-admits the event.
@@ -1127,7 +1148,7 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 	if route.Meta != "" {
 		_ = json.Unmarshal([]byte(route.Meta), &meta)
 	}
-	_, err := s.turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
+	result, runErr := s.turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        route.Text,
 		Description: "Cron inbox event",
 		Metadata:    meta,
@@ -1135,7 +1156,7 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 	}, opencode.TurnConfig{
 		Workspace: pair.agent.Workspace,
 		OnAdmitted: func(admitted opencode.Admitted) error {
-			return pair.store.Orch().SetCronRouteAdmitted(route.ID, admitted.SessionID, admitted.InputID)
+			return persistRouteAdmitted(pair.store.Orch(), route.ID, admitted.SessionID, admitted.InputID)
 		},
 		OnCollected: func(result *opencode.TurnResult) error {
 			if err := s.queueInboxResponse(pair, route, result); err != nil {
@@ -1144,21 +1165,65 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 			return pair.store.Orch().MarkCronRouteDelivered(route.ID, s.now())
 		},
 	})
-	return err
+	if runErr != nil && result != nil && result.InputID != "" && route.SourceMessageID == "" {
+		// OpenCode accepted the input but the callback's marker write failed.
+		// Persist it from the returned result; if that also fails, park the
+		// route so a retry cannot admit the same event again.
+		if saveErr := persistRouteAdmitted(pair.store.Orch(), route.ID, result.SessionID, result.InputID); saveErr != nil {
+			_ = pair.store.Orch().HoldCronRoute(route.ID, s.now().Add(24*time.Hour))
+			log.Printf("cron: hold inbox route %s: admission marker could not be persisted: %v", route.ID, saveErr)
+			return errRouteHeld
+		}
+	}
+	return runErr
 }
 
 func (s *Service) retryRoutes(ctx context.Context, pair *agentStore) {
 	if routes, err := pair.store.Orch().DueCronRoutes(s.now(), 20); err != nil {
 		log.Printf("cron: list due routes for %s: %v", pair.agent.Name, err)
 	} else {
-		for _, route := range routes {
-			claimed, claimErr := pair.store.Orch().ClaimCronRoute(route.ID, s.now(), s.now().Add(routeClaimLease))
+		for _, snapshot := range routes {
+			lease := s.now().Add(routeClaimLease)
+			claimed, claimErr := pair.store.Orch().ClaimCronRoute(snapshot.ID, s.now(), lease)
 			if claimErr != nil || !claimed {
 				continue
 			}
-			if err := s.deliverRoute(ctx, pair, route); err != nil {
+			// Re-read after claiming: an earlier worker may have admitted the
+			// input before its lease expired.
+			route, ok, getErr := pair.store.Orch().GetCronRoute(snapshot.ID)
+			if getErr != nil || !ok || route.DeliveredAt != nil {
+				continue
+			}
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ticker := time.NewTicker(routeClaimHeartbeat)
+				defer ticker.Stop()
+				expected := lease
+				for {
+					select {
+					case <-stop:
+						return
+					case <-ticker.C:
+						next := s.now().Add(routeClaimLease)
+						renewed, renewErr := pair.store.Orch().RenewCronRouteClaim(route.ID, expected, next)
+						if renewErr != nil || !renewed {
+							return
+						}
+						expected = next
+					}
+				}
+			}()
+			deliverErr := s.deliverRoute(ctx, pair, route)
+			close(stop)
+			<-done
+			if deliverErr != nil {
+				if errors.Is(deliverErr, errRouteHeld) {
+					continue
+				}
 				attempts := route.Attempts + 1
-				_ = pair.store.Orch().MarkCronRouteRetry(route.ID, attempts, s.now().Add(routeBackoff(attempts)), err.Error())
+				_ = pair.store.Orch().MarkCronRouteRetry(route.ID, attempts, s.now().Add(routeBackoff(attempts)), deliverErr.Error())
 				continue
 			}
 			_ = pair.store.Orch().MarkCronRouteDelivered(route.ID, s.now())
