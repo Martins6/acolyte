@@ -118,9 +118,10 @@ Behaviour worth remembering when changing this code:
   Non-collectable pending states carry a unique generation and are cleared with compare-and-clear, so a
   stale recovery pass cannot delete a newer run. A collected prompt result is stored as an action-aware
   `orch_cron_routes` intent (notify-user, inbox, or log) with a deterministic ID before its marker is
-  consumed; the route loop delivers it, and inbox routes persist the admitted synthetic marker rather
-  than re-admitting. Recovery creates the same intent. Nothing clears pending state unconditionally
-  after a turn, and a post-collection cleanup error still routes the collected output.
+  consumed; the route loop claims it atomically, inbox routes persist the admitted synthetic marker and
+  enqueue the agent reaction under its own deterministic ID rather than re-admitting, and recovery
+  creates the same intent. Nothing clears pending state unconditionally after a turn, and a
+  post-collection cleanup error still routes the collected output.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.

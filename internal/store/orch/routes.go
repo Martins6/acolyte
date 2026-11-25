@@ -22,11 +22,12 @@ type CronRoute struct {
 	NextAttemptAt     *time.Time `json:"next_attempt_at,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
+	ClaimedUntil      *time.Time `json:"claimed_until,omitempty"`
 	DeliveredAt       *time.Time `json:"delivered_at,omitempty"`
 }
 
 const cronRouteColumns = `id, agent_target, action, job_id, chat_id, text, opencode_session_id,
-	source_message_id, meta, attempts, next_attempt_at, last_error, created_at, delivered_at`
+	source_message_id, meta, attempts, next_attempt_at, last_error, created_at, claimed_until, delivered_at`
 
 // AddCronRoute persists a delivery intent. The ID is idempotent.
 func (s *Store) AddCronRoute(route CronRoute) error {
@@ -67,13 +68,41 @@ func (s *Store) AddCronRoute(route CronRoute) error {
 // SetCronRouteAdmitted records the session and marker of an inbox route's
 // synthetic turn, so a retry collects instead of re-admitting it.
 func (s *Store) SetCronRouteAdmitted(id, sessionID, markerID string) error {
-	_, err := s.db.Exec(`UPDATE orch_cron_routes
+	result, err := s.db.Exec(`UPDATE orch_cron_routes
 		SET opencode_session_id = ?, source_message_id = ?
 		WHERE id = ? AND delivered_at IS NULL`, sessionID, markerID, id)
 	if err != nil {
 		return fmt.Errorf("orch: set cron route admitted %q: %w", id, err)
 	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("orch: set cron route admitted %q: %w", id, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("orch: cron route %q is no longer pending", id)
+	}
 	return nil
+}
+
+// ClaimCronRoute leases a route for one delivery worker.
+func (s *Store) ClaimCronRoute(id string, now, leaseUntil time.Time) (bool, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if leaseUntil.IsZero() {
+		leaseUntil = now.Add(2 * time.Minute)
+	}
+	result, err := s.db.Exec(`UPDATE orch_cron_routes SET claimed_until = ?
+		WHERE id = ? AND delivered_at IS NULL
+		AND (claimed_until IS NULL OR claimed_until <= ?)`, leaseUntil, id, now)
+	if err != nil {
+		return false, fmt.Errorf("orch: claim cron route %q: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("orch: claim cron route %q: %w", id, err)
+	}
+	return affected > 0, nil
 }
 
 // DueCronRoutes returns undelivered routes whose next attempt is due.
@@ -92,13 +121,14 @@ func (s *Store) DueCronRoutes(now time.Time, limit int) ([]CronRoute, error) {
 	var routes []CronRoute
 	for rows.Next() {
 		var route CronRoute
-		var nextAttempt, deliveredAt sql.NullTime
+		var nextAttempt, claimedUntil, deliveredAt sql.NullTime
 		if err := rows.Scan(&route.ID, &route.AgentTarget, &route.Action, &route.JobID, &route.ChatID,
 			&route.Text, &route.OpenCodeSessionID, &route.SourceMessageID, &route.Meta,
-			&route.Attempts, &nextAttempt, &route.LastError, &route.CreatedAt, &deliveredAt); err != nil {
+			&route.Attempts, &nextAttempt, &route.LastError, &route.CreatedAt, &claimedUntil, &deliveredAt); err != nil {
 			return nil, fmt.Errorf("orch: scan cron route: %w", err)
 		}
 		route.NextAttemptAt = timePtr(nextAttempt)
+		route.ClaimedUntil = timePtr(claimedUntil)
 		route.DeliveredAt = timePtr(deliveredAt)
 		routes = append(routes, route)
 	}
@@ -120,13 +150,14 @@ func (s *Store) ListCronRoutes() ([]CronRoute, error) {
 	var routes []CronRoute
 	for rows.Next() {
 		var route CronRoute
-		var nextAttempt, deliveredAt sql.NullTime
+		var nextAttempt, claimedUntil, deliveredAt sql.NullTime
 		if err := rows.Scan(&route.ID, &route.AgentTarget, &route.Action, &route.JobID, &route.ChatID,
 			&route.Text, &route.OpenCodeSessionID, &route.SourceMessageID, &route.Meta,
-			&route.Attempts, &nextAttempt, &route.LastError, &route.CreatedAt, &deliveredAt); err != nil {
+			&route.Attempts, &nextAttempt, &route.LastError, &route.CreatedAt, &claimedUntil, &deliveredAt); err != nil {
 			return nil, fmt.Errorf("orch: scan cron route: %w", err)
 		}
 		route.NextAttemptAt = timePtr(nextAttempt)
+		route.ClaimedUntil = timePtr(claimedUntil)
 		route.DeliveredAt = timePtr(deliveredAt)
 		routes = append(routes, route)
 	}
@@ -141,7 +172,7 @@ func (s *Store) MarkCronRouteDelivered(id string, at time.Time) error {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	_, err := s.db.Exec(`UPDATE orch_cron_routes SET delivered_at = ?, next_attempt_at = NULL
+	_, err := s.db.Exec(`UPDATE orch_cron_routes SET delivered_at = ?, next_attempt_at = NULL, claimed_until = NULL
 		WHERE id = ? AND delivered_at IS NULL`, at, id)
 	if err != nil {
 		return fmt.Errorf("orch: mark cron route delivered: %w", err)
@@ -155,7 +186,7 @@ func (s *Store) MarkCronRouteRetry(id string, attempts int, next time.Time, errT
 		next = time.Now().UTC()
 	}
 	_, err := s.db.Exec(`UPDATE orch_cron_routes
-		SET attempts = ?, next_attempt_at = ?, last_error = ?
+		SET attempts = ?, next_attempt_at = ?, last_error = ?, claimed_until = NULL
 		WHERE id = ? AND delivered_at IS NULL`, attempts, next, errText, id)
 	if err != nil {
 		return fmt.Errorf("orch: mark cron route retry: %w", err)

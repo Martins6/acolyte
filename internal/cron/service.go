@@ -488,6 +488,10 @@ var cronResumeGrace = 5 * time.Minute
 // lock before leaving the marker for the next pass.
 var cronSessionLockWait = 10 * time.Second
 
+// routeClaimLease bounds one route delivery attempt so concurrent workers do
+// not admit the same inbox intent twice.
+var routeClaimLease = 2 * time.Minute
+
 // turnCollector is the optional recovery half of the cron turn runner.
 type turnCollector interface {
 	GetSession(ctx context.Context, sessionID string) (*opencode.SessionInfo, error)
@@ -1029,6 +1033,51 @@ func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch
 	}
 }
 
+// cronReplyChat resolves the chat that receives an inbox turn's response.
+func cronReplyChat(st *store.Store, sessionID string) (int64, bool) {
+	if session, ok, err := st.Orch().GetSessionByOpenCodeID(sessionID); err == nil && ok {
+		if chatID, parsed := envelope.ParseTelegramThread(session.Thread); parsed && chatID != 0 {
+			return chatID, true
+		}
+	}
+	chat, ok, err := st.CommTG().LatestAllowedChat()
+	if err != nil || !ok {
+		return 0, false
+	}
+	return chat.ChatID, true
+}
+
+// queueInboxResponse enqueues the agent's reaction to an inbox event under a
+// deterministic ID before the route is marked delivered.
+func (s *Service) queueInboxResponse(pair *agentStore, route orch.CronRoute, result *opencode.TurnResult) error {
+	if result == nil {
+		return nil
+	}
+	text := strings.TrimSpace(result.ResponseText)
+	if text == "" {
+		return nil
+	}
+	chatID, ok := cronReplyChat(pair.store, result.SessionID)
+	if !ok {
+		return fmt.Errorf("cron: no chat for inbox response route %s", route.ID)
+	}
+	sourceID := ""
+	if len(result.MessageIDs) > 0 {
+		sourceID = result.MessageIDs[len(result.MessageIDs)-1]
+	}
+	id := "cron_inbox_" + route.ID
+	_, err := pair.store.CommTG().EnqueueOutbound(commtg.OutboxItem{
+		ID:                id,
+		EnvelopeID:        id,
+		ChatID:            chatID,
+		Text:              text,
+		OpenCodeSessionID: result.SessionID,
+		SourceMessageID:   sourceID,
+		CreatedAt:         s.now(),
+	})
+	return err
+}
+
 // deliverInboxRoute admits the output as a synthetic input, or collects the
 // input a previous attempt already admitted. The route row stores that marker,
 // so a crash never re-admits the event.
@@ -1048,7 +1097,9 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 			return err
 		}
 		if delivered {
-			_ = result
+			if err := s.queueInboxResponse(pair, route, result); err != nil {
+				return err
+			}
 			return nil
 		}
 		pending, err := prober.InboxPending(ctx, route.OpenCodeSessionID, route.SourceMessageID)
@@ -1086,7 +1137,10 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 		OnAdmitted: func(admitted opencode.Admitted) error {
 			return pair.store.Orch().SetCronRouteAdmitted(route.ID, admitted.SessionID, admitted.InputID)
 		},
-		OnCollected: func(*opencode.TurnResult) error {
+		OnCollected: func(result *opencode.TurnResult) error {
+			if err := s.queueInboxResponse(pair, route, result); err != nil {
+				return err
+			}
 			return pair.store.Orch().MarkCronRouteDelivered(route.ID, s.now())
 		},
 	})
@@ -1098,6 +1152,10 @@ func (s *Service) retryRoutes(ctx context.Context, pair *agentStore) {
 		log.Printf("cron: list due routes for %s: %v", pair.agent.Name, err)
 	} else {
 		for _, route := range routes {
+			claimed, claimErr := pair.store.Orch().ClaimCronRoute(route.ID, s.now(), s.now().Add(routeClaimLease))
+			if claimErr != nil || !claimed {
+				continue
+			}
 			if err := s.deliverRoute(ctx, pair, route); err != nil {
 				attempts := route.Attempts + 1
 				_ = pair.store.Orch().MarkCronRouteRetry(route.ID, attempts, s.now().Add(routeBackoff(attempts)), err.Error())

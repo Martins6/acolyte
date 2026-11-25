@@ -345,6 +345,9 @@ func TestInboxRouteRecoversAdmittedTurn(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
 
 	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
 		ID:                "route_inbox",
@@ -832,6 +835,9 @@ func TestPromptInboxRouteKeepsMarkerUntilRouted(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)

@@ -778,8 +778,9 @@ and recovery clears only the generation it revalidated, so a stale pass cannot d
 
 A collected prompt result becomes a durable `orch_cron_routes` intent with a deterministic ID before
 its marker is consumed. The intent records the job's route policy (`notify-user`, `inbox`, or `log`) and
-the route loop delivers it: `notify-user` resolves the chat lazily and enqueues the deterministic outbox
-row, `inbox` persists the admitted synthetic marker and collects it instead of re-admitting, and `log`
+the route loop claims it atomically, then delivers it: `notify-user` resolves the chat lazily and
+enqueues the deterministic outbox row, `inbox` persists the admitted synthetic marker and collects it
+instead of re-admitting, then enqueues the agent reaction under its own deterministic ID, and `log`
 appends the output. Recovery creates the same intent, so a crash between collection and delivery neither
 loses nor duplicates the response. A completed execution never clears pending state unconditionally:
 prompt turns consume their exact marker under the lock, routine runs compare-and-clear their generation,

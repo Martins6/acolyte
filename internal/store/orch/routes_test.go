@@ -55,3 +55,29 @@ func TestCronRouteActionAndAdmission(t *testing.T) {
 		t.Errorf("routes = %+v, want none after delivery", routes)
 	}
 }
+
+func TestClaimCronRoute(t *testing.T) {
+	store := migrateTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.AddCronRoute(CronRoute{
+		ID: "route_1", AgentTarget: "valet", Action: "inbox", Text: "event", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	claimed, err := store.ClaimCronRoute("route_1", now, now.Add(time.Minute))
+	if err != nil || !claimed {
+		t.Fatalf("ClaimCronRoute() = %v, %v; want claimed", claimed, err)
+	}
+	claimed, err = store.ClaimCronRoute("route_1", now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ClaimCronRoute(second) error: %v", err)
+	}
+	if claimed {
+		t.Error("second claim succeeded while the lease was live")
+	}
+	claimed, err = store.ClaimCronRoute("route_1", now.Add(2*time.Minute), now.Add(3*time.Minute))
+	if err != nil || !claimed {
+		t.Errorf("ClaimCronRoute(after lease) = %v, %v; want claimed", claimed, err)
+	}
+}

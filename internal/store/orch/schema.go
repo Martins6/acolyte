@@ -102,6 +102,7 @@ func migrateV4(db *sql.DB) error {
 		{"action", `ALTER TABLE orch_cron_routes ADD COLUMN action TEXT NOT NULL DEFAULT 'notify-user'`},
 		{"job_id", `ALTER TABLE orch_cron_routes ADD COLUMN job_id TEXT NOT NULL DEFAULT ''`},
 		{"meta", `ALTER TABLE orch_cron_routes ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'`},
+		{"claimed_until", `ALTER TABLE orch_cron_routes ADD COLUMN claimed_until DATETIME`},
 	}
 	for _, addition := range additions {
 		if columns[addition.name] {

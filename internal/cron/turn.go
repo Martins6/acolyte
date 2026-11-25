@@ -80,11 +80,13 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 	})
 	if err != nil {
 		if collected && result != nil {
-			// The output was collected; the error is post-collection cleanup or
-			// durable delivery setup. Route the real output when the marker is
-			// still pending, otherwise it is already queued.
 			s.logJob(st, job, "warn", "turn collected but post-collection delivery failed: "+err.Error())
-			return result.ResponseText, result.SessionID, admitted, routed, generation, nil
+			if generation != "" {
+				// The durable intent was not stored; keep the marker so
+				// recovery retries instead of using a non-durable fallback.
+				return result.ResponseText, result.SessionID, true, false, generation, err
+			}
+			return result.ResponseText, result.SessionID, false, true, "", nil
 		}
 		created := ""
 		if result != nil {
