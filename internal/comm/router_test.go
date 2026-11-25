@@ -1026,6 +1026,7 @@ func TestReconcileLeavesTransientProbeErrorPending(t *testing.T) {
 		{name: "transport error", err: errors.New("service unavailable")},
 		{name: "service unavailable", err: &opencode.APIError{Status: 503}},
 		{name: "rate limited", err: &opencode.APIError{Status: 429}},
+		{name: "request timeout", err: &opencode.APIError{Status: 408}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1066,6 +1067,8 @@ func TestReconcileSettlesPermanentProbeError(t *testing.T) {
 		{name: "missing session", sessionErr: &opencode.APIError{Status: 404}},
 		{name: "rejected collect", collectErr: &opencode.APIError{Status: 400}},
 		{name: "rejected inbox probe", inboxErr: &opencode.APIError{Status: 404}},
+		{name: "method not allowed", collectErr: &opencode.APIError{Status: 405}},
+		{name: "conflict", collectErr: &opencode.APIError{Status: 409}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

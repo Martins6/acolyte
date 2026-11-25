@@ -424,19 +424,23 @@ func resumeGraceElapsed(item commtg.InboxItem, now time.Time) bool {
 }
 
 // permanentProbeError reports whether a recovery probe failed in a way that
-// retrying cannot fix: a missing session or a rejected request. Transport
-// failures, timeouts, rate limits, and 5xx responses remain pending.
+// retrying cannot fix: a missing session or a rejected request. Every 4xx
+// response is permanent except the two that explicitly describe a retryable
+// condition (request timeout and rate limiting); transport failures and 5xx
+// responses also remain pending.
 func permanentProbeError(err error) bool {
 	var apiErr *opencode.APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	switch apiErr.Status {
-	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
-		http.StatusNotFound, http.StatusGone, http.StatusUnprocessableEntity:
-		return true
-	default:
+	if apiErr.Status < 400 || apiErr.Status >= 500 {
 		return false
+	}
+	switch apiErr.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	default:
+		return true
 	}
 }
 
