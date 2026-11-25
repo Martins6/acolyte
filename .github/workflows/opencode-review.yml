@@ -194,10 +194,21 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          # One review per run; 100 covers any realistic number of pushes.
-          reviews=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100")
+          # A run cancelled by a newer push can still reach this step. gh pr
+          # review targets the current head, so make sure the head is still the
+          # revision this run reviewed before touching the gate.
+          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          if [ "$current_sha" != "$HEAD_SHA" ]; then
+            echo "PR head moved from $HEAD_SHA to $current_sha; skipping"
+            exit 0
+          fi
+
+          # --slurp: the endpoint pages at 100; concatenate every page before
+          # picking the latest review so the head review is never missed.
+          reviews=$(gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100")
           latest=$(printf '%s' "$reviews" | jq -c --arg sha "$HEAD_SHA" \
-            '[.[] | select(.user.login == "github-actions[bot]" and .commit_id == $sha)] | last // empty')
+            'add | [.[] | select(.user.login == "github-actions[bot]" and .commit_id == $sha)] | last // empty')
           if [ -z "$latest" ]; then
             echo "no bot review for $HEAD_SHA; leaving the merge state untouched"
             exit 0
