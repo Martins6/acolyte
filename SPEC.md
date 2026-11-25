@@ -737,15 +737,18 @@ is still in flight past the grace window is interrupted and the message is settl
 instead: execution cannot be disproved, so it is never re-admitted. Recovery first establishes that
 this marker is the session's head turn (no later delivered input, or the next input is still queued);
 a later turn is never interrupted. The ownership check and interrupt take the same per-session turn
-lock as every admission (router, cron, OutboxSink), so a newer turn cannot start in between. If an
+lock as every admission (router, cron, OutboxSink), so a newer turn cannot start in between; escalation
+re-reads the row and revalidates that the marker is still queued after taking the lock. If an
 interrupt is rejected and cannot be confirmed, the notice says so instead of claiming the turn stopped.
 After `maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
 
 **Collection errors do not consume the reply.** A turn error after admission keeps the marker and
 leaves the reply identity (`out_<inbound>`) free. The admission callback proves OpenCode accepted the
-input even if persisting the marker failed; the error path retries that write from the returned marker
-and only an unadmitted turn gets an immediate error reply. Replay reconciles the turn and queues the
-real reply when it exists; only definitive failures settle with a notice.
+input even if persisting the marker failed; the error path retries that write from the returned marker.
+If it still cannot be saved, the row keeps `admitted_at` without a marker as a durable indeterminate
+state: replay settles it with an honest notice instead of re-admitting and running the request twice.
+Only an unadmitted turn gets an immediate error reply. Replay reconciles the turn and queues the real
+reply when it exists; only definitive failures settle with a notice.
 
 **Replies are idempotent per inbound.** The reply envelope ID is derived from the inbound envelope ID
 (`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply

@@ -99,7 +99,10 @@ Behaviour worth remembering when changing this code:
   that does not claim the turn stopped.
 - A collection error after admission keeps the marker and the reply identity free. The admission
   callback proves OpenCode accepted the input even if the marker write failed; the error path retries
-  the write from the returned marker, and only an unadmitted turn replies immediately.
+  the write, and `admitted_at` without a marker is the durable indeterminate state that replay settles
+  instead of re-admitting.
+- Escalation takes the session lock, re-reads the row, and revalidates that the marker is still queued
+  before interrupting; a marker that executed while waiting is handed back for a fresh reconcile.
 - The daemon installs the adapter's reconciler before the adapter starts polling, so an initial replay
   cannot settle a marker-bearing row while recovery is missing.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated

@@ -239,12 +239,28 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		if admitted {
 			// The callback means OpenCode accepted the input, so recovery owns
 			// the reply even if the marker write failed. Try the idempotent
-			// write once more from the returned marker, then leave the reply
-			// identity free for reconciliation.
+			// write once more from the returned marker.
+			markerErr := errors.New("admitted marker was not returned")
 			if result != nil && strings.TrimSpace(result.SessionID) != "" && strings.TrimSpace(result.InputID) != "" {
-				if linkErr := st.CommTG().MarkInboundAdmitted(env.ID, result.SessionID, result.InputID, r.now()); linkErr != nil &&
-					!errors.Is(linkErr, commtg.ErrInboundNotFound) {
-					return fmt.Errorf("%v: persist admitted marker: %w", turnErr, linkErr)
+				markerErr = st.CommTG().MarkInboundAdmitted(env.ID, result.SessionID, result.InputID, r.now())
+				if errors.Is(markerErr, commtg.ErrInboundNotFound) {
+					markerErr = nil
+				}
+			}
+			if markerErr != nil {
+				// The marker cannot be persisted, but the turn may be running.
+				// Record a durable indeterminate state so replay never
+				// re-admits it and duplicates the work, then settle honestly.
+				sessionID := ""
+				if result != nil {
+					sessionID = result.SessionID
+				}
+				if indErr := st.CommTG().MarkInboundAdmissionIndeterminate(env.ID, sessionID, r.now()); indErr != nil {
+					return fmt.Errorf("%v: persist admitted marker: %v (indeterminate state: %w)", turnErr, markerErr, indErr)
+				}
+				notice := SystemNotice("your message was accepted, but its recovery marker could not be saved. It was not retried automatically to avoid running it twice. Send it again if you need a reply.")
+				if settleErr := r.settleNotice(ctx, st, agent, env, notice); settleErr != nil {
+					return fmt.Errorf("%v: %w", turnErr, settleErr)
 				}
 			}
 			return turnErr
@@ -308,18 +324,32 @@ func (r *Router) reconcile(ctx context.Context, agent registry.Agent, env envelo
 	}
 	marker := strings.TrimSpace(item.OpenCodeMessageID)
 	sessionID := strings.TrimSpace(item.OpenCodeSessionID)
-	if marker == "" || sessionID == "" {
-		// Nothing was admitted, so there is nothing to collect. The caller
-		// falls back to normal admission.
-		return ReconcileStillPending, nil
-	}
 
 	// OnAdmitted enqueues the acknowledgement, but a crash between persisting
 	// the marker and that enqueue would leave an admitted message silent.
 	// Reconcile heals that window; the stable `ack_<inbound>` identity makes
-	// this a no-op once the row exists.
-	if err := r.sendAck(ctx, agent, env); err != nil {
-		log.Printf("comm: heal acknowledgment for %s: %v", env.ID, err)
+	// this a no-op once the row exists. Only rows that reached admission get
+	// an ack.
+	if item.AdmittedAt != nil || (marker != "" && sessionID != "") {
+		if err := r.sendAck(ctx, agent, env); err != nil {
+			log.Printf("comm: heal acknowledgment for %s: %v", env.ID, err)
+		}
+	}
+
+	if marker == "" || sessionID == "" {
+		if item.AdmittedAt != nil {
+			// OpenCode accepted this input but its marker was never saved.
+			// Re-admitting could run the same request twice, so settle with an
+			// honest notice instead.
+			notice := SystemNotice("your message was accepted, but its recovery marker could not be saved. It was not retried automatically to avoid running it twice. Send it again if you need a reply.")
+			if err := r.settleNotice(ctx, st, agent, env, notice); err != nil {
+				return ReconcileUnrecoverable, err
+			}
+			return ReconcileUnrecoverable, nil
+		}
+		// Nothing was admitted, so there is nothing to collect. The caller
+		// falls back to normal admission.
+		return ReconcileStillPending, nil
 	}
 
 	info, err := prober.GetSession(ctx, sessionID)
@@ -537,14 +567,55 @@ func (r *Router) Recover(ctx context.Context, agent registry.Agent, env envelope
 		return ReconcileUnrecoverable, nil
 	}
 
+	prober, ok := r.turn.(TurnProber)
+	if !ok {
+		return ReconcileUnrecoverable, fmt.Errorf("comm: turn runner does not support recovery")
+	}
+	// Hold the session turn lock across the recheck and the interrupt. A cron
+	// or OutboxSink turn can otherwise start between the idle probe and the
+	// interrupt, and recovery would stop newer work.
+	releaseLock, lockErr := r.lockForRecovery(ctx, item.OpenCodeSessionID)
+	if lockErr != nil {
+		log.Printf("comm: wait for session lock %s before abandoning turn: %v", item.OpenCodeSessionID, lockErr)
+		return ReconcileStillPending, nil
+	}
+	defer releaseLock()
+
+	// A live admission may have settled or replaced the row while we waited.
+	current, found, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		return ReconcileStillPending, err
+	}
+	if !found || current.ProcessedAt != nil || current.OpenCodeMessageID != item.OpenCodeMessageID {
+		return ReconcileStillPending, nil
+	}
+	item = current
+	info, err := prober.GetSession(ctx, item.OpenCodeSessionID)
+	if err != nil {
+		if opencode.IsPermanentError(err) {
+			return r.settleProbeFailure(ctx, st, agent, env)
+		}
+		return ReconcileStillPending, err
+	}
+	if info != nil && info.Time.InFlight() {
+		return ReconcileStillPending, nil
+	}
+	queued, err := prober.InboxPending(ctx, item.OpenCodeSessionID, item.OpenCodeMessageID)
+	if err != nil {
+		return ReconcileStillPending, err
+	}
+	if !queued {
+		// The input executed while we waited; hand it back for a fresh
+		// reconcile instead of interrupting whatever now owns the session.
+		return ReconcileStillPending, nil
+	}
+
 	// Abandon the stranded turn: settle the wedged session, forget the thread's
 	// session mapping, and clear the marker so the next pass admits the message
 	// into a fresh session exactly like a new one. Nothing ran, so nothing that
 	// follows is duplicated.
-	if prober, ok := r.turn.(TurnProber); ok && strings.TrimSpace(item.OpenCodeSessionID) != "" {
-		if err := prober.Interrupt(ctx, item.OpenCodeSessionID); err != nil {
-			return ReconcileStillPending, err
-		}
+	if err := prober.Interrupt(ctx, item.OpenCodeSessionID); err != nil {
+		return ReconcileStillPending, err
 	}
 	if _, err := st.Orch().DeleteSession(env.Thread); err != nil {
 		return ReconcileStillPending, err

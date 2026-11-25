@@ -142,6 +142,36 @@ func (s *Store) MarkInboundAdmitted(envelopeID, opencodeSessionID, opencodeMessa
 	return nil
 }
 
+// MarkInboundAdmissionIndeterminate records that OpenCode accepted an input
+// whose marker could not be persisted. admitted_at without a marker is the
+// durable signal that replay must not re-admit the message: the turn may be
+// running, so a second prompt could duplicate its work.
+func (s *Store) MarkInboundAdmissionIndeterminate(envelopeID, opencodeSessionID string, at time.Time) error {
+	envelopeID = strings.TrimSpace(envelopeID)
+	if envelopeID == "" {
+		return fmt.Errorf("comm_tg: envelope id is required")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	result, err := s.db.Exec(`UPDATE comm_tg_inbox
+		SET opencode_session_id = ?, admitted_at = ?,
+		    last_error = 'admission confirmed; marker not persisted'
+		WHERE envelope_id = ? AND processed_at IS NULL`,
+		opencodeSessionID, at, envelopeID)
+	if err != nil {
+		return fmt.Errorf("comm_tg: mark inbound admission indeterminate %q: %w", envelopeID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("comm_tg: mark inbound admission indeterminate %q: %w", envelopeID, err)
+	}
+	if affected == 0 {
+		return ErrInboundNotFound
+	}
+	return nil
+}
+
 // RecordResumeAttempt counts a recovery attempt and clears the admission
 // marker so the row becomes unadmitted again: the next replay pass admits it
 // into a fresh session instead of trying to collect the abandoned turn.

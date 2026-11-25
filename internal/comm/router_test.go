@@ -91,6 +91,8 @@ type fakeProber struct {
 	collectErr   error
 	pending      bool
 	pendingByID  map[string]bool
+	pendingSeq   []bool
+	pendingIndex int
 	inboxErr     error
 	nextInput    string
 	nextFound    bool
@@ -126,6 +128,14 @@ func (f *fakeProber) CollectDelivered(context.Context, string, string) (*opencod
 func (f *fakeProber) InboxPending(_ context.Context, _, itemID string) (bool, error) {
 	if f.inboxErr != nil {
 		return false, f.inboxErr
+	}
+	if len(f.pendingSeq) > 0 {
+		index := f.pendingIndex
+		if index >= len(f.pendingSeq) {
+			index = len(f.pendingSeq) - 1
+		}
+		f.pendingIndex++
+		return f.pendingSeq[index], nil
 	}
 	if f.pendingByID != nil {
 		if pending, ok := f.pendingByID[itemID]; ok {
@@ -1446,6 +1456,63 @@ func TestReconcileBusyStopNotConfirmed(t *testing.T) {
 		if strings.Contains(notice, "was interrupted") {
 			t.Errorf("notice = %q, must not claim an unconfirmed interruption", notice)
 		}
+	}
+}
+
+// TestReconcileSettlesIndeterminateAdmission covers an input OpenCode accepted
+// whose marker was never saved: it must settle without re-admitting.
+func TestReconcileSettlesIndeterminateAdmission(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = &fakeProber{}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(92),
+		envelope.Party{Kind: envelope.PartyUser, ID: "92"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 415)
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	if err := st.CommTG().MarkInboundAdmissionIndeterminate(env.ID, "ses_lost", time.Now().UTC()); err != nil {
+		t.Fatalf("MarkInboundAdmissionIndeterminate() error: %v", err)
+	}
+	release()
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	assertSettledWithNotice(t, h, env)
+}
+
+// TestRecoverRevalidatesQueuedMarkerBeforeInterrupt ensures escalation does not
+// interrupt once the marker executed while the lock was being acquired.
+func TestRecoverRevalidatesQueuedMarkerBeforeInterrupt(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		pendingSeq: []bool{true, false},
+		session:    &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(93),
+		envelope.Party{Kind: envelope.PartyUser, ID: "93"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 416, "ses_1", "msg_in", 0, time.Now().UTC().Add(-time.Hour))
+	h.seedSession(t, env.Thread, "ses_1")
+
+	outcome, err := h.router.Recover(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Recover() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want no interrupt after the marker executed", prober.interrupted)
 	}
 }
 

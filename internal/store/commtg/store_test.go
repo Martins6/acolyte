@@ -314,6 +314,43 @@ func TestMarkInboundAdmitted(t *testing.T) {
 	}
 }
 
+func TestMarkInboundAdmissionIndeterminate(t *testing.T) {
+	store := migrateTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.RecordInbound(InboxItem{
+		TGUpdateID:      2,
+		ChatID:          10,
+		EnvelopeID:      "env_1",
+		PendingEnvelope: "{}",
+		ReceivedAt:      now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+
+	admittedAt := now.Add(time.Minute)
+	if err := store.MarkInboundAdmissionIndeterminate("env_1", "ses_1", admittedAt); err != nil {
+		t.Fatalf("MarkInboundAdmissionIndeterminate() error: %v", err)
+	}
+	item, _, err := store.GetInboxByEnvelope("env_1")
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.OpenCodeSessionID != "ses_1" || item.OpenCodeMessageID != "" {
+		t.Errorf("session/marker = %q/%q, want ses_1 and no marker", item.OpenCodeSessionID, item.OpenCodeMessageID)
+	}
+	if item.AdmittedAt == nil || !item.AdmittedAt.Equal(admittedAt) {
+		t.Errorf("AdmittedAt = %v, want %v", item.AdmittedAt, admittedAt)
+	}
+
+	// A processed row is never resurrected.
+	if err := store.MarkInboundProcessedUnconditional("env_1", now); err != nil {
+		t.Fatalf("MarkInboundProcessedUnconditional() error: %v", err)
+	}
+	if err := store.MarkInboundAdmissionIndeterminate("env_1", "ses_1", admittedAt); !errors.Is(err, ErrInboundNotFound) {
+		t.Fatalf("MarkInboundAdmissionIndeterminate(processed) error = %v, want ErrInboundNotFound", err)
+	}
+}
+
 func TestRecordResumeAttempt(t *testing.T) {
 	store := migrateTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
