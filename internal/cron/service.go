@@ -1022,9 +1022,9 @@ func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch
 				return err
 			}
 			if !ok {
-				// No registered Telegram chat: let the configured sink try
-				// (tests and alternate sinks), then retry if it fails.
-				return s.sink.NotifyUser(ctx, pair.agent, route.Text)
+				// Keep the route pending until a chat exists; enqueueing through
+				// the sink would use a fresh ID and risk a duplicate.
+				return fmt.Errorf("cron: no allowed chat for route %s", route.ID)
 			}
 			chatID = chat.ChatID
 		}

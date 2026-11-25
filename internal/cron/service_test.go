@@ -159,6 +159,19 @@ func addJob(t *testing.T, ws string, job orch.CronJob) {
 	}
 }
 
+func outboxTexts(t *testing.T, st *store.Store, chatID int64) []string {
+	t.Helper()
+	items, err := st.CommTG().ListOutbox(chatID)
+	if err != nil {
+		t.Fatalf("ListOutbox() error: %v", err)
+	}
+	texts := make([]string, 0, len(items))
+	for _, item := range items {
+		texts = append(texts, item.Text)
+	}
+	return texts
+}
+
 func cronLogMessages(t *testing.T, ws string) []string {
 	t.Helper()
 	st, err := store.Open(ws)
@@ -528,6 +541,9 @@ func TestLiveCollectionConsumesMarkerBeforeSessionLockRelease(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -554,8 +570,8 @@ func TestLiveCollectionConsumesMarkerBeforeSessionLockRelease(t *testing.T) {
 	if got := turn.recoveryCount(); got != 0 {
 		t.Errorf("recovery collected %d time(s), want 0 after the live turn consumed its marker", got)
 	}
-	if got := sink.count(); got != 1 {
-		t.Errorf("notifications = %d, want exactly one", got)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 || texts[0] != "once" {
+		t.Errorf("outbox = %v, want the collected output", texts)
 	}
 	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
 	if err != nil {
@@ -705,6 +721,9 @@ func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -712,8 +731,8 @@ func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
 
 	svc.execute(context.Background(), pair, job)
 
-	if len(sink.notified) != 1 || sink.notified[0] != "the answer" {
-		t.Errorf("notified = %v, want the collected answer", sink.notified)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 || texts[0] != "the answer" {
+		t.Errorf("outbox = %v, want the collected answer", texts)
 	}
 	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
 		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
@@ -936,6 +955,9 @@ func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -943,8 +965,8 @@ func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
 
 	svc.execute(context.Background(), pair, job)
 
-	if len(sink.notified) != 1 || sink.notified[0] != "the answer" {
-		t.Errorf("notified = %v, want the collected answer", sink.notified)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 || texts[0] != "the answer" {
+		t.Errorf("outbox = %v, want the collected answer", texts)
 	}
 	turns, err := pair.store.Orch().PendingCronTurns(now.Add(time.Second), 10)
 	if err != nil {
@@ -993,6 +1015,9 @@ func TestAdmittedPendingRetriesTransientWrite(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "partial", err: errors.New("collection failed")}, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -1007,8 +1032,8 @@ func TestAdmittedPendingRetriesTransientWrite(t *testing.T) {
 	svc.turn = &collectingTurn{delivered: true, text: "recovered"}
 	svc.recoverPendingTurns(context.Background(), pair)
 	svc.retryRoutes(context.Background(), pair)
-	if len(sink.notified) != 1 || sink.notified[0] != "recovered" {
-		t.Errorf("notified = %v, want the recovered output", sink.notified)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 || texts[0] != "recovered" {
+		t.Errorf("outbox = %v, want the recovered output", texts)
 	}
 	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
 		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
@@ -1134,6 +1159,9 @@ func TestRecoverPendingTurnsConcurrentPassesRouteOnce(t *testing.T) {
 	svc := startTestService(t, reg, routine.Default(), sink, collector, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 2; i++ {
@@ -1149,8 +1177,8 @@ func TestRecoverPendingTurnsConcurrentPassesRouteOnce(t *testing.T) {
 	if got := collector.count(); got != 1 {
 		t.Errorf("collect calls = %d, want 1", got)
 	}
-	if got := sink.count(); got != 1 {
-		t.Errorf("notifications = %d, want 1", got)
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 1 {
+		t.Errorf("outbox = %v, want one delivered route", texts)
 	}
 	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
 	if err != nil {
@@ -2138,6 +2166,15 @@ func TestPromptJobRoutesOutputAndStoresSession(t *testing.T) {
 		Meta: `{"on_success":"notify-user"}`,
 	})
 
+	setupStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := setupStore.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	setupStore.Close()
+
 	sink := &fakeSink{}
 	turn := &fakeTurn{response: "reply"}
 	service := startTestService(t, reg, routine.NewRegistry(), sink, turn, "/bin/sh", now)
@@ -2151,9 +2188,14 @@ func TestPromptJobRoutesOutputAndStoresSession(t *testing.T) {
 	if len(turn.events) != 1 || turn.events[0].Text != "hello" {
 		t.Errorf("events = %+v", turn.events)
 	}
-	if len(sink.notified) != 1 || sink.notified[0] != "reply" {
-		t.Errorf("notified = %v, want reply", sink.notified)
+	outStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
+	if texts := outboxTexts(t, outStore, 10); len(texts) != 1 || texts[0] != "reply" {
+		t.Errorf("outbox = %v, want reply", texts)
+	}
+	outStore.Close()
 
 	st, err := store.Open(ws)
 	if err != nil {
@@ -2215,6 +2257,15 @@ func TestInvalidRoutingFallsBackToNotifyUser(t *testing.T) {
 		Meta: `{"on_success":"notify_user"}`,
 	})
 
+	setupStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := setupStore.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	setupStore.Close()
+
 	sink := &fakeSink{}
 	turn := &fakeTurn{response: "reply"}
 	service := startTestService(t, reg, routine.NewRegistry(), sink, turn, "/bin/sh", now)
@@ -2222,9 +2273,14 @@ func TestInvalidRoutingFallsBackToNotifyUser(t *testing.T) {
 	service.Wait()
 	service.Stop()
 
-	if len(sink.notified) != 1 || sink.notified[0] != "reply" {
-		t.Errorf("notified = %v, want fallback notify-user", sink.notified)
+	outStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
+	if texts := outboxTexts(t, outStore, 10); len(texts) != 1 || texts[0] != "reply" {
+		t.Errorf("outbox = %v, want fallback notify-user", texts)
+	}
+	outStore.Close()
 }
 
 func TestRoutineJobRoutesOutput(t *testing.T) {
