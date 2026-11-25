@@ -568,6 +568,62 @@ func (t *ambiguousInboxTurn) count() int {
 	return t.calls
 }
 
+// failingInboxTurn returns a proven pre-admission failure (no request sent).
+type failingInboxTurn struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (t *failingInboxTurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return nil, errors.New("session lock unavailable")
+}
+
+func (t *failingInboxTurn) count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+// TestInboxRouteRetriesProvenPreAdmissionFailure ensures a failure that never
+// reached OpenCode clears the admission sentinel and remains retryable.
+func TestInboxRouteRetriesProvenPreAdmissionFailure(t *testing.T) {
+	reg, _, now := setupCron(t)
+	turn := &failingInboxTurn{}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("cron:test", "ses_x", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID: "route_inbox", AgentTarget: "valet", Action: "inbox", Text: "event", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	if got := turn.count(); got != 1 {
+		t.Fatalf("admission attempts = %d, want 1", got)
+	}
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes = %+v, %v", routes, err)
+	}
+	if routes[0].SourceMessageID != "" {
+		t.Errorf("marker = %q, want cleared for a proven pre-admission failure", routes[0].SourceMessageID)
+	}
+	if routes[0].DeliveredAt != nil {
+		t.Error("failed pre-admission route was marked delivered")
+	}
+}
+
 // TestInboxRouteHoldsAmbiguousAdmission ensures an unclear admission is not
 // retried into a duplicate.
 func TestInboxRouteHoldsAmbiguousAdmission(t *testing.T) {

@@ -1295,9 +1295,16 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 			_ = pair.store.Orch().ClearCronRouteAdmission(route.ID)
 			return runErr
 		}
-		// Ambiguous outcome: keep the durable intent and hold the route rather
-		// than re-admitting the event.
-		return errRouteHeld
+		var promptErr *opencode.PromptError
+		if errors.As(runErr, &promptErr) && promptErr.Ambiguous {
+			// Ambiguous request outcome: keep the durable intent and hold the
+			// route rather than re-admitting the event.
+			return errRouteHeld
+		}
+		// A proven pre-admission failure (lock wait, session preparation, a
+		// definite rejection) did not reach OpenCode; allow a retry.
+		_ = pair.store.Orch().ClearCronRouteAdmission(route.ID)
+		return runErr
 	}
 	return nil
 }
