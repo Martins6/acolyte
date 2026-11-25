@@ -426,6 +426,75 @@ func TestInboxRouteLeavesInFlightTurnPending(t *testing.T) {
 	}
 }
 
+func TestCronReplyChatRequiresAuthorizedMapping(t *testing.T) {
+	ws := t.TempDir()
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	now := time.Now().UTC()
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := st.Orch().UpsertSession("telegram:10", "ses_10", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if chatID, ok, err := cronReplyChat(st, "ses_10"); err != nil || !ok || chatID != 10 {
+		t.Fatalf("cronReplyChat() = %d, %v, %v; want 10", chatID, ok, err)
+	}
+
+	if err := st.CommTG().UpsertChat(10, "alice", false, true, now); err != nil {
+		t.Fatalf("UpsertChat(revoked) error: %v", err)
+	}
+	if _, ok, err := cronReplyChat(st, "ses_10"); err != nil || ok {
+		t.Errorf("revoked mapping = ok %v, err %v; want fail closed", ok, err)
+	}
+
+	if _, err := st.Orch().UpsertSession("telegram:99", "ses_99", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if _, ok, err := cronReplyChat(st, "ses_99"); err != nil || ok {
+		t.Errorf("missing mapped chat = ok %v, err %v; want fail closed", ok, err)
+	}
+
+	if _, err := st.Orch().UpsertSession("cron:job", "ses_cron", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if err := st.CommTG().UpsertChat(11, "bob", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if chatID, ok, err := cronReplyChat(st, "ses_cron"); err != nil || !ok || chatID != 11 {
+		t.Errorf("no mapping fallback = %d, %v, %v; want 11", chatID, ok, err)
+	}
+}
+
+func TestNotifyRouteRequiresAuthorizedChat(t *testing.T) {
+	reg, _, now := setupCron(t)
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	if err := pair.store.CommTG().UpsertChat(10, "alice", false, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
+		ID: "route_notify", AgentTarget: "valet", Action: "notify-user", ChatID: 10,
+		Text: "secret", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("AddCronRoute() error: %v", err)
+	}
+
+	svc.retryRoutes(context.Background(), pair)
+
+	routes, err := pair.store.Orch().ListCronRoutes()
+	if err != nil || len(routes) != 1 || routes[0].DeliveredAt != nil {
+		t.Fatalf("routes = %+v, %v; want pending", routes, err)
+	}
+	if texts := outboxTexts(t, pair.store, 10); len(texts) != 0 {
+		t.Errorf("outbox = %v, want nothing queued to a revoked chat", texts)
+	}
+}
+
 func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{
@@ -1632,6 +1701,14 @@ func TestCronDeliveryErrorPersistsRouteAndRetries(t *testing.T) {
 		Meta: `{"on_success":"notify-user"}`,
 	})
 	sink := &fakeSink{notifyErr: &comm.DeliveryError{EnvelopeID: "env_route", ChatID: 10, Text: "output"}}
+	setupStore, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := setupStore.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	setupStore.Close()
 	service := startTestService(t, reg, routine.NewRegistry(), sink, nil, "/bin/sh", now)
 	service.Tick(context.Background())
 	service.Wait()

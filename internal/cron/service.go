@@ -1017,7 +1017,15 @@ func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch
 		return err
 	default:
 		chatID := route.ChatID
-		if chatID == 0 {
+		if chatID != 0 {
+			chat, found, err := pair.store.CommTG().GetChat(chatID)
+			if err != nil {
+				return err
+			}
+			if !found || !chat.Allowed || !chat.Private {
+				return fmt.Errorf("cron: chat %d is no longer authorized for route %s", chatID, route.ID)
+			}
+		} else {
 			chat, ok, err := pair.store.CommTG().LatestAllowedChat()
 			if err != nil {
 				return err
@@ -1056,11 +1064,12 @@ func cronReplyChat(st *store.Store, sessionID string) (int64, bool, error) {
 			if err != nil {
 				return 0, false, err
 			}
-			if found && chat.Allowed && chat.Private {
-				return chatID, true, nil
+			if !found || !chat.Allowed || !chat.Private {
+				// The mapped destination exists but is no longer authorized.
+				// Fail closed instead of leaking to another allowed chat.
+				return 0, false, nil
 			}
-			// The mapped chat is gone, revoked, or not private: fall through to
-			// the latest still-authorized private chat.
+			return chatID, true, nil
 		}
 	}
 	chat, ok, err := st.CommTG().LatestAllowedChat()
