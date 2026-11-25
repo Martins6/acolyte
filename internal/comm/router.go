@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"sync"
@@ -198,11 +199,19 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 		cfg.OnEvent = r.events(agent, st)
 	}
 	// Persist the marker the moment the input is admitted. Recovery re-collects
-	// by this pair instead of admitting the message a second time.
+	// by this pair instead of admitting the message a second time. The same
+	// hook enqueues the durable acknowledgement, so even a turn that never
+	// finishes leaves the user with a retryable outbox row instead of silence.
 	cfg.OnAdmitted = func(admitted opencode.Admitted) error {
 		if err := st.CommTG().MarkInboundAdmitted(env.ID, admitted.SessionID, admitted.InputID, r.now()); err != nil &&
 			!errors.Is(err, commtg.ErrInboundNotFound) {
 			return err
+		}
+		if err := r.sendAck(ctx, agent, env); err != nil {
+			// The marker is already durable, so the turn is recoverable.
+			// Aborting here would throw away a running turn's reply over a
+			// best-effort status message, so log it and keep going.
+			log.Printf("comm: enqueue acknowledgment for %s: %v", env.ID, err)
 		}
 		return nil
 	}
@@ -271,6 +280,14 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 		// Nothing was admitted, so there is nothing to collect. The caller
 		// falls back to normal admission.
 		return ReconcileStillPending, nil
+	}
+
+	// OnAdmitted enqueues the acknowledgement, but a crash between persisting
+	// the marker and that enqueue would leave an admitted message silent.
+	// Reconcile heals that window; the stable `ack_<inbound>` identity makes
+	// this a no-op once the row exists.
+	if err := r.sendAck(ctx, agent, env); err != nil {
+		log.Printf("comm: heal acknowledgment for %s: %v", env.ID, err)
 	}
 
 	info, err := prober.GetSession(ctx, sessionID)
@@ -384,6 +401,38 @@ func (r *Router) settleUnrecoverable(ctx context.Context, st *store.Store, agent
 		return err
 	}
 	return st.CommTG().MarkInboundProcessedUnconditional(env.ID, r.now())
+}
+
+// acknowledgementText is the durable admission acknowledgement. It states only
+// that work started: the reply, an error, or a later operator notice reports
+// what actually happened.
+const acknowledgementText = "working on your message."
+
+// sendAck enqueues the user-facing acknowledgement for an admitted inbound. The
+// ID is stable (`ack_<inbound>`) and the outbox is unique on it, so a repeated
+// admission (for example a recovery retry) collapses to the same row instead of
+// sending a second ack. It never uses the reply identity, so it cannot suppress
+// or replace the final reply.
+func (r *Router) sendAck(ctx context.Context, agent registry.Agent, in envelope.Envelope) error {
+	if r.outbound == nil {
+		return nil
+	}
+	out := envelope.New(envelope.DirectionOut, in.Channel, in.Thread, in.To, in.From,
+		envelope.Content{Type: envelope.ContentText, Text: SystemNotice(acknowledgementText)})
+	if id := ackEnvelopeID(in.ID); id != "" {
+		out.ID = id
+	}
+	out.Meta = map[string]any{
+		"agent":              agent.Name,
+		"source_envelope_id": in.ID,
+		"kind":               "ack",
+	}
+	if in.Meta != nil {
+		if value, ok := in.Meta["telegram_message_id"]; ok {
+			out.Meta["reply_to_message_id"] = value
+		}
+	}
+	return r.outbound(ctx, agent, out)
 }
 
 // sendSystemNotice queues an operator notice on its own outbound identity. It
@@ -521,6 +570,17 @@ func replyEnvelopeID(inboundID string) string {
 		return ""
 	}
 	return "out_" + inboundID
+}
+
+// ackEnvelopeID returns the stable outbox identity for the admission
+// acknowledgement. It is deliberately distinct from the reply identity so an
+// ack can never occupy the slot the final reply needs.
+func ackEnvelopeID(inboundID string) string {
+	inboundID = strings.TrimSpace(inboundID)
+	if inboundID == "" {
+		return ""
+	}
+	return "ack_" + inboundID
 }
 
 func routerResultInputID(result *opencode.TurnResult) string {

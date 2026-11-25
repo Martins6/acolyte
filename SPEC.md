@@ -705,6 +705,15 @@ after the input is admitted and before the turn is collected, and the router sto
 `opencode_session_id` + `opencode_message_id` + `admitted_at` on `comm_tg_inbox`. Recovery therefore
 never needs to re-prompt: the pair is enough to re-collect.
 
+**Admission is acknowledged durably.** The same hook enqueues an acknowledgement outbox row on its
+own identity (`ack_<inbound>`), so the user always gets feedback even if the daemon restarts before
+collection finishes. It is an outbox row rather than the typing indicator or the 👀 reaction, both of
+which are best-effort and can disappear with the process. The acknowledgement only says that work
+started; the reply, an error, or an operator notice reports what actually happened. The outbox is
+unique on the envelope ID, so repeated admissions collapse to one row. Reconciliation enqueues the
+ack too when a marker exists without one, closing the crash window between persisting the marker and
+writing the acknowledgement.
+
 **Recovery outcomes.** On replay, an inbound carrying a marker is reconciled, never re-admitted:
 
 | Outcome | Meaning | Action |
@@ -809,8 +818,9 @@ notify-user`** = user-only, never agent, never session (v0 `notify`) (§10.4).
     OpenCode/communication history. Full communication config is exposed by
     `acolyte config <agent> get`; the `agent_status` cache and any OpenCode stats integration
     remain deferred.
-32. **Telegram inbound UX is best-effort and adapter-local.** An accepted message gets a 👀 reaction,
-    and `typing` is sent immediately and refreshed every 4s until the reply is enqueued.
+32. **Telegram inbound UX mixes durable and best-effort feedback.** Admission enqueues a durable
+    acknowledgement (`ack_<inbound>`, outbox-backed, retried like any reply) so a running or
+    interrupted turn is never silent; the 👀 reaction and `typing` are adapter-local and best-effort.
     `setMyCommands` registers `/new`, which clears the `telegram:<chat_id>` → session mapping under
     the thread lock and replies without a model turn (an `@mention` must name this bot);
     multi-message replies are joined with `\n\n`.
