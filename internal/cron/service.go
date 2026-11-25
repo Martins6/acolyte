@@ -779,6 +779,11 @@ func (s *Service) addPromptRouteIntent(st *store.Store, agent registry.Agent, jo
 				return err
 			}
 		}
+		if chatID == 0 {
+			// Do not persist an undeliverable inbox route: keep the recovery
+			// marker so a later attempt can resolve a recipient.
+			return fmt.Errorf("cron: no inbox recipient for job %s", job.Title)
+		}
 	}
 	id := cronOutputID(job.ID, markerID)
 	routeMeta, _ := json.Marshal(map[string]any{"cron_job": job.Title, "cron_route": id})
@@ -1081,7 +1086,23 @@ func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch
 // authorized Telegram chat; a cron-owned/new session uses the latest allowed
 // chat. An unknown or unauthorized mapping fails closed.
 func inboxRouteChat(st *store.Store, sessionID string) (int64, error) {
-	session, ok, err := st.Orch().GetSessionByOpenCodeID(sessionID)
+	session, ok, err := st.Orch().GetTelegramSessionByOpenCodeID(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	if ok {
+		if chatID, parsed := envelope.ParseTelegramThread(session.Thread); parsed && chatID != 0 {
+			chat, found, err := st.CommTG().GetChat(chatID)
+			if err != nil {
+				return 0, err
+			}
+			if !found || !chat.Allowed || !chat.Private {
+				return 0, nil
+			}
+			return chatID, nil
+		}
+	}
+	session, ok, err = st.Orch().GetSessionByOpenCodeID(sessionID)
 	if err != nil {
 		return 0, err
 	}
