@@ -723,6 +723,11 @@ writing the acknowledgement.
 | `stranded` | Idle, marker never executed | Escalated after the grace window |
 | `unrecoverable` | Marker cannot produce a reply | Settled with an explicit notice |
 
+**Terminal outcomes are settled, not retried.** A finished turn with no text, a truncated output that
+exceeds the collection window, or a consumed marker that produced nothing is definitive: it is
+settled with an `ACOLYTE SYSTEM MESSAGE:` notice and marked processed. Only transient probe errors
+(service unavailable, timeout) stay pending for the next pass.
+
 **Escalation is bounded and honest.** After a `resumeGraceWindow` (5 min), a stranded turn is
 abandoned: the session is interrupted, the thread→session mapping is forgotten, and the marker is
 cleared so the next pass admits the message into a fresh session. Because the abandoned input provably
@@ -738,9 +743,11 @@ collapses to one row instead of double-sending.
 text, and never claims a request completed when it did not.
 
 **Cron runs recover output, not execution.** A job records the marker of the turn it admitted
-(`orch_cron_jobs.pending_*`). On restart, recovery collects that turn's text and routes it, then records
-the run as attempted. Routine bodies are **not** replayed: they mutate files, so a routine interrupted
-mid-body is reported as incomplete rather than re-run or presented as finished.
+(`orch_cron_jobs.pending_*`). On restart, recovery checks that the session is not still in flight,
+collects the turn's text, and routes it, then records the run as attempted. The marker is cleared only
+after a successful collection; a run that errored after admission leaves it for the next pass. Routine
+bodies are **not** replayed: they mutate files, so a routine interrupted mid-body is reported as
+incomplete rather than re-run or presented as finished.
 
 ---
 

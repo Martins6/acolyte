@@ -303,11 +303,27 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 	result, delivered, err := prober.CollectDelivered(ctx, sessionID, marker)
 	if err != nil {
 		if errors.Is(err, opencode.ErrTurnTruncated) {
-			return ReconcileUnrecoverable, err
+			// The marker is older than the collection window and its output
+			// cannot be bounded. Retrying will never change that, so settle
+			// with an explicit notice instead of looping forever.
+			notice := SystemNotice("your message was processed, but its output exceeded the collection window and could not be recovered. Send it again to retry.")
+			if settleErr := r.settleNotice(ctx, st, agent, env, notice); settleErr != nil {
+				return ReconcileUnrecoverable, settleErr
+			}
+			return ReconcileUnrecoverable, nil
 		}
 		return ReconcileStillPending, err
 	}
 	if delivered {
+		if result == nil || strings.TrimSpace(result.ResponseText) == "" {
+			// A finished turn with no text cannot be delivered as a reply.
+			// Settle it with a notice instead of marking it processed silently.
+			notice := SystemNotice("your message was processed, but the turn finished without a reply. Send it again to retry.")
+			if err := r.settleNotice(ctx, st, agent, env, notice); err != nil {
+				return ReconcileUnrecoverable, err
+			}
+			return ReconcileUnrecoverable, nil
+		}
 		if err := r.sendReply(ctx, st, agent, env, result, result.ResponseText); err != nil {
 			return ReconcileRecovered, err
 		}
@@ -323,6 +339,12 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 	}
 	if pending {
 		return ReconcileStranded, nil
+	}
+	// Consumed with nothing to collect: terminal. Settle it with an explicit
+	// notice so replay cannot retry it forever.
+	notice := SystemNotice("your message was processed, but no reply could be recovered. Send it again to retry.")
+	if err := r.settleNotice(ctx, st, agent, env, notice); err != nil {
+		return ReconcileUnrecoverable, err
 	}
 	return ReconcileUnrecoverable, nil
 }
@@ -391,16 +413,24 @@ func resumeGraceElapsed(item commtg.InboxItem, now time.Time) bool {
 	return now.Sub(start) >= resumeGraceWindow
 }
 
+// settleNotice sends a terminal operator notice and marks the inbound
+// processed, so replay cannot retry a turn that can never produce a reply. The
+// notice identity (sys_<inbound>) is stable, so a failed mark can safely be
+// retried without duplicating the message.
+func (r *Router) settleNotice(ctx context.Context, st *store.Store, agent registry.Agent, env envelope.Envelope, notice string) error {
+	if err := r.sendSystemNotice(ctx, st, agent, env, notice); err != nil {
+		return err
+	}
+	return st.CommTG().MarkInboundProcessedUnconditional(env.ID, r.now())
+}
+
 // settleUnrecoverable stops a message from looping forever and tells the user
 // the truth: the request was not completed and nothing was delivered for it.
 func (r *Router) settleUnrecoverable(ctx context.Context, st *store.Store, agent registry.Agent, env envelope.Envelope, item commtg.InboxItem) error {
 	notice := SystemNotice(fmt.Sprintf(
 		"your message from %s could not be completed after %d recovery attempts, and no reply was delivered. Send it again to retry.",
 		item.ReceivedAt.UTC().Format("15:04 UTC"), item.ResumeAttempts))
-	if err := r.sendSystemNotice(ctx, st, agent, env, notice); err != nil {
-		return err
-	}
-	return st.CommTG().MarkInboundProcessedUnconditional(env.ID, r.now())
+	return r.settleNotice(ctx, st, agent, env, notice)
 }
 
 // acknowledgementText is the durable admission acknowledgement. It states only

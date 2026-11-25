@@ -424,9 +424,12 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		return
 	}
 	text, sessionID, err := s.runJob(ctx, agent, st, job, meta)
-	// The turn, if any, is settled once runJob returns; recovery must not try to
-	// collect it again.
-	_ = st.Orch().ClearCronJobPending(job.ID)
+	// Clear the marker only when the run finished. A turn error after admission
+	// (canceled wait, collection failure) must leave the marker so the next
+	// recovery pass can collect the output instead of losing it.
+	if err == nil {
+		_ = st.Orch().ClearCronJobPending(job.ID)
+	}
 
 	if err != nil {
 		if strings.TrimSpace(text) == "" {
@@ -461,6 +464,7 @@ var cronResumeGrace = 5 * time.Minute
 
 // turnCollector is the optional recovery half of the cron turn runner.
 type turnCollector interface {
+	GetSession(ctx context.Context, sessionID string) (*opencode.SessionInfo, error)
 	CollectDelivered(ctx context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error)
 }
 
@@ -487,6 +491,16 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		if err != nil {
 			log.Printf("cron: load pending job %s: %v", pending.JobID, err)
 			_ = pair.store.Orch().ClearCronJobPending(pending.JobID)
+			continue
+		}
+		// A session that is still busy owns its turn: collecting now would
+		// read partial output and clear a marker that is not finished yet.
+		info, err := collector.GetSession(ctx, pending.SessionID)
+		if err != nil {
+			log.Printf("cron: inspect pending session for %s: %v", job.Title, err)
+			continue
+		}
+		if info != nil && info.Time.InFlight() {
 			continue
 		}
 		result, delivered, err := collector.CollectDelivered(ctx, pending.SessionID, pending.MarkerID)
