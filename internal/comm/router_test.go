@@ -585,6 +585,64 @@ func TestRouterPostAdmissionErrorLeavesTurnForRecovery(t *testing.T) {
 	}
 }
 
+// slowAdmittedTurn admits, then blocks until the turn context expires.
+type slowAdmittedTurn struct{}
+
+func (slowAdmittedTurn) RunUserTurn(ctx context.Context, _, _ string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
+	if cfg.OnAdmitted != nil {
+		if err := cfg.OnAdmitted(opencode.Admitted{SessionID: "ses_live", InputID: "msg_live"}); err != nil {
+			return nil, err
+		}
+	}
+	<-ctx.Done()
+	return &opencode.TurnResult{SessionID: "ses_live", InputID: "msg_live"}, ctx.Err()
+}
+
+// TestRouterBoundsLiveTurn verifies a wedged live turn cannot hold the inbound
+// claim forever: the configured deadline returns control to the adapter with
+// the marker still durable.
+func TestRouterBoundsLiveTurn(t *testing.T) {
+	old := liveTurnTimeout
+	liveTurnTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { liveTurnTimeout = old })
+
+	h := newRouterHarness(t, 4)
+	h.router.turn = slowAdmittedTurn{}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(84),
+		envelope.Party{Kind: envelope.PartyUser, ID: "84"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 706)
+
+	start := time.Now()
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
+		t.Fatal("HandleInbound() error = nil, want the live turn deadline")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("HandleInbound() took %s, want the bounded turn timeout", elapsed)
+	}
+	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Fatalf("outbound = %+v, want only the ack", h.outbound.events)
+	}
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.OpenCodeMessageID != "msg_live" || item.ProcessedAt != nil {
+		t.Errorf("inbox = %+v, want the durable marker left for recovery", item)
+	}
+}
+
 func TestRouterTurnRecordsToolActivity(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.turn.events = []opencode.Event{

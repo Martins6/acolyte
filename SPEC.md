@@ -758,6 +758,10 @@ queues the real reply when it exists; only definitive failures settle with a not
 (`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply
 collapses to one row instead of double-sending.
 
+**Live turns are bounded.** A live user turn carries a `liveTurnTimeout` (10 min). If it expires, the
+durable marker is handed back to reconciliation instead of letting the inbound claim heartbeat renew
+forever; recovery then applies the normal busy/grace policy.
+
 **Operator notices are labelled.** Text Acolyte generates about its own operation is sent as
 `ACOLYTE SYSTEM MESSAGE: <text>` on its own outbound identity (`sys_<inbound>`), never mixed into agent
 text, and never claims a request completed when it did not.
@@ -766,14 +770,28 @@ text, and never claims a request completed when it did not.
 adapter, so an initial replay can never mark a marker-bearing row processed while recovery is missing.
 
 **Cron runs recover output, not execution.** A job records the marker of the turn it admitted
-(`orch_cron_jobs.pending_*`). On restart, recovery checks that the session is not still in flight,
-collects the turn's text, and routes it, then records the run as attempted. The marker is cleared only
-after a successful collection; a run that errored after admission leaves it for the next pass.
-Permanent probe failures (missing session, truncated output), a delivered turn with no text, and a
-consumed marker with nothing pending settle the run as incomplete instead of retrying forever; a
-marker still queued in the inbox stays recoverable for the next pass. Routine bodies are **not**
-replayed: they mutate files, so a routine interrupted mid-body is reported as incomplete rather than
-re-run or presented as finished.
+(`orch_cron_jobs.pending_*`). A live turn consumes that marker in `TurnConfig.OnCollected` before
+releasing the session lock. On restart, recovery takes the same lock, revalidates the marker, checks
+that the session is not still in flight, collects the turn's text, and consumes the marker before
+releasing the lock, then routes it. Non-collectable states (`indeterminate`, `routine-run`) carry a
+unique generation, and recovery clears only the generation it revalidated, so a stale pass cannot
+delete a newer run. Concurrent passes therefore cannot route the same output twice. A completed
+execution never clears unconditionally: the `notify-user` route queues its result in the outbox with a
+deterministic ID before consuming the marker, while every other route keeps the marker itself as the
+durable intent until `execute` has routed successfully (and a missing chat therefore leaves it
+pending). Recovery honors the job's configured route policy the same way and revalidates ownership
+before routing. Routine runs compare-and-clear their generation, and recovery reuses the same outbox
+ID. A crash between collection and delivery therefore neither loses nor duplicates the response. A
+post-collection cleanup error still routes the collected output instead of turning it into a failure.
+The marker is cleared only after a successful collection; a run that errored after admission leaves it
+for the next pass and logs the transient error without routing a terminal failure, so recovery cannot
+later contradict it. An admission whose marker cannot be saved is retried first, then recorded as an
+indeterminate pending run and settled as untracked. Permanent probe failures (missing session, truncated
+output), a delivered turn with no text, and a consumed marker with nothing pending settle the run as
+incomplete instead of retrying forever; a marker still queued in the inbox stays recoverable for the
+next pass. Routine bodies are **not** replayed: a collected turn leaves a run-level `routine-run`
+pending state until the body finishes, and recovery settles an unfinished routine as incomplete rather
+than re-running it.
 
 ---
 

@@ -80,6 +80,11 @@ type TurnConfig struct {
 	// can be re-collected after a restart. An error aborts the turn, and the
 	// returned result still carries the admitted marker.
 	OnAdmitted func(Admitted) error
+	// OnCollected, when non-nil, runs after the turn's output is collected and
+	// before the session lock is released. Callers use it to consume a recovery
+	// marker while the turn still owns the session, so recovery cannot collect
+	// the same output concurrently.
+	OnCollected func(*TurnResult) error
 }
 
 // SyntheticEvent is an external/background event admitted to a session
@@ -187,6 +192,11 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
 	}
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(turn); err != nil {
+			return turn, err
+		}
+	}
 	return turn, nil
 }
 
@@ -255,6 +265,11 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 	turn, err := c.collectTurn(ctx, info.ID, item.ID)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(turn); err != nil {
+			return turn, err
+		}
 	}
 	return turn, nil
 }

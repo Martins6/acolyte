@@ -11,12 +11,12 @@ import (
 	"github.com/martins6/acolyte/internal/store/orch"
 )
 
-func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) (string, string, error) {
+func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store.Store, job orch.CronJob) (string, string, bool, bool, string, error) {
 	if s.turn == nil {
-		return "", "", fmt.Errorf("cron: OpenCode turn runner is not configured")
+		return "", "", false, false, "", fmt.Errorf("cron: OpenCode turn runner is not configured")
 	}
 	if strings.TrimSpace(job.Prompt) == "" {
-		return "", "", fmt.Errorf("cron: prompt is empty")
+		return "", "", false, false, "", fmt.Errorf("cron: prompt is empty")
 	}
 
 	thread := cronThread(job)
@@ -24,24 +24,78 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 	if sessionID == "" {
 		session, ok, err := st.Orch().GetSessionByThread(thread)
 		if err != nil {
-			return "", "", err
+			return "", "", false, false, "", err
 		}
 		if ok {
 			sessionID = session.OpenCodeSessionID
 		}
 	}
 
+	meta, _ := parseJobMeta(job.Meta)
+	durableRoute := meta.OnSuccess == "" || meta.OnSuccess == "notify-user"
+	admitted := false
+	collected := false
+	routed := false
+	generation := ""
 	result, err := s.turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        job.Prompt,
 		Description: "Scheduled prompt: " + job.Title,
 		Metadata:    map[string]any{"cron_job": job.Title},
 	}, opencode.TurnConfig{
 		Workspace: agent.Workspace,
-		OnAdmitted: func(admitted opencode.Admitted) error {
-			return st.Orch().SetCronJobPending(job.ID, admitted.SessionID, admitted.InputID, "turn", s.now())
+		OnAdmitted: func(admittedTurn opencode.Admitted) error {
+			// The callback means OpenCode accepted the input even if the marker
+			// write below fails, so the run is never misclassified as
+			// pre-admission.
+			admitted = true
+			if err := persistAdmittedPending(st, job.ID, admittedTurn.SessionID, admittedTurn.InputID, "turn", s.now()); err != nil {
+				// Keep a durable indeterminate marker so recovery settles the
+				// run instead of routing a terminal failure while it runs.
+				_ = st.Orch().SetCronJobPending(job.ID, "", cronPendingToken(), "indeterminate", s.now())
+				return err
+			}
+			return nil
+		},
+		OnCollected: func(turn *opencode.TurnResult) error {
+			collected = true
+			generation = turn.InputID
+			// For the user notification route, queue the output with a
+			// deterministic ID before consuming the marker. For every other
+			// route, keep the marker pending until execute has routed the
+			// output; the marker itself is the durable recovery handle.
+			if durableRoute {
+				var routeErr error
+				routed, routeErr = s.enqueuePromptOutput(st, job, turn.InputID, turn)
+				if routeErr != nil {
+					return routeErr
+				}
+			}
+			if !routed {
+				admitted = true
+				return nil
+			}
+			// Still holding the session lock here: consume the exact marker
+			// before another process or recovery pass can see it.
+			cleared, clearErr := st.Orch().ClearCronJobPendingIf(job.ID, turn.InputID)
+			if clearErr != nil {
+				return clearErr
+			}
+			if !cleared {
+				return fmt.Errorf("cron: pending marker for %s was replaced", job.Title)
+			}
+			admitted = false
+			generation = ""
+			return nil
 		},
 	})
 	if err != nil {
+		if collected && result != nil {
+			// The output was collected; the error is post-collection cleanup or
+			// durable delivery setup. Route the real output when the marker is
+			// still pending, otherwise it is already queued.
+			s.logJob(st, job, "warn", "turn collected but post-collection delivery failed: "+err.Error())
+			return result.ResponseText, result.SessionID, admitted, routed, generation, nil
+		}
 		created := ""
 		if result != nil {
 			created = result.SessionID
@@ -49,15 +103,16 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		if created != "" {
 			_, _ = st.Orch().UpsertSession(thread, created, s.now())
 		}
-		return "", created, err
+		return "", created, admitted, routed, generation, err
 	}
-	// The turn was collected, so recovery must not collect it again even if
-	// persisting the session mapping below fails.
-	_ = st.Orch().ClearCronJobPending(job.ID)
+	// The marker was consumed by OnCollected while the session lock was held.
 	if _, err := st.Orch().UpsertSession(thread, result.SessionID, s.now()); err != nil {
-		return result.ResponseText, result.SessionID, err
+		// The output is already collected and will be routed; only the thread
+		// mapping failed, so log it instead of turning a completed run into a
+		// recoverable (and already cleared) one.
+		s.logJob(st, job, "warn", "turn collected but session mapping could not be saved: "+err.Error())
 	}
-	return result.ResponseText, result.SessionID, nil
+	return result.ResponseText, result.SessionID, admitted, routed, generation, nil
 }
 
 func cronThread(job orch.CronJob) string {

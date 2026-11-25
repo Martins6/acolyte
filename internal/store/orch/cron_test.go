@@ -144,3 +144,39 @@ func TestCronPendingTurnLifecycle(t *testing.T) {
 		t.Error("SetCronJobPending(missing) error = nil, want error")
 	}
 }
+
+func TestClearCronJobPendingIf(t *testing.T) {
+	store := migrateTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.AddCronJob(CronJob{
+		ID: "job_1", Title: "report", Kind: "prompt", Spec: "@every 1h", CreatedAt: now, Enabled: true,
+	}); err != nil {
+		t.Fatalf("AddCronJob() error: %v", err)
+	}
+	if err := store.SetCronJobPending("job_1", "ses_1", "msg_1", "turn", now); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+
+	cleared, err := store.ClearCronJobPendingIf("job_1", "msg_stale")
+	if err != nil {
+		t.Fatalf("ClearCronJobPendingIf() error: %v", err)
+	}
+	if cleared {
+		t.Error("stale generation cleared the pending state")
+	}
+	pending, ok, err := store.CronJobPending("job_1")
+	if err != nil || !ok || pending.MarkerID != "msg_1" {
+		t.Fatalf("pending = %+v, ok = %v, err = %v; want msg_1 intact", pending, ok, err)
+	}
+
+	cleared, err = store.ClearCronJobPendingIf("job_1", "msg_1")
+	if err != nil {
+		t.Fatalf("ClearCronJobPendingIf() error: %v", err)
+	}
+	if !cleared {
+		t.Error("matching generation was not cleared")
+	}
+	if _, ok, err := store.CronJobPending("job_1"); err != nil || ok {
+		t.Errorf("pending after clear = ok %v, err %v; want none", ok, err)
+	}
+}

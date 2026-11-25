@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/martins6/acolyte/internal/comm"
+	"github.com/martins6/acolyte/internal/lock"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
@@ -39,22 +41,36 @@ func (f *fakeSink) Inbox(_ context.Context, _ registry.Agent, sessionID, text st
 }
 
 type fakeTurn struct {
-	calls    int
-	response string
-	events   []opencode.SyntheticEvent
-	err      error
+	calls          int
+	response       string
+	events         []opencode.SyntheticEvent
+	err            error
+	emptySession   bool
+	postCollectErr error
 }
 
 func (f *fakeTurn) RunSyntheticTurn(_ context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.calls++
 	f.events = append(f.events, ev)
-	result := &opencode.TurnResult{SessionID: "ses_fake", InputID: "msg_fake", ResponseText: f.response}
+	returnedSession := "ses_fake"
+	if f.emptySession {
+		returnedSession = ""
+	}
+	result := &opencode.TurnResult{SessionID: returnedSession, InputID: "msg_fake", ResponseText: f.response}
 	// Mirror the real client: the marker is handed over at admission, before
 	// the turn is collected.
 	if cfg.OnAdmitted != nil {
 		if err := cfg.OnAdmitted(opencode.Admitted{SessionID: result.SessionID, InputID: result.InputID}); err != nil {
 			return nil, err
 		}
+	}
+	if f.err == nil && cfg.OnCollected != nil {
+		if err := cfg.OnCollected(result); err != nil {
+			return result, err
+		}
+	}
+	if f.err == nil && f.postCollectErr != nil {
+		return result, f.postCollectErr
 	}
 	return result, f.err
 }
@@ -214,6 +230,113 @@ func (f *collectingTurn) InboxPending(context.Context, string, string) (bool, er
 	return f.inboxPending, f.inboxErr
 }
 
+// countingCollector is safe for the concurrent recovery test.
+type countingCollector struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingCollector) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, errors.New("countingCollector does not run turns")
+}
+
+func (c *countingCollector) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
+	return &opencode.SessionInfo{ID: "ses_once"}, nil
+}
+
+func (c *countingCollector) CollectDelivered(_ context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return &opencode.TurnResult{SessionID: sessionID, InputID: markerID, ResponseText: "once"}, true, nil
+}
+
+func (c *countingCollector) InboxPending(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+func (c *countingCollector) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+type countingSink struct {
+	mu       sync.Mutex
+	notified int
+}
+
+func (c *countingSink) NotifyUser(context.Context, registry.Agent, string) error {
+	c.mu.Lock()
+	c.notified++
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *countingSink) Inbox(context.Context, registry.Agent, string, string, map[string]any) (string, string, error) {
+	return "", "", nil
+}
+
+func (c *countingSink) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.notified
+}
+
+// collectingRoutine simulates a routine that consumes one turn and then fails
+// in its post-turn work.
+type collectingRoutine struct{}
+
+func (collectingRoutine) Name() string        { return "turn-taking" }
+func (collectingRoutine) Owner() string       { return "test" }
+func (collectingRoutine) Description() string { return "test routine" }
+func (collectingRoutine) Args() []routine.ArgSpec {
+	return nil
+}
+func (collectingRoutine) Run(_ context.Context, env routine.Env, _ map[string]any) (string, error) {
+	if err := env.OnAdmitted(opencode.Admitted{SessionID: "ses_r", InputID: "msg_r"}); err != nil {
+		return "", err
+	}
+	if err := env.OnCollected(&opencode.TurnResult{SessionID: "ses_r", InputID: "msg_r"}); err != nil {
+		return "", err
+	}
+	return "", errors.New("post-turn failure")
+}
+
+// TestRoutineKeepsRunPendingAfterTurnCollected ensures the routine's durable
+// state survives the gap between a collected turn and routine completion.
+func TestRoutineKeepsRunPendingAfterTurnCollected(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "turn-taking", Kind: "routine", Spec: "@every 1h", Routine: "turn-taking",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	routines := routine.NewRegistry()
+	if err := routines.Register(collectingRoutine{}); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+	svc := startTestService(t, reg, routines, &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("turn-taking")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok {
+		t.Fatal("pending run was lost after the turn was collected")
+	}
+	if pending.Kind != "routine-run" || pending.MarkerID == "" {
+		t.Errorf("pending = %+v, want a run-level routine-run state", pending)
+	}
+}
+
 func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	reg, ws, now := setupCron(t)
 	addJob(t, ws, orch.CronJob{
@@ -260,6 +383,695 @@ func TestRecoverPendingTurnsReportsRecoveredOutput(t *testing.T) {
 	}
 	if turn.calls != 0 {
 		t.Errorf("synthetic turns = %d, want 0 (recovery must never re-run a job)", turn.calls)
+	}
+}
+
+// liveLockingTurn simulates a real turn that holds the session lock through
+// admission and collection, then consumes the marker before releasing it.
+type liveLockingTurn struct {
+	mu            sync.Mutex
+	locked        chan struct{}
+	release       chan struct{}
+	recoveryCalls int
+}
+
+func (t *liveLockingTurn) RunSyntheticTurn(ctx context.Context, _ string, _ opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
+	held, err := lock.AcquireSession(ctx, "ses_live")
+	if err != nil {
+		return nil, err
+	}
+	defer held.Release()
+
+	result := &opencode.TurnResult{SessionID: "ses_live", InputID: "msg_live", ResponseText: "once"}
+	if cfg.OnAdmitted != nil {
+		if err := cfg.OnAdmitted(opencode.Admitted{SessionID: result.SessionID, InputID: result.InputID}); err != nil {
+			return nil, err
+		}
+	}
+	close(t.locked)
+	<-t.release
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(result); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func (t *liveLockingTurn) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
+	return &opencode.SessionInfo{ID: "ses_live"}, nil
+}
+
+func (t *liveLockingTurn) CollectDelivered(_ context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error) {
+	t.mu.Lock()
+	t.recoveryCalls++
+	t.mu.Unlock()
+	return &opencode.TurnResult{SessionID: sessionID, InputID: markerID, ResponseText: "once"}, true, nil
+}
+
+func (t *liveLockingTurn) InboxPending(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+func (t *liveLockingTurn) recoveryCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.recoveryCalls
+}
+
+// TestLiveCollectionConsumesMarkerBeforeSessionLockRelease ensures recovery
+// cannot collect a live turn's output in the gap before the marker is cleared.
+func TestLiveCollectionConsumesMarkerBeforeSessionLockRelease(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	turn := &liveLockingTurn{locked: make(chan struct{}), release: make(chan struct{})}
+	sink := &countingSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	executeDone := make(chan struct{})
+	go func() {
+		svc.execute(context.Background(), pair, job)
+		close(executeDone)
+	}()
+	<-turn.locked
+
+	// Recovery sees the marker while the live turn holds the lock, then waits.
+	recoverDone := make(chan struct{})
+	go func() {
+		svc.recoverPendingTurns(context.Background(), pair)
+		close(recoverDone)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(turn.release)
+	<-executeDone
+	<-recoverDone
+
+	if got := turn.recoveryCount(); got != 0 {
+		t.Errorf("recovery collected %d time(s), want 0 after the live turn consumed its marker", got)
+	}
+	if got := sink.count(); got != 1 {
+		t.Errorf("notifications = %d, want exactly one", got)
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want cleared by the live turn", turns)
+	}
+}
+
+// staleCollector simulates a new run replacing the pending generation while a
+// recovery pass is probing the old one.
+type staleCollector struct {
+	orch    *orch.Store
+	jobID   string
+	updated bool
+}
+
+func (c *staleCollector) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, errors.New("staleCollector does not run turns")
+}
+
+func (c *staleCollector) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
+	return &opencode.SessionInfo{ID: "ses_old"}, nil
+}
+
+func (c *staleCollector) CollectDelivered(context.Context, string, string) (*opencode.TurnResult, bool, error) {
+	if !c.updated {
+		c.updated = true
+		if err := c.orch.SetCronJobPending(c.jobID, "ses_new", "msg_new", "turn", time.Now().UTC()); err != nil {
+			return nil, false, err
+		}
+	}
+	return nil, false, nil
+}
+
+func (c *staleCollector) InboxPending(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+// TestRecoverPendingTurnsDoesNotClearNewerRun ensures a stale snapshot cannot
+// clear a generation that a later run installed while recovery was probing.
+func TestRecoverPendingTurnsDoesNotClearNewerRun(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_old", "msg_old", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	collector := &staleCollector{orch: pair.store.Orch(), jobID: job.ID}
+	svc.turn = collector
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok || pending.MarkerID != "msg_new" || pending.SessionID != "ses_new" {
+		t.Errorf("pending = %+v, ok = %v; want the newer generation intact", pending, ok)
+	}
+	if storeLogContains(t, pair.store, "the turn produced no output") {
+		t.Errorf("logs = %v, stale pass settled a newer run", storeLogMessages(t, pair.store))
+	}
+}
+
+// newerRunTurn installs a newer pending generation after its own collection,
+// simulating another process starting the next run.
+type newerRunTurn struct {
+	orch  *orch.Store
+	jobID string
+}
+
+func (t *newerRunTurn) RunSyntheticTurn(_ context.Context, _ string, _ opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
+	result := &opencode.TurnResult{SessionID: "ses_old", InputID: "msg_old", ResponseText: "old answer"}
+	if cfg.OnAdmitted != nil {
+		if err := cfg.OnAdmitted(opencode.Admitted{SessionID: result.SessionID, InputID: result.InputID}); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(result); err != nil {
+			return result, err
+		}
+	}
+	if err := t.orch.SetCronJobPending(t.jobID, "ses_new", "msg_new", "turn", time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// TestExecuteDoesNotClearNewerRun ensures a completed execution never erases a
+// pending generation installed by the next run.
+func TestExecuteDoesNotClearNewerRun(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	svc.turn = &newerRunTurn{orch: pair.store.Orch(), jobID: job.ID}
+
+	svc.execute(context.Background(), pair, job)
+
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok || pending.MarkerID != "msg_new" || pending.SessionID != "ses_new" {
+		t.Errorf("pending = %+v, ok = %v; want the newer generation intact", pending, ok)
+	}
+}
+
+// TestExecuteRoutesOutputAfterPostCollectionCleanupError ensures collected text
+// is delivered even when the turn runner reports a cleanup error afterwards.
+func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	turn := &fakeTurn{response: "the answer", postCollectErr: errors.New("lock release failed")}
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	if len(sink.notified) != 1 || sink.notified[0] != "the answer" {
+		t.Errorf("notified = %v, want the collected answer", sink.notified)
+	}
+	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
+		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
+	}
+	if !storeLogContains(t, pair.store, "post-collection delivery failed") {
+		t.Errorf("logs = %v, want the delivery warning", storeLogMessages(t, pair.store))
+	}
+}
+
+// replacingCollector installs a newer pending generation during a successful
+// collection, simulating another process starting the next run.
+type replacingCollector struct {
+	orch    *orch.Store
+	jobID   string
+	updated bool
+}
+
+func (c *replacingCollector) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, errors.New("replacingCollector does not run turns")
+}
+
+func (c *replacingCollector) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
+	return &opencode.SessionInfo{ID: "ses_old"}, nil
+}
+
+func (c *replacingCollector) CollectDelivered(_ context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error) {
+	if !c.updated {
+		c.updated = true
+		if err := c.orch.SetCronJobPending(c.jobID, "ses_new", "msg_new", "turn", time.Now().UTC()); err != nil {
+			return nil, false, err
+		}
+	}
+	return &opencode.TurnResult{SessionID: sessionID, InputID: markerID, ResponseText: "old"}, true, nil
+}
+
+func (c *replacingCollector) InboxPending(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+// TestRecoverPendingTurnsDoesNotRouteAfterNewerRun ensures a recovery pass that
+// lost ownership during collection neither routes nor marks the newer run.
+func TestRecoverPendingTurnsDoesNotRouteAfterNewerRun(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_old", "msg_old", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	sink := &countingSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	svc.turn = &replacingCollector{orch: pair.store.Orch(), jobID: job.ID}
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	if got := sink.count(); got != 0 {
+		t.Errorf("notifications = %d, want 0 after losing ownership", got)
+	}
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok || pending.MarkerID != "msg_new" {
+		t.Errorf("pending = %+v, ok = %v; want the newer generation intact", pending, ok)
+	}
+	if storeLogContains(t, pair.store, "recovered output from an interrupted run") {
+		t.Errorf("logs = %v, stale pass routed old output", storeLogMessages(t, pair.store))
+	}
+}
+
+// TestPromptOutputIsDurableBeforeMarkerClear ensures the outbox row exists with
+// a deterministic ID before recovery state is consumed, and that recovery
+// re-uses that ID instead of delivering twice.
+func TestPromptOutputIsDurableBeforeMarkerClear(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := st.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
+		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "durable answer"}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	outbox, err := pair.store.CommTG().ListOutbox(10)
+	if err != nil {
+		t.Fatalf("ListOutbox() error: %v", err)
+	}
+	wantID := cronOutputID(job.ID, "msg_fake")
+	if len(outbox) != 1 || outbox[0].EnvelopeID != wantID || outbox[0].Text != "durable answer" {
+		t.Fatalf("outbox = %+v, want one row %q", outbox, wantID)
+	}
+	if len(sink.notified) != 0 {
+		t.Errorf("notified = %v, want direct outbox delivery only", sink.notified)
+	}
+
+	// Simulate a crash before the marker clear: recovery must re-use the ID.
+	if err := pair.store.Orch().SetCronJobPending(job.ID, "ses_fake", "msg_fake", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	svc.turn = &collectingTurn{delivered: true, text: "durable answer"}
+	svc.recoverPendingTurns(context.Background(), pair)
+	outbox, err = pair.store.CommTG().ListOutbox(10)
+	if err != nil {
+		t.Fatalf("ListOutbox() error: %v", err)
+	}
+	if len(outbox) != 1 || outbox[0].EnvelopeID != wantID {
+		t.Errorf("outbox after recovery = %+v, want the original row only", outbox)
+	}
+	if len(sink.notified) != 0 {
+		t.Errorf("notified = %v, want no duplicate route", sink.notified)
+	}
+}
+
+// TestPromptInboxRouteKeepsMarkerUntilRouted ensures non-notify policies use
+// the pending marker as their durable intent until routing succeeds.
+func TestPromptInboxRouteKeepsMarkerUntilRouted(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: `{"on_success":"inbox"}`,
+	})
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "the answer"}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	if len(sink.inboxed) != 1 || sink.inboxed[0] != "the answer" {
+		t.Errorf("inboxed = %v, want the collected answer", sink.inboxed)
+	}
+	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
+		t.Errorf("pending turns = %+v, %v; want cleared after routing", turns, err)
+	}
+}
+
+// TestPromptWithoutChatKeepsMarkerPending ensures the marker survives when the
+// notification route cannot deliver, so recovery can retry instead of losing it.
+func TestPromptWithoutChatKeepsMarkerPending(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	sink := &fakeSink{notifyErr: errors.New("no private chat")}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "the answer"}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok || pending.MarkerID != "msg_fake" {
+		t.Errorf("pending = %+v, ok = %v; want the marker kept for recovery", pending, ok)
+	}
+}
+
+// TestExecuteRoutesCollectedOutputWhenSessionMappingFails ensures a collected
+// turn is still delivered when only persisting the thread mapping fails.
+func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	turn := &fakeTurn{response: "the answer", emptySession: true}
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	if len(sink.notified) != 1 || sink.notified[0] != "the answer" {
+		t.Errorf("notified = %v, want the collected answer", sink.notified)
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(now.Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want cleared after collection", turns)
+	}
+	if !storeLogContains(t, pair.store, "session mapping could not be saved") {
+		t.Errorf("logs = %v, want the mapping warning", storeLogMessages(t, pair.store))
+	}
+}
+
+// TestAdmittedPendingRetriesTransientWrite ensures a transient store failure
+// during admission does not discard the marker and the output remains
+// recoverable.
+func TestAdmittedPendingRetriesTransientWrite(t *testing.T) {
+	oldSet := setCronPending
+	oldRetries := cronPendingRetries
+	oldDelay := cronPendingRetryDelay
+	oldGrace := cronResumeGrace
+	t.Cleanup(func() {
+		setCronPending = oldSet
+		cronPendingRetries = oldRetries
+		cronPendingRetryDelay = oldDelay
+		cronResumeGrace = oldGrace
+	})
+	failures := 1
+	setCronPending = func(st *store.Store, jobID, sessionID, markerID, kind string, at time.Time) error {
+		if failures > 0 {
+			failures--
+			return errors.New("database busy")
+		}
+		return st.Orch().SetCronJobPending(jobID, sessionID, markerID, kind, at)
+	}
+	cronPendingRetries = 3
+	cronPendingRetryDelay = time.Millisecond
+	cronResumeGrace = 0
+
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "partial", err: errors.New("collection failed")}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil || !ok || pending.MarkerID != "msg_fake" {
+		t.Fatalf("pending = %+v, ok = %v, err = %v; want the admitted marker", pending, ok, err)
+	}
+
+	svc.turn = &collectingTurn{delivered: true, text: "recovered"}
+	svc.recoverPendingTurns(context.Background(), pair)
+	if len(sink.notified) != 1 || sink.notified[0] != "recovered" {
+		t.Errorf("notified = %v, want the recovered output", sink.notified)
+	}
+	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
+		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
+	}
+}
+
+// TestRecoverPendingTurnsSettlesIndeterminateRun covers an admitted turn whose
+// marker could not be persisted: recovery settles it instead of probing.
+func TestRecoverPendingTurnsSettlesIndeterminateRun(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "", "run_indeterminate", "indeterminate", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	turn := &collectingTurn{delivered: true, text: "ignored"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want settled", turns)
+	}
+	if len(turn.collected) != 0 {
+		t.Errorf("collected = %v, want no probe for an indeterminate run", turn.collected)
+	}
+	if !storeLogContains(t, pair.store, "could not be tracked reliably") {
+		t.Errorf("logs = %v, want the indeterminate notice", storeLogMessages(t, pair.store))
+	}
+}
+
+// TestRecoverPendingTurnsSettlesUnfinishedRoutine covers a routine that
+// consumed its last turn but stopped before the body finished: recovery settles
+// it as incomplete and never replays the body.
+func TestRecoverPendingTurnsSettlesUnfinishedRoutine(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "dream", Kind: "routine", Spec: "@every 72h", Routine: "dream",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("dream")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "", "run_routine", "routine-run", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	turn := &collectingTurn{delivered: true, text: "ignored"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want settled", turns)
+	}
+	if len(turn.collected) != 0 {
+		t.Errorf("collected = %v, want no replay of the routine body", turn.collected)
+	}
+	if !storeLogContains(t, pair.store, "the routine body did not finish") {
+		t.Errorf("logs = %v, want the incomplete-routine note", storeLogMessages(t, pair.store))
+	}
+}
+
+// TestRecoverPendingTurnsConcurrentPassesRouteOnce ensures the session lock plus
+// marker revalidation makes recovery idempotent under concurrent passes.
+func TestRecoverPendingTurnsConcurrentPassesRouteOnce(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_once", "msg_once", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	collector := &countingCollector{}
+	sink := &countingSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, collector, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.recoverPendingTurns(context.Background(), pair)
+		}()
+	}
+	wg.Wait()
+
+	if got := collector.count(); got != 1 {
+		t.Errorf("collect calls = %d, want 1", got)
+	}
+	if got := sink.count(); got != 1 {
+		t.Errorf("notifications = %d, want 1", got)
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want cleared once", turns)
 	}
 }
 
@@ -362,7 +1174,8 @@ func TestExecutePreservesPendingMarkerAfterTurnError(t *testing.T) {
 		Enabled: true, CreatedAt: now, Meta: "{}",
 	})
 	turn := &fakeTurn{response: "partial", err: errors.New("collection failed")}
-	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
 	defer svc.Stop()
 	pair := servicePair(t, svc, "valet")
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
@@ -381,6 +1194,12 @@ func TestExecutePreservesPendingMarkerAfterTurnError(t *testing.T) {
 	}
 	if turns[0].JobID != job.ID || turns[0].MarkerID != "msg_fake" || turns[0].SessionID != "ses_fake" {
 		t.Errorf("pending turn = %+v, want job %q with the admitted marker", turns[0], job.ID)
+	}
+	if len(sink.notified) != 0 {
+		t.Errorf("notified = %v, want no terminal failure while recovery owns the output", sink.notified)
+	}
+	if !storeLogContains(t, pair.store, "recovery will collect its output") {
+		t.Errorf("logs = %v, want the transient-error note", storeLogMessages(t, pair.store))
 	}
 }
 
@@ -554,6 +1373,63 @@ func TestRecoverPendingTurnsSettlesDefinitiveErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRecoverPendingTurnsWaitsForSessionLock ensures recovery never collects
+// while another producer owns the session, and retries after the lock frees.
+func TestRecoverPendingTurnsWaitsForSessionLock(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_locked", "msg_locked", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	held, err := lock.AcquireSession(context.Background(), "ses_locked")
+	if err != nil {
+		t.Fatalf("AcquireSession() error: %v", err)
+	}
+	oldWait := cronSessionLockWait
+	cronSessionLockWait = 25 * time.Millisecond
+	t.Cleanup(func() { cronSessionLockWait = oldWait })
+
+	turn := &collectingTurn{delivered: true, text: "collected"}
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+
+	svc.recoverPendingTurns(context.Background(), pair)
+	if len(turn.collected) != 0 {
+		t.Fatalf("collected = %v, want none while the session lock is held", turn.collected)
+	}
+
+	if err := held.Release(); err != nil {
+		t.Fatalf("Release() error: %v", err)
+	}
+	svc.recoverPendingTurns(context.Background(), pair)
+	if len(turn.collected) != 1 || turn.collected[0] != "msg_locked" {
+		t.Errorf("collected = %v, want the marker after the lock freed", turn.collected)
+	}
+	turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+	if err != nil {
+		t.Fatalf("PendingCronTurns() error: %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("pending turns = %+v, want cleared after collection", turns)
 	}
 }
 
@@ -758,7 +1634,7 @@ func TestPersistRouteMemoryFallback(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	service := &Service{now: func() time.Time { return now }}
-	err = service.persistRoute(st, registry.Agent{Name: "valet", Workspace: notDir}, orch.CronJob{Title: "route"},
+	_, err = service.persistRoute(st, registry.Agent{Name: "valet", Workspace: notDir}, orch.CronJob{Title: "route"},
 		&comm.DeliveryError{EnvelopeID: "env_mem", ChatID: 10, Text: "output"})
 	if !errors.Is(err, errMemoryOnlyRoute) {
 		t.Fatalf("persistRoute() error = %v, want errMemoryOnlyRoute", err)

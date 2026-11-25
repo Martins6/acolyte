@@ -50,6 +50,9 @@ type Env struct {
 	// run interrupted by a restart can still have its output collected. It is
 	// optional and must not change routine behavior.
 	OnAdmitted func(opencode.Admitted) error
+	// OnCollected consumes that marker while the turn still holds the session
+	// lock, so recovery cannot collect the same output concurrently.
+	OnCollected func(*opencode.TurnResult) error
 }
 
 func (e Env) Clock() time.Time {
