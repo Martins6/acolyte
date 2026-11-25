@@ -641,6 +641,15 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			continue
 		}
 		if pending.Kind == "turn" {
+			// Persist the thread mapping before consuming the marker; inbox
+			// route replies resolve their recipient from this mapping.
+			if result.SessionID != "" {
+				if _, err := pair.store.Orch().UpsertSession(cronThread(job), result.SessionID, s.now()); err != nil {
+					releaseLock()
+					log.Printf("cron: persist recovered session for %s: %v", job.Title, err)
+					continue
+				}
+			}
 			// Persist the route intent (notify-user, inbox, or log) before
 			// consuming the marker. Recovery then only needs the durable
 			// intent, and a crash cannot reroute the output.
