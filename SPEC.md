@@ -779,8 +779,9 @@ delete a newer run. Concurrent passes therefore cannot route the same output twi
 execution never clears unconditionally: the `notify-user` route queues its result in the outbox with a
 deterministic ID before consuming the marker, while every other route keeps the marker itself as the
 durable intent until `execute` has routed successfully (and a missing chat therefore leaves it
-pending). Routine runs compare-and-clear their generation, and recovery reuses the same outbox ID. A
-crash between collection and delivery therefore neither loses nor duplicates the response. A
+pending). Recovery honors the job's configured route policy the same way and revalidates ownership
+before routing. Routine runs compare-and-clear their generation, and recovery reuses the same outbox
+ID. A crash between collection and delivery therefore neither loses nor duplicates the response. A
 post-collection cleanup error still routes the collected output instead of turning it into a failure.
 The marker is cleared only after a successful collection; a run that errored after admission leaves it
 for the next pass and logs the transient error without routing a terminal failure, so recovery cannot

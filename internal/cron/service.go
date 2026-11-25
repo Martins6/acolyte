@@ -613,47 +613,81 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 			releaseLock()
 			continue
 		}
-		// Persist a prompt result before consuming its marker, with the same
-		// deterministic outbox ID the live path uses. A crash between queueing
-		// and clearing therefore cannot lose the response.
-		routedOutput := false
-		if pending.Kind == "turn" {
-			var enqueueErr error
-			routedOutput, enqueueErr = s.enqueuePromptOutput(pair.store, job, pending.MarkerID, result)
+		// Revalidate ownership before routing. Collection happened under the
+		// session lock, but a producer that does not use that lock may have
+		// installed a newer generation.
+		current, ok, checkErr = pair.store.Orch().CronJobPending(job.ID)
+		if checkErr != nil {
+			releaseLock()
+			log.Printf("cron: recheck pending turn for %s: %v", job.Title, checkErr)
+			continue
+		}
+		if !ok || current.MarkerID != pending.MarkerID {
+			releaseLock()
+			continue
+		}
+		meta, metaErr := parseJobMeta(job.Meta)
+		if metaErr != nil {
+			releaseLock()
+			s.settleInterruptedRun(pair.store, job, pending.MarkerID, "recovered output could not be routed: "+metaErr.Error())
+			continue
+		}
+		notify := pending.Kind == "turn" && (meta.OnSuccess == "" || meta.OnSuccess == "notify-user")
+		if notify {
+			// Queue the user notification with the deterministic outbox ID
+			// before consuming the marker; a crash cannot lose the response.
+			routed, enqueueErr := s.enqueuePromptOutput(pair.store, job, pending.MarkerID, result)
 			if enqueueErr != nil {
 				releaseLock()
 				log.Printf("cron: queue recovered output for %s: %v", job.Title, enqueueErr)
 				continue
 			}
+			if routed {
+				cleared, clearErr := pair.store.Orch().ClearCronJobPendingIf(job.ID, pending.MarkerID)
+				if clearErr != nil {
+					releaseLock()
+					log.Printf("cron: consume pending turn for %s: %v", job.Title, clearErr)
+					continue
+				}
+				if !cleared {
+					releaseLock()
+					continue
+				}
+				releaseLock()
+				s.logJob(pair.store, job, "info", "recovered output from an interrupted run")
+				_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
+				continue
+			}
+			// No allowed chat yet: fall through to the normal route, keeping
+			// the marker pending until that route succeeds.
 		}
-		// Consume the marker while still holding the session lock, so a
-		// concurrent recovery pass cannot collect and route the same output.
-		// Compare-and-clear also protects a newer run that replaced the state
-		// while this pass was collecting.
-		cleared, err := pair.store.Orch().ClearCronJobPendingIf(job.ID, pending.MarkerID)
-		if err != nil {
-			releaseLock()
-			log.Printf("cron: consume pending turn for %s: %v", job.Title, err)
-			continue
-		}
-		if !cleared {
-			releaseLock()
-			continue
-		}
+		// Non-notify routes (and notify-user with no chat) keep the marker as
+		// their durable intent. Release the session lock before routing: inbox
+		// routing may start a turn on this same session.
 		releaseLock()
-
 		note := "recovered output from an interrupted run"
 		if pending.Kind == "routine" {
 			note = "recovered turn output from an interrupted routine run; the routine body did not finish"
 		}
 		s.logJob(pair.store, job, "info", note)
-		if text := strings.TrimSpace(result.ResponseText); text != "" && !routedOutput {
-			meta, metaErr := parseJobMeta(job.Meta)
-			if metaErr != nil {
-				s.logJob(pair.store, job, "error", "recovered output could not be routed: "+metaErr.Error())
-			} else if routeErr := s.route(ctx, pair.store, pair.agent, job, meta, text, result.SessionID, true); routeErr != nil {
-				s.logJob(pair.store, job, "error", "routing recovered output failed: "+routeErr.Error())
+		if text := strings.TrimSpace(result.ResponseText); text != "" {
+			routeErr := s.route(ctx, pair.store, pair.agent, job, meta, text, result.SessionID, true)
+			routed := routeErr == nil
+			if routeErr != nil {
+				routed, _ = s.persistRoute(pair.store, pair.agent, job, routeErr)
 			}
+			if !routed {
+				s.logJob(pair.store, job, "error", "routing recovered output failed: "+routeErr.Error())
+				continue
+			}
+		}
+		cleared, clearErr := pair.store.Orch().ClearCronJobPendingIf(job.ID, pending.MarkerID)
+		if clearErr != nil {
+			log.Printf("cron: consume pending turn for %s: %v", job.Title, clearErr)
+			continue
+		}
+		if !cleared {
+			continue
 		}
 		_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
 	}
