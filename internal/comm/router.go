@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -293,7 +292,7 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 
 	info, err := prober.GetSession(ctx, sessionID)
 	if err != nil {
-		if permanentProbeError(err) {
+		if opencode.IsPermanentError(err) {
 			return r.settleProbeFailure(ctx, st, agent, env)
 		}
 		// A transient service error must not settle the message; look again.
@@ -316,7 +315,7 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 			}
 			return ReconcileUnrecoverable, nil
 		}
-		if permanentProbeError(err) {
+		if opencode.IsPermanentError(err) {
 			return r.settleProbeFailure(ctx, st, agent, env)
 		}
 		return ReconcileStillPending, err
@@ -342,7 +341,7 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 	// or it was consumed and produced nothing.
 	pending, err := prober.InboxPending(ctx, sessionID, marker)
 	if err != nil {
-		if permanentProbeError(err) {
+		if opencode.IsPermanentError(err) {
 			return r.settleProbeFailure(ctx, st, agent, env)
 		}
 		return ReconcileStillPending, err
@@ -421,27 +420,6 @@ func resumeGraceElapsed(item commtg.InboxItem, now time.Time) bool {
 		start = *item.AdmittedAt
 	}
 	return now.Sub(start) >= resumeGraceWindow
-}
-
-// permanentProbeError reports whether a recovery probe failed in a way that
-// retrying cannot fix: a missing session or a rejected request. Every 4xx
-// response is permanent except the two that explicitly describe a retryable
-// condition (request timeout and rate limiting); transport failures and 5xx
-// responses also remain pending.
-func permanentProbeError(err error) bool {
-	var apiErr *opencode.APIError
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-	if apiErr.Status < 400 || apiErr.Status >= 500 {
-		return false
-	}
-	switch apiErr.Status {
-	case http.StatusRequestTimeout, http.StatusTooManyRequests:
-		return false
-	default:
-		return true
-	}
 }
 
 // settleProbeFailure turns a permanent probe failure into a terminal notice.

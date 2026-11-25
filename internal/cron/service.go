@@ -497,6 +497,10 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		// read partial output and clear a marker that is not finished yet.
 		info, err := collector.GetSession(ctx, pending.SessionID)
 		if err != nil {
+			if opencode.IsPermanentError(err) {
+				s.settleInterruptedRun(pair.store, job, "the session is no longer available")
+				continue
+			}
 			log.Printf("cron: inspect pending session for %s: %v", job.Title, err)
 			continue
 		}
@@ -505,16 +509,23 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		}
 		result, delivered, err := collector.CollectDelivered(ctx, pending.SessionID, pending.MarkerID)
 		if err != nil {
+			if errors.Is(err, opencode.ErrTurnTruncated) {
+				s.settleInterruptedRun(pair.store, job, "the turn output exceeded the collection window")
+				continue
+			}
+			if opencode.IsPermanentError(err) {
+				s.settleInterruptedRun(pair.store, job, "the turn could no longer be collected")
+				continue
+			}
 			log.Printf("cron: collect pending turn for %s: %v", job.Title, err)
+			continue
+		}
+		if !delivered {
+			s.settleInterruptedRun(pair.store, job, "the turn produced no output")
 			continue
 		}
 
 		_ = pair.store.Orch().ClearCronJobPending(job.ID)
-		if !delivered {
-			s.logJob(pair.store, job, "error", "run interrupted: the turn produced no output")
-			_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
-			continue
-		}
 		note := "recovered output from an interrupted run"
 		if pending.Kind == "routine" {
 			note = "recovered turn output from an interrupted routine run; the routine body did not finish"
@@ -530,6 +541,15 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		}
 		_ = pair.store.Orch().MarkCronJobRun(job.ID, s.now())
 	}
+}
+
+// settleInterruptedRun stops a marker that can never produce output from being
+// probed forever. It clears the pending turn, records an honest incomplete
+// note, and marks the run as attempted.
+func (s *Service) settleInterruptedRun(st *store.Store, job orch.CronJob, reason string) {
+	_ = st.Orch().ClearCronJobPending(job.ID)
+	s.logJob(st, job, "error", "run interrupted: "+reason)
+	_ = st.Orch().MarkCronJobRun(job.ID, s.now())
 }
 
 // jobRunning reports whether a run of the job is in flight in this process.

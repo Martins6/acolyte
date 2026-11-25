@@ -746,9 +746,10 @@ text, and never claims a request completed when it did not.
 **Cron runs recover output, not execution.** A job records the marker of the turn it admitted
 (`orch_cron_jobs.pending_*`). On restart, recovery checks that the session is not still in flight,
 collects the turn's text, and routes it, then records the run as attempted. The marker is cleared only
-after a successful collection; a run that errored after admission leaves it for the next pass. Routine
-bodies are **not** replayed: they mutate files, so a routine interrupted mid-body is reported as
-incomplete rather than re-run or presented as finished.
+after a successful collection; a run that errored after admission leaves it for the next pass.
+Permanent probe failures (missing session, truncated output) and a turn with no output settle the run
+as incomplete instead of retrying forever. Routine bodies are **not** replayed: they mutate files, so
+a routine interrupted mid-body is reported as incomplete rather than re-run or presented as finished.
 
 ---
 

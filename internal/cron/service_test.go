@@ -187,6 +187,7 @@ type collectingTurn struct {
 	collected  []string
 	session    *opencode.SessionInfo
 	sessionErr error
+	collectErr error
 }
 
 func (f *collectingTurn) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
@@ -201,6 +202,9 @@ func (f *collectingTurn) GetSession(context.Context, string) (*opencode.SessionI
 
 func (f *collectingTurn) CollectDelivered(_ context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error) {
 	f.collected = append(f.collected, markerID)
+	if f.collectErr != nil {
+		return nil, false, f.collectErr
+	}
 	return &opencode.TurnResult{SessionID: sessionID, InputID: markerID, ResponseText: f.text}, f.delivered, nil
 }
 
@@ -447,6 +451,86 @@ func TestRecoverPendingTurnsLeavesBusySessionAlone(t *testing.T) {
 	}
 	if len(turns) != 1 {
 		t.Errorf("pending turns = %+v, want the row untouched", turns)
+	}
+}
+
+// TestRecoverPendingTurnsSettlesDefinitiveErrors covers probes that can never
+// heal: a deleted session or truncated output clears the marker and records an
+// incomplete run, while a transient error leaves the marker for the next pass.
+func TestRecoverPendingTurnsSettlesDefinitiveErrors(t *testing.T) {
+	cases := []struct {
+		name        string
+		turn        *collectingTurn
+		wantPending int
+		wantLog     string
+	}{
+		{
+			name:        "missing session",
+			turn:        &collectingTurn{sessionErr: &opencode.APIError{Status: 404}},
+			wantPending: 0,
+			wantLog:     "the session is no longer available",
+		},
+		{
+			name:        "truncated output",
+			turn:        &collectingTurn{collectErr: opencode.ErrTurnTruncated},
+			wantPending: 0,
+			wantLog:     "exceeded the collection window",
+		},
+		{
+			name:        "transient service error",
+			turn:        &collectingTurn{sessionErr: &opencode.APIError{Status: 503}},
+			wantPending: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg, ws, now := setupCron(t)
+			addJob(t, ws, orch.CronJob{
+				Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+				Enabled: true, CreatedAt: now, Meta: "{}",
+			})
+
+			st, err := store.Open(ws)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			job, err := st.Orch().GetCronJobByTitle("report")
+			if err != nil {
+				t.Fatalf("GetCronJobByTitle() error: %v", err)
+			}
+			if err := st.Orch().SetCronJobPending(job.ID, "ses_a", "msg_a", "turn", now.Add(-time.Hour)); err != nil {
+				t.Fatalf("SetCronJobPending() error: %v", err)
+			}
+			if err := st.Close(); err != nil {
+				t.Fatalf("close store: %v", err)
+			}
+
+			svc := startTestService(t, reg, routine.Default(), &fakeSink{}, tc.turn, "", now)
+			defer svc.Stop()
+			pair := servicePair(t, svc, "valet")
+
+			svc.recoverPendingTurns(context.Background(), pair)
+
+			turns, err := pair.store.Orch().PendingCronTurns(now, 10)
+			if err != nil {
+				t.Fatalf("PendingCronTurns() error: %v", err)
+			}
+			if len(turns) != tc.wantPending {
+				t.Errorf("pending turns = %+v, want %d", turns, tc.wantPending)
+			}
+			if tc.wantLog != "" && !storeLogContains(t, pair.store, tc.wantLog) {
+				t.Errorf("logs = %v, want %q", storeLogMessages(t, pair.store), tc.wantLog)
+			}
+			if tc.wantPending == 0 {
+				updated, err := pair.store.Orch().GetCronJobByID(job.ID)
+				if err != nil {
+					t.Fatalf("GetCronJobByID() error: %v", err)
+				}
+				if updated.LastRunAt == nil {
+					t.Error("settled run was not recorded as attempted")
+				}
+			}
+		})
 	}
 }
 
