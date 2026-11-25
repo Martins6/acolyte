@@ -775,10 +775,13 @@ releasing the session lock. On restart, recovery takes the same lock, revalidate
 that the session is not still in flight, collects the turn's text, and consumes the marker before
 releasing the lock, then routes it. Non-collectable states (`indeterminate`, `routine-run`) carry a
 unique generation, and recovery clears only the generation it revalidated, so a stale pass cannot
-delete a newer run. Concurrent passes therefore cannot route the same output twice. The marker is
-cleared only after a successful collection; a run that errored after admission leaves it for the next
-pass and logs the transient error without routing a terminal failure, so recovery cannot later
-contradict it. An admission whose marker cannot be saved is recorded as an indeterminate pending run
+delete a newer run. Concurrent passes therefore cannot route the same output twice. A completed
+execution never clears unconditionally: prompt turns consume their own marker under the lock and
+routine runs compare-and-clear their generation, so an old execution cannot erase the next run. A
+post-collection cleanup error still routes the collected output instead of turning it into a failure.
+The marker is cleared only after a successful collection; a run that errored after admission leaves it
+for the next pass and logs the transient error without routing a terminal failure, so recovery cannot
+later contradict it. An admission whose marker cannot be saved is recorded as an indeterminate pending run
 and settled as untracked. Permanent probe failures (missing session, truncated output), a delivered
 turn with no text, and a consumed marker with nothing pending settle the run as incomplete instead of
 retrying forever; a marker still queued in the inbox stays recoverable for the next pass. Routine

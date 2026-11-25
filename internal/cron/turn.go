@@ -32,6 +32,7 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 	}
 
 	admitted := false
+	collected := false
 	result, err := s.turn.RunSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        job.Prompt,
 		Description: "Scheduled prompt: " + job.Title,
@@ -51,17 +52,29 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 			}
 			return nil
 		},
-		OnCollected: func(*opencode.TurnResult) error {
-			// Still holding the session lock here: consume the marker before
-			// another process or recovery pass can see it.
-			if err := st.Orch().ClearCronJobPending(job.ID); err != nil {
-				return err
+		OnCollected: func(turn *opencode.TurnResult) error {
+			// Still holding the session lock here: consume the exact marker
+			// before another process or recovery pass can see it.
+			cleared, clearErr := st.Orch().ClearCronJobPendingIf(job.ID, turn.InputID)
+			if clearErr != nil {
+				return clearErr
 			}
+			if !cleared {
+				return fmt.Errorf("cron: pending marker for %s was replaced", job.Title)
+			}
+			collected = true
 			admitted = false
 			return nil
 		},
 	})
 	if err != nil {
+		if collected && result != nil {
+			// The output was collected and its marker consumed; the error is
+			// post-collection cleanup (permission restore, lock release).
+			// Route the real output instead of turning it into a failure.
+			s.logJob(st, job, "warn", "turn collected but cleanup failed: "+err.Error())
+			return result.ResponseText, result.SessionID, false, nil
+		}
 		created := ""
 		if result != nil {
 			created = result.SessionID

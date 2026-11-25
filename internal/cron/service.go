@@ -426,12 +426,8 @@ func (s *Service) execute(ctx context.Context, pair *agentStore, job orch.CronJo
 		return
 	}
 	text, sessionID, admitted, err := s.runJob(ctx, agent, st, job, meta)
-	// Clear the marker only when the run finished. A turn error after admission
-	// (canceled wait, collection failure) must leave the marker so the next
-	// recovery pass can collect the output instead of losing it.
-	if err == nil {
-		_ = st.Orch().ClearCronJobPending(job.ID)
-	}
+	// Turn runners consume their own marker under the session lock. Do not
+	// clear here: a later run may already own a newer pending generation.
 
 	if err != nil {
 		if admitted {

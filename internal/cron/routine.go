@@ -54,6 +54,7 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 	}
 
 	admitted := false
+	pendingGeneration := ""
 	env := routine.Env{
 		Agent:     agent,
 		Workspace: agent.Workspace,
@@ -71,6 +72,7 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 				_ = st.Orch().SetCronJobPending(job.ID, "", cronPendingToken(), "indeterminate", s.now())
 				return err
 			}
+			pendingGeneration = admittedTurn.InputID
 			return nil
 		},
 		OnCollected: func(*opencode.TurnResult) error {
@@ -78,7 +80,12 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 			// a run-level pending state: the routine body still has post-turn
 			// work (audit, writer turn, delivery) and must be settled by
 			// recovery if the process stops before it finishes.
-			return st.Orch().SetCronJobPending(job.ID, "", cronPendingToken(), "routine-run", s.now())
+			token := cronPendingToken()
+			if err := st.Orch().SetCronJobPending(job.ID, "", token, "routine-run", s.now()); err != nil {
+				return err
+			}
+			pendingGeneration = token
+			return nil
 		},
 		NotifyUser: func(ctx context.Context, text string) error {
 			return s.sink.NotifyUser(ctx, agent, text)
@@ -106,5 +113,13 @@ func (s *Service) runRoutine(ctx context.Context, agent registry.Agent, st *stor
 	}
 
 	out, err := routineValue.Run(ctx, env, normalized)
+	if err == nil && pendingGeneration != "" {
+		cleared, clearErr := st.Orch().ClearCronJobPendingIf(job.ID, pendingGeneration)
+		if clearErr != nil {
+			s.logJob(st, job, "warn", "routine completed but pending state could not be cleared: "+clearErr.Error())
+		} else if !cleared {
+			s.logJob(st, job, "warn", "routine completed but a newer run owns the pending state")
+		}
+	}
 	return out, sessionID, admitted, err
 }

@@ -41,11 +41,12 @@ func (f *fakeSink) Inbox(_ context.Context, _ registry.Agent, sessionID, text st
 }
 
 type fakeTurn struct {
-	calls        int
-	response     string
-	events       []opencode.SyntheticEvent
-	err          error
-	emptySession bool
+	calls          int
+	response       string
+	events         []opencode.SyntheticEvent
+	err            error
+	emptySession   bool
+	postCollectErr error
 }
 
 func (f *fakeTurn) RunSyntheticTurn(_ context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
@@ -62,6 +63,14 @@ func (f *fakeTurn) RunSyntheticTurn(_ context.Context, sessionID string, ev open
 		if err := cfg.OnAdmitted(opencode.Admitted{SessionID: result.SessionID, InputID: result.InputID}); err != nil {
 			return nil, err
 		}
+	}
+	if f.err == nil && cfg.OnCollected != nil {
+		if err := cfg.OnCollected(result); err != nil {
+			return result, err
+		}
+	}
+	if f.err == nil && f.postCollectErr != nil {
+		return result, f.postCollectErr
 	}
 	return result, f.err
 }
@@ -551,6 +560,90 @@ func TestRecoverPendingTurnsDoesNotClearNewerRun(t *testing.T) {
 	}
 	if storeLogContains(t, pair.store, "the turn produced no output") {
 		t.Errorf("logs = %v, stale pass settled a newer run", storeLogMessages(t, pair.store))
+	}
+}
+
+// newerRunTurn installs a newer pending generation after its own collection,
+// simulating another process starting the next run.
+type newerRunTurn struct {
+	orch  *orch.Store
+	jobID string
+}
+
+func (t *newerRunTurn) RunSyntheticTurn(_ context.Context, _ string, _ opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
+	result := &opencode.TurnResult{SessionID: "ses_old", InputID: "msg_old", ResponseText: "old answer"}
+	if cfg.OnAdmitted != nil {
+		if err := cfg.OnAdmitted(opencode.Admitted{SessionID: result.SessionID, InputID: result.InputID}); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(result); err != nil {
+			return result, err
+		}
+	}
+	if err := t.orch.SetCronJobPending(t.jobID, "ses_new", "msg_new", "turn", time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// TestExecuteDoesNotClearNewerRun ensures a completed execution never erases a
+// pending generation installed by the next run.
+func TestExecuteDoesNotClearNewerRun(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	svc := startTestService(t, reg, routine.Default(), &fakeSink{}, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	svc.turn = &newerRunTurn{orch: pair.store.Orch(), jobID: job.ID}
+
+	svc.execute(context.Background(), pair, job)
+
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok || pending.MarkerID != "msg_new" || pending.SessionID != "ses_new" {
+		t.Errorf("pending = %+v, ok = %v; want the newer generation intact", pending, ok)
+	}
+}
+
+// TestExecuteRoutesOutputAfterPostCollectionCleanupError ensures collected text
+// is delivered even when the turn runner reports a cleanup error afterwards.
+func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	turn := &fakeTurn{response: "the answer", postCollectErr: errors.New("lock release failed")}
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, turn, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+
+	if len(sink.notified) != 1 || sink.notified[0] != "the answer" {
+		t.Errorf("notified = %v, want the collected answer", sink.notified)
+	}
+	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
+		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
+	}
+	if !storeLogContains(t, pair.store, "cleanup failed") {
+		t.Errorf("logs = %v, want the cleanup warning", storeLogMessages(t, pair.store))
 	}
 }
 
