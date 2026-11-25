@@ -603,9 +603,16 @@ func (s *Service) recoverPendingTurns(ctx context.Context, pair *agentStore) {
 		}
 		// Consume the marker while still holding the session lock, so a
 		// concurrent recovery pass cannot collect and route the same output.
-		if err := pair.store.Orch().ClearCronJobPending(job.ID); err != nil {
+		// Compare-and-clear also protects a newer run that replaced the state
+		// while this pass was collecting.
+		cleared, err := pair.store.Orch().ClearCronJobPendingIf(job.ID, pending.MarkerID)
+		if err != nil {
 			releaseLock()
 			log.Printf("cron: consume pending turn for %s: %v", job.Title, err)
+			continue
+		}
+		if !cleared {
+			releaseLock()
 			continue
 		}
 		releaseLock()
@@ -643,6 +650,33 @@ func acquireCronSessionLock(ctx context.Context, sessionID string) (func(), erro
 // state (indeterminate admission or routine-run).
 func cronPendingToken() string {
 	return envelope.NewID()
+}
+
+// setCronPending is the durable writer used by admission callbacks. It is a
+// variable so tests can inject a transient failure.
+var setCronPending = func(st *store.Store, jobID, sessionID, markerID, kind string, at time.Time) error {
+	return st.Orch().SetCronJobPending(jobID, sessionID, markerID, kind, at)
+}
+
+var (
+	cronPendingRetries    = 3
+	cronPendingRetryDelay = 50 * time.Millisecond
+)
+
+// persistAdmittedPending retries the admitted pair before callers fall back to
+// an indeterminate state. A transient store failure must not discard a marker
+// the callback already has.
+func persistAdmittedPending(st *store.Store, jobID, sessionID, markerID, kind string, at time.Time) error {
+	var err error
+	for attempt := 0; attempt < cronPendingRetries; attempt++ {
+		if err = setCronPending(st, jobID, sessionID, markerID, kind, at); err == nil {
+			return nil
+		}
+		if attempt+1 < cronPendingRetries {
+			time.Sleep(cronPendingRetryDelay)
+		}
+	}
+	return err
 }
 
 // settleInterruptedRun stops a marker that can never produce output from being

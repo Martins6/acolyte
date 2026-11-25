@@ -111,9 +111,10 @@ Behaviour worth remembering when changing this code:
   releasing the lock, so concurrent passes cannot route the same output twice. Live turns consume their
   marker in `TurnConfig.OnCollected` while still holding that lock. A run that errors after admission
   keeps its marker and logs the transient error without routing a terminal failure, so recovery cannot
-  later contradict that notification. An unsavable marker is stored as an indeterminate pending run and
-  settled as untracked. A routine keeps a run-level `routine-run` pending state after each collected
-  turn until the body finishes, so a crash in post-turn work is settled as incomplete, never replayed.
+  later contradict that notification. An unsavable marker is retried, then stored as an indeterminate
+  pending run and settled as untracked. A routine keeps a run-level `routine-run` pending state after
+  each collected turn until the body finishes, so a crash in post-turn work is settled as incomplete,
+  never replayed.
   Non-collectable pending states carry a unique generation and are cleared with compare-and-clear, so a
   stale recovery pass cannot delete a newer run. Nothing clears pending state unconditionally after a
   turn: prompts consume their marker under the lock, routines compare-and-clear their generation, and a

@@ -647,6 +647,82 @@ func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
 	}
 }
 
+// replacingCollector installs a newer pending generation during a successful
+// collection, simulating another process starting the next run.
+type replacingCollector struct {
+	orch    *orch.Store
+	jobID   string
+	updated bool
+}
+
+func (c *replacingCollector) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, errors.New("replacingCollector does not run turns")
+}
+
+func (c *replacingCollector) GetSession(context.Context, string) (*opencode.SessionInfo, error) {
+	return &opencode.SessionInfo{ID: "ses_old"}, nil
+}
+
+func (c *replacingCollector) CollectDelivered(_ context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error) {
+	if !c.updated {
+		c.updated = true
+		if err := c.orch.SetCronJobPending(c.jobID, "ses_new", "msg_new", "turn", time.Now().UTC()); err != nil {
+			return nil, false, err
+		}
+	}
+	return &opencode.TurnResult{SessionID: sessionID, InputID: markerID, ResponseText: "old"}, true, nil
+}
+
+func (c *replacingCollector) InboxPending(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+// TestRecoverPendingTurnsDoesNotRouteAfterNewerRun ensures a recovery pass that
+// lost ownership during collection neither routes nor marks the newer run.
+func TestRecoverPendingTurnsDoesNotRouteAfterNewerRun(t *testing.T) {
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "x",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job, err := st.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+	if err := st.Orch().SetCronJobPending(job.ID, "ses_old", "msg_old", "turn", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetCronJobPending() error: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	sink := &countingSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	svc.turn = &replacingCollector{orch: pair.store.Orch(), jobID: job.ID}
+
+	svc.recoverPendingTurns(context.Background(), pair)
+
+	if got := sink.count(); got != 0 {
+		t.Errorf("notifications = %d, want 0 after losing ownership", got)
+	}
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil {
+		t.Fatalf("CronJobPending() error: %v", err)
+	}
+	if !ok || pending.MarkerID != "msg_new" {
+		t.Errorf("pending = %+v, ok = %v; want the newer generation intact", pending, ok)
+	}
+	if storeLogContains(t, pair.store, "recovered output from an interrupted run") {
+		t.Errorf("logs = %v, stale pass routed old output", storeLogMessages(t, pair.store))
+	}
+}
+
 // TestExecuteRoutesCollectedOutputWhenSessionMappingFails ensures a collected
 // turn is still delivered when only persisting the thread mapping fails.
 func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
@@ -679,6 +755,62 @@ func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
 	}
 	if !storeLogContains(t, pair.store, "session mapping could not be saved") {
 		t.Errorf("logs = %v, want the mapping warning", storeLogMessages(t, pair.store))
+	}
+}
+
+// TestAdmittedPendingRetriesTransientWrite ensures a transient store failure
+// during admission does not discard the marker and the output remains
+// recoverable.
+func TestAdmittedPendingRetriesTransientWrite(t *testing.T) {
+	oldSet := setCronPending
+	oldRetries := cronPendingRetries
+	oldDelay := cronPendingRetryDelay
+	oldGrace := cronResumeGrace
+	t.Cleanup(func() {
+		setCronPending = oldSet
+		cronPendingRetries = oldRetries
+		cronPendingRetryDelay = oldDelay
+		cronResumeGrace = oldGrace
+	})
+	failures := 1
+	setCronPending = func(st *store.Store, jobID, sessionID, markerID, kind string, at time.Time) error {
+		if failures > 0 {
+			failures--
+			return errors.New("database busy")
+		}
+		return st.Orch().SetCronJobPending(jobID, sessionID, markerID, kind, at)
+	}
+	cronPendingRetries = 3
+	cronPendingRetryDelay = time.Millisecond
+	cronResumeGrace = 0
+
+	reg, ws, now := setupCron(t)
+	addJob(t, ws, orch.CronJob{
+		Title: "report", Kind: "prompt", Spec: "@every 1h", Prompt: "summarize",
+		Enabled: true, CreatedAt: now, Meta: "{}",
+	})
+	sink := &fakeSink{}
+	svc := startTestService(t, reg, routine.Default(), sink, &fakeTurn{response: "partial", err: errors.New("collection failed")}, "", now)
+	defer svc.Stop()
+	pair := servicePair(t, svc, "valet")
+	job, err := pair.store.Orch().GetCronJobByTitle("report")
+	if err != nil {
+		t.Fatalf("GetCronJobByTitle() error: %v", err)
+	}
+
+	svc.execute(context.Background(), pair, job)
+	pending, ok, err := pair.store.Orch().CronJobPending(job.ID)
+	if err != nil || !ok || pending.MarkerID != "msg_fake" {
+		t.Fatalf("pending = %+v, ok = %v, err = %v; want the admitted marker", pending, ok, err)
+	}
+
+	svc.turn = &collectingTurn{delivered: true, text: "recovered"}
+	svc.recoverPendingTurns(context.Background(), pair)
+	if len(sink.notified) != 1 || sink.notified[0] != "recovered" {
+		t.Errorf("notified = %v, want the recovered output", sink.notified)
+	}
+	if turns, err := pair.store.Orch().PendingCronTurns(now, 10); err != nil || len(turns) != 0 {
+		t.Errorf("pending turns = %+v, %v; want cleared", turns, err)
 	}
 }
 

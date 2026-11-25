@@ -781,12 +781,13 @@ routine runs compare-and-clear their generation, so an old execution cannot eras
 post-collection cleanup error still routes the collected output instead of turning it into a failure.
 The marker is cleared only after a successful collection; a run that errored after admission leaves it
 for the next pass and logs the transient error without routing a terminal failure, so recovery cannot
-later contradict it. An admission whose marker cannot be saved is recorded as an indeterminate pending run
-and settled as untracked. Permanent probe failures (missing session, truncated output), a delivered
-turn with no text, and a consumed marker with nothing pending settle the run as incomplete instead of
-retrying forever; a marker still queued in the inbox stays recoverable for the next pass. Routine
-bodies are **not** replayed: a collected turn leaves a run-level `routine-run` pending state until the
-body finishes, and recovery settles an unfinished routine as incomplete rather than re-running it.
+later contradict it. An admission whose marker cannot be saved is retried first, then recorded as an
+indeterminate pending run and settled as untracked. Permanent probe failures (missing session, truncated
+output), a delivered turn with no text, and a consumed marker with nothing pending settle the run as
+incomplete instead of retrying forever; a marker still queued in the inbox stays recoverable for the
+next pass. Routine bodies are **not** replayed: a collected turn leaves a run-level `routine-run`
+pending state until the body finishes, and recovery settles an unfinished routine as incomplete rather
+than re-running it.
 
 ---
 
