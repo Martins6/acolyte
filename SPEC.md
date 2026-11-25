@@ -734,8 +734,11 @@ abandoned: the session is interrupted, the thread→session mapping is forgotten
 cleared so the next pass admits the message into a fresh session. Because the abandoned input provably
 never executed, nothing is duplicated; the cost is that thread's conversation context. A session that
 is still in flight past the grace window is interrupted and the message is settled as incomplete
-instead: execution cannot be disproved, so it is never re-admitted. After `maxResumeAttempts` (2), the
-message is settled and the user is told it did not complete.
+instead: execution cannot be disproved, so it is never re-admitted. Recovery first establishes that
+this marker is the session's head turn (no later delivered input, or the next input is still queued);
+a later turn is never interrupted. If an interrupt is rejected and cannot be confirmed, the notice says
+so instead of claiming the turn stopped. After `maxResumeAttempts` (2), the message is settled and the
+user is told it did not complete.
 
 **Collection errors do not consume the reply.** A turn error after admission keeps the marker and
 leaves the reply identity (`out_<inbound>`) free. Replay reconciles the turn and queues the real reply

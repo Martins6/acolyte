@@ -93,7 +93,9 @@ Behaviour worth remembering when changing this code:
   missing ack (crash between marker and ack) using the same stable identity.
 - Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
   and only into a fresh session for input that provably never executed. A session still in flight past
-  the grace window is interrupted and settled as incomplete, never re-admitted.
+  the grace window is interrupted and settled as incomplete, but only when this marker is the head
+  turn; a later delivered turn is left alone. The thread lock serializes the probe with new admissions.
+  An unconfirmed interrupt settles with wording that does not claim the turn stopped.
 - A collection error after admission keeps the marker and the reply identity free; replay reconciles
   and queues the real reply when it exists. Only definitive failures settle with a notice.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated

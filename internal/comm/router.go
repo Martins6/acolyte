@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ type TurnRunner interface {
 // without waiting and without admitting it again.
 type TurnProber interface {
 	GetSession(ctx context.Context, sessionID string) (*opencode.SessionInfo, error)
+	NextInputID(ctx context.Context, sessionID, markerID string) (string, bool, error)
 	CollectDelivered(ctx context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error)
 	InboxPending(ctx context.Context, sessionID, itemID string) (bool, error)
 	Interrupt(ctx context.Context, sessionID string) error
@@ -258,10 +260,16 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 // recovery counterpart to HandleInbound: it never admits a new turn, it only
 // looks at the marker already recorded on the inbound row.
 //
-// Callers must hold the inbound claim. That is what makes recovery safe: the
-// row is excluded from PendingInbound while a live turn owns it, so this can
-// never race the turn it is inspecting.
+// Callers must hold the inbound claim. The router's thread lock also serializes
+// the probe with new admissions, so a busy-session decision cannot race a turn
+// that is starting on the same thread.
 func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
+	unlock := r.lockThread(env.Thread)
+	defer unlock()
+	return r.reconcile(ctx, agent, env)
+}
+
+func (r *Router) reconcile(ctx context.Context, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
 	prober, ok := r.turn.(TurnProber)
 	if !ok {
 		return ReconcileUnrecoverable, fmt.Errorf("comm: turn runner does not support recovery")
@@ -305,22 +313,53 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 		return ReconcileStillPending, err
 	}
 	if info.Time.InFlight() {
-		if !resumeGraceElapsed(item, r.now()) {
-			// The service still owns this turn. Recovery must not interfere
-			// while it is inside the grace window.
-			return ReconcileStillPending, nil
-		}
-		// The session has been busy past the grace window. Bounded recovery
-		// matters more than waiting forever: interrupt it and tell the user the
-		// turn did not finish instead of letting the message sit pending.
-		if err := prober.Interrupt(ctx, sessionID); err != nil && !opencode.IsPermanentError(err) {
+		active, queued, err := r.sessionTurnState(ctx, prober, sessionID, marker)
+		if err != nil {
+			if opencode.IsPermanentError(err) {
+				return r.settleProbeFailure(ctx, st, agent, env)
+			}
 			return ReconcileStillPending, err
 		}
-		notice := SystemNotice("your message was still running after the recovery grace period, so it was interrupted and no reply was delivered. Send it again to retry.")
-		if err := r.settleNotice(ctx, st, agent, env, notice); err != nil {
-			return ReconcileUnrecoverable, err
+		if queued {
+			// This input has not executed yet; a later turn may own the
+			// session. Never interrupt on behalf of an input still waiting.
+			return ReconcileStillPending, nil
 		}
-		return ReconcileUnrecoverable, nil
+		if active {
+			if !resumeGraceElapsed(item, r.now()) {
+				// This turn still owns the session and is inside the grace
+				// window. Recovery must not interfere.
+				return ReconcileStillPending, nil
+			}
+			// The session has been busy past the grace window with this
+			// marker's turn at the head. Bounded recovery matters more than
+			// waiting forever: stop it and tell the user it did not finish.
+			stopConfirmed := true
+			if err := prober.Interrupt(ctx, sessionID); err != nil {
+				var apiErr *opencode.APIError
+				switch {
+				case errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound:
+					// The session is gone, so the turn cannot still run.
+					return r.settleProbeFailure(ctx, st, agent, env)
+				case opencode.IsPermanentError(err):
+					// A rejected interrupt does not prove the turn stopped.
+					stopConfirmed = false
+				default:
+					return ReconcileStillPending, err
+				}
+			}
+			noticeText := "your message was still running after the recovery grace period, so it was interrupted and no reply was delivered. Send it again to retry."
+			if !stopConfirmed {
+				noticeText = "your message was still running after the recovery grace period, but stopping it could not be confirmed and no reply was delivered. Send it again to retry."
+			}
+			if err := r.settleNotice(ctx, st, agent, env, SystemNotice(noticeText)); err != nil {
+				return ReconcileUnrecoverable, err
+			}
+			return ReconcileUnrecoverable, nil
+		}
+		// A later turn owns the session, so this marker's turn is already
+		// finished. Fall through and collect its output; never interrupt the
+		// later turn.
 	}
 
 	result, delivered, err := prober.CollectDelivered(ctx, sessionID, marker)
@@ -378,12 +417,46 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 	return ReconcileUnrecoverable, nil
 }
 
+// sessionTurnState reports whether this marker's turn owns a busy session.
+// active is true when the marker is the head turn; queued is true when the
+// input has not been delivered yet, so a later turn may own the session.
+// Unknown ownership (the marker is outside the timeline) is reported as
+// neither, so callers never interrupt on a guess.
+func (r *Router) sessionTurnState(ctx context.Context, prober TurnProber, sessionID, marker string) (active, queued bool, err error) {
+	pending, err := prober.InboxPending(ctx, sessionID, marker)
+	if err != nil {
+		return false, false, err
+	}
+	if pending {
+		return false, true, nil
+	}
+	next, found, err := prober.NextInputID(ctx, sessionID, marker)
+	if err != nil {
+		return false, false, err
+	}
+	if !found {
+		return false, false, nil
+	}
+	if next == "" {
+		return true, false, nil
+	}
+	// If the next input is still queued, the marker's turn is the head turn.
+	// If it was delivered, a later turn owns the session and the marker is done.
+	nextPending, err := prober.InboxPending(ctx, sessionID, next)
+	if err != nil {
+		return false, false, err
+	}
+	return nextPending, false, nil
+}
+
 // Recover applies the escalation policy on top of Reconcile. A stranded turn is
 // left alone until the grace window passes; then it is abandoned, and the
 // message is re-admitted into a fresh session. When the attempt budget runs out
 // the message is settled with an explicit notice instead of retrying forever.
 func (r *Router) Recover(ctx context.Context, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
-	outcome, err := r.Reconcile(ctx, agent, env)
+	unlock := r.lockThread(env.Thread)
+	defer unlock()
+	outcome, err := r.reconcile(ctx, agent, env)
 	if err != nil || outcome != ReconcileStranded {
 		return outcome, err
 	}

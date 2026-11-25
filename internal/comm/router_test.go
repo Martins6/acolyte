@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,7 +89,11 @@ type fakeProber struct {
 	delivered    bool
 	collectErr   error
 	pending      bool
+	pendingByID  map[string]bool
 	inboxErr     error
+	nextInput    string
+	nextFound    bool
+	nextErr      error
 	interrupted  []string
 	interruptErr error
 }
@@ -103,6 +108,13 @@ func (f *fakeProber) GetSession(context.Context, string) (*opencode.SessionInfo,
 	return f.session, nil
 }
 
+func (f *fakeProber) NextInputID(context.Context, string, string) (string, bool, error) {
+	if f.nextErr != nil {
+		return "", false, f.nextErr
+	}
+	return f.nextInput, f.nextFound, nil
+}
+
 func (f *fakeProber) CollectDelivered(context.Context, string, string) (*opencode.TurnResult, bool, error) {
 	if f.collectErr != nil {
 		return nil, false, f.collectErr
@@ -110,9 +122,14 @@ func (f *fakeProber) CollectDelivered(context.Context, string, string) (*opencod
 	return f.collected, f.delivered, nil
 }
 
-func (f *fakeProber) InboxPending(context.Context, string, string) (bool, error) {
+func (f *fakeProber) InboxPending(_ context.Context, _, itemID string) (bool, error) {
 	if f.inboxErr != nil {
 		return false, f.inboxErr
+	}
+	if f.pendingByID != nil {
+		if pending, ok := f.pendingByID[itemID]; ok {
+			return pending, nil
+		}
 	}
 	return f.pending, nil
 }
@@ -1195,7 +1212,8 @@ func TestReconcileLeavesRunningTurnAlone(t *testing.T) {
 		delivered: true,
 		collected: &opencode.TurnResult{SessionID: "ses_1", InputID: "msg_in", ResponseText: "too early"},
 		// Busy is newer than Idle: the service still owns the turn.
-		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		session:   &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound: true,
 	}
 
 	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(81),
@@ -1222,7 +1240,8 @@ func TestReconcileLeavesRunningTurnAlone(t *testing.T) {
 func TestReconcileHealsMissingAdmissionAck(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.router.turn = &fakeProber{
-		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		session:   &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound: true,
 	}
 	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(85),
 		envelope.Party{Kind: envelope.PartyUser, ID: "85"},
@@ -1273,8 +1292,8 @@ func TestReconcileHealsMissingAdmissionAck(t *testing.T) {
 func TestReconcileInterruptsBusyTurnAfterGrace(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	prober := &fakeProber{
-		pending: true,
-		session: &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound: true,
 	}
 	h.router.turn = prober
 	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(79),
@@ -1296,6 +1315,132 @@ func TestReconcileInterruptsBusyTurnAfterGrace(t *testing.T) {
 	assertSettledWithNotice(t, h, env)
 	if len(h.outbound.events) == 2 && !strings.Contains(h.outbound.events[1].Content.Text, "still running") {
 		t.Errorf("notice = %q, want the busy-turn wording", h.outbound.events[1].Content.Text)
+	}
+}
+
+// TestReconcileCollectsFinishedTurnWithoutInterruptingLaterTurn covers session
+// ownership: if a later input already delivered, the marker's turn is done and
+// recovery must collect it without touching the later turn.
+func TestReconcileCollectsFinishedTurnWithoutInterruptingLaterTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		delivered: true,
+		collected: &opencode.TurnResult{SessionID: "ses_busy", InputID: "msg_in", ResponseText: "the first answer"},
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextInput: "msg_later", nextFound: true,
+		pendingByID: map[string]bool{"msg_in": false, "msg_later": false},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(78),
+		envelope.Party{Kind: envelope.PartyUser, ID: "78"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedAdmitted(t, env, 411, "ses_busy", "msg_in")
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileRecovered {
+		t.Fatalf("outcome = %v, want recovered", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want the later turn left alone", prober.interrupted)
+	}
+	if len(h.outbound.events) != 2 || h.outbound.events[1].Content.Text != "the first answer" {
+		t.Fatalf("outbound = %+v, want healed ack and the first answer", h.outbound.events)
+	}
+}
+
+// TestReconcileInterruptsWhenLaterInputIsQueued establishes the other side of
+// ownership: a queued next input means the marker's turn is still the head.
+func TestReconcileInterruptsWhenLaterInputIsQueued(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextInput: "msg_later", nextFound: true,
+		pendingByID: map[string]bool{"msg_in": false, "msg_later": true},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(89),
+		envelope.Party{Kind: envelope.PartyUser, ID: "89"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 412, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	if len(prober.interrupted) != 1 || prober.interrupted[0] != "ses_busy" {
+		t.Errorf("interrupted = %v, want the head turn interrupted", prober.interrupted)
+	}
+	assertSettledWithNotice(t, h, env)
+}
+
+// TestReconcileLeavesQueuedMarkerAlone covers an input that has not executed:
+// it must never cause an interrupt, even past the grace window.
+func TestReconcileLeavesQueuedMarkerAlone(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextInput: "msg_later", nextFound: true,
+		pendingByID: map[string]bool{"msg_in": true, "msg_later": true},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(90),
+		envelope.Party{Kind: envelope.PartyUser, ID: "90"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 413, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want no interrupt for a queued input", prober.interrupted)
+	}
+}
+
+// TestReconcileBusyStopNotConfirmed checks the honest wording when an interrupt
+// is rejected: the notice must not claim the turn was stopped.
+func TestReconcileBusyStopNotConfirmed(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:      &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound:    true,
+		interruptErr: &opencode.APIError{Status: http.StatusForbidden},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(91),
+		envelope.Party{Kind: envelope.PartyUser, ID: "91"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 414, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	assertSettledWithNotice(t, h, env)
+	if len(h.outbound.events) == 2 {
+		notice := h.outbound.events[1].Content.Text
+		if !strings.Contains(notice, "could not be confirmed") {
+			t.Errorf("notice = %q, want the unconfirmed-stop wording", notice)
+		}
+		if strings.Contains(notice, "was interrupted") {
+			t.Errorf("notice = %q, must not claim an unconfirmed interruption", notice)
+		}
 	}
 }
 
