@@ -1003,6 +1003,10 @@ var errRouteStillPending = errors.New("cron: route input still pending")
 // was parked; do not clear the hold with a normal retry.
 var errRouteHeld = errors.New("cron: route held for manual recovery")
 
+// errRouteFenced means the route's claim or marker changed before admission;
+// the worker must not admit the input.
+var errRouteFenced = errors.New("cron: route fenced before admission")
+
 // deliverRoute performs one durable route intent according to its action.
 func (s *Service) deliverRoute(ctx context.Context, pair *agentStore, route orch.CronRoute, lease time.Time) error {
 	switch route.Action {
@@ -1207,6 +1211,19 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 		Delivery:    "queue",
 	}, opencode.TurnConfig{
 		Workspace: pair.agent.Workspace,
+		OnLockAcquired: func() error {
+			current, ok, err := pair.store.Orch().GetCronRoute(route.ID)
+			if err != nil {
+				return err
+			}
+			if !ok || current.DeliveredAt != nil || current.SourceMessageID != "" {
+				return errRouteFenced
+			}
+			if current.ClaimedUntil == nil || !current.ClaimedUntil.Equal(lease) {
+				return errRouteFenced
+			}
+			return nil
+		},
 		OnAdmitted: func(admitted opencode.Admitted) error {
 			return persistRouteAdmitted(pair.store.Orch(), route.ID, admitted.SessionID, admitted.InputID)
 		},
@@ -1217,6 +1234,9 @@ func (s *Service) deliverInboxRoute(ctx context.Context, pair *agentStore, route
 			return pair.store.Orch().MarkCronRouteDelivered(route.ID, s.now())
 		},
 	})
+	if errors.Is(runErr, errRouteFenced) {
+		return errRouteStillPending
+	}
 	if runErr != nil && result != nil && result.InputID != "" && route.SourceMessageID == "" {
 		// OpenCode accepted the input but the callback's marker write failed.
 		// Persist it from the returned result; if that also fails, park the
