@@ -1,0 +1,25 @@
+name: approve-probe
+on:
+  push:
+    branches: [tmp/approve-probe]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Probe review states
+        run: |
+          PR=$(gh pr list --repo "$REPO" --head tmp/approve-probe --state open --json number --jq '.[0].number')
+          if [ -z "$PR" ]; then echo "no PR yet"; exit 0; fi
+          echo "pr=$PR"
+          echo "before=$(gh pr view "$PR" --repo "$REPO" --json reviewDecision --jq .reviewDecision)" || echo "before failed"
+          gh pr review "$PR" --repo "$REPO" --request-changes --body "probe: request changes" || echo "request-changes failed"
+          echo "after_request=$(gh pr view "$PR" --repo "$REPO" --json reviewDecision --jq .reviewDecision)" || echo "after_request failed"
+          gh pr review "$PR" --repo "$REPO" --approve --body "probe: approve" || echo "approve failed"
+          echo "after_approve=$(gh pr view "$PR" --repo "$REPO" --json reviewDecision --jq .reviewDecision)" || echo "after_approve failed"
+          gh pr view "$PR" --repo "$REPO" --json reviewDecision,mergeStateStatus,isDraft
