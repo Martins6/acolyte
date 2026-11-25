@@ -87,9 +87,14 @@ Behaviour worth remembering when changing this code:
 
 - A marker must be stored **while** the turn runs, not when it finishes — that invariant is what makes
   restart recovery possible. `TestRouterPersistsMarkerBeforeTurnCompletes` guards it.
+- Admission also enqueues a durable acknowledgement (`ack_<inbound>`), so a running turn is never
+  silent even though the typing indicator and 👀 reaction are best-effort. It says only that work
+  started; the reply, an error, or an operator notice reports the outcome.
 - Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
   and only into a fresh session for input that provably never executed.
 - Reply envelope IDs are derived from the inbound (`out_<inbound>`) so re-sending is idempotent.
+  Acknowledgements (`ack_`) and operator notices (`sys_`) use their own identities so they can never
+  occupy or suppress the reply slot.
 - Operator notices use `ACOLYTE SYSTEM MESSAGE:` and never claim success that did not happen.
 - Cron routine bodies are never replayed; an interrupted routine is reported as incomplete.
 

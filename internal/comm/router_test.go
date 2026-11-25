@@ -243,12 +243,22 @@ func TestRouterInboundPersistsSessionLinksAndRoutes(t *testing.T) {
 	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
 		t.Fatalf("HandleInbound() error: %v", err)
 	}
-	if len(h.outbound.events) != 1 {
-		t.Fatalf("outbound events = %d, want 1", len(h.outbound.events))
+	if len(h.outbound.events) != 2 {
+		t.Fatalf("outbound events = %d, want ack and reply", len(h.outbound.events))
 	}
-	out := h.outbound.events[0]
+	ack := h.outbound.events[0]
+	if ack.ID != ackEnvelopeID(env.ID) || ack.Meta["kind"] != "ack" {
+		t.Errorf("ack = %+v, want identity %q with kind ack", ack, ackEnvelopeID(env.ID))
+	}
+	if !strings.HasPrefix(ack.Content.Text, SystemNoticeMarker) || !strings.Contains(ack.Content.Text, "working") {
+		t.Errorf("ack text = %q, want an honest working notice", ack.Content.Text)
+	}
+	out := h.outbound.events[1]
 	if out.Direction != envelope.DirectionOut || out.Content.Text != "reply" || out.Thread != env.Thread {
 		t.Errorf("outbound = %+v", out)
+	}
+	if out.ID != replyEnvelopeID(env.ID) {
+		t.Errorf("reply id = %q, want %q", out.ID, replyEnvelopeID(env.ID))
 	}
 	if out.Meta["source_message_id"] != "msg_out" || out.Meta["reply_to_message_id"] != float64(77) {
 		t.Errorf("outbound meta = %+v", out.Meta)
@@ -266,6 +276,148 @@ func TestRouterInboundPersistsSessionLinksAndRoutes(t *testing.T) {
 	inbox, ok, err := st.CommTG().GetInboxByEnvelope(env.ID)
 	if err != nil || !ok || inbox.OpenCodeMessageID != "msg_in" || inbox.OpenCodeSessionID != "ses_fake" {
 		t.Errorf("inbox = %+v, %v, %v", inbox, ok, err)
+	}
+}
+
+// admittedSignalTurn blocks after admitting so a test can inspect outbound
+// traffic while collection is still running.
+type admittedSignalTurn struct {
+	admitted chan struct{}
+	release  chan struct{}
+}
+
+func (f *admittedSignalTurn) RunUserTurn(_ context.Context, _, _ string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
+	if cfg.OnAdmitted == nil {
+		return nil, errors.New("OnAdmitted was not configured")
+	}
+	if err := cfg.OnAdmitted(opencode.Admitted{SessionID: "ses_live", InputID: "msg_live"}); err != nil {
+		return nil, err
+	}
+	close(f.admitted)
+	<-f.release
+	return &opencode.TurnResult{SessionID: "ses_live", InputID: "msg_live", ResponseText: "done"}, nil
+}
+
+// TestRouterAcknowledgesAtAdmission covers the no-silence invariant: a durable
+// acknowledgement must exist while the turn is still running, not only once
+// collection finishes.
+func TestRouterAcknowledgesAtAdmission(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(92),
+		envelope.Party{Kind: envelope.PartyUser, ID: "92"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	env.Meta = map[string]any{"telegram_message_id": float64(93)}
+	h.seedInbound(t, env, 700)
+
+	turn := &admittedSignalTurn{admitted: make(chan struct{}), release: make(chan struct{})}
+	h.router.turn = turn
+	done := make(chan error, 1)
+	go func() { done <- h.router.HandleInbound(context.Background(), h.agent, env) }()
+
+	select {
+	case <-turn.admitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn was never admitted")
+	}
+	if len(h.outbound.events) != 1 {
+		t.Fatalf("outbound events mid-turn = %d, want the ack only", len(h.outbound.events))
+	}
+	ack := h.outbound.events[0]
+	if ack.ID != ackEnvelopeID(env.ID) || ack.Meta["kind"] != "ack" {
+		t.Errorf("ack = %+v, want identity %q with kind ack", ack, ackEnvelopeID(env.ID))
+	}
+	if !strings.HasPrefix(ack.Content.Text, SystemNoticeMarker) {
+		t.Errorf("ack text = %q, want the %q marker", ack.Content.Text, SystemNoticeMarker)
+	}
+	if strings.Contains(strings.ToLower(ack.Content.Text), "complete") {
+		t.Errorf("ack text = %q, must not imply completion", ack.Content.Text)
+	}
+	if ack.Meta["reply_to_message_id"] != float64(93) {
+		t.Errorf("ack meta = %+v, want reply_to_message_id preserved", ack.Meta)
+	}
+
+	close(turn.release)
+	if err := <-done; err != nil {
+		t.Fatalf("HandleInbound() error: %v", err)
+	}
+	if len(h.outbound.events) != 2 {
+		t.Fatalf("outbound events = %d, want ack and reply", len(h.outbound.events))
+	}
+	if h.outbound.events[1].ID != replyEnvelopeID(env.ID) || h.outbound.events[1].Content.Text != "done" {
+		t.Errorf("reply = %+v, want identity %q with the collected text", h.outbound.events[1], replyEnvelopeID(env.ID))
+	}
+}
+
+// TestRouterAckFailureDoesNotFailTurn keeps the acknowledgement a courtesy: if
+// its enqueue fails after the marker is durable, the running turn's reply must
+// still be collected and routed.
+func TestRouterAckFailureDoesNotFailTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(94),
+		envelope.Party{Kind: envelope.PartyUser, ID: "94"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 701)
+
+	recorder := &outboundRecorder{}
+	h.router.outbound = func(ctx context.Context, agent registry.Agent, out envelope.Envelope) error {
+		if out.ID == ackEnvelopeID(env.ID) {
+			return errors.New("queue unavailable")
+		}
+		return recorder.send(ctx, agent, out)
+	}
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
+		t.Fatalf("HandleInbound() error = %v, want the ack failure to be tolerated", err)
+	}
+	if len(recorder.events) != 1 || recorder.events[0].Content.Text != "reply" {
+		t.Errorf("outbound = %+v, want the collected reply", recorder.events)
+	}
+}
+
+// TestRouterAckIsIdempotent exercises the same enqueue path as production: the
+// stable ack identity plus the outbox unique index must collapse a repeated
+// admission into one row.
+func TestRouterAckIsIdempotent(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(99),
+		envelope.Party{Kind: envelope.PartyUser, ID: "99"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	if ackEnvelopeID(env.ID) == replyEnvelopeID(env.ID) {
+		t.Fatal("ack and reply identities must not collide")
+	}
+
+	h.router.outbound = func(_ context.Context, _ registry.Agent, out envelope.Envelope) error {
+		st, release, err := h.pool.Acquire(h.store)
+		if err != nil {
+			return err
+		}
+		defer release()
+		_, err = st.CommTG().EnqueueOutbound(commtg.OutboxItem{
+			EnvelopeID: out.ID,
+			ChatID:     99,
+			Text:       out.Content.Text,
+		})
+		return err
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := h.router.sendAck(context.Background(), h.agent, env); err != nil {
+			t.Fatalf("sendAck() attempt %d error: %v", attempt, err)
+		}
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	outbox, err := st.CommTG().ListOutbox(99)
+	if err != nil {
+		t.Fatalf("ListOutbox() error: %v", err)
+	}
+	if len(outbox) != 1 || outbox[0].EnvelopeID != ackEnvelopeID(env.ID) {
+		t.Fatalf("outbox = %+v, want one ack row", outbox)
 	}
 }
 
@@ -434,7 +586,7 @@ func TestRouterTurnErrorPersistsAndRoutesError(t *testing.T) {
 	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
 		t.Fatal("HandleInbound() error = nil, want error")
 	}
-	if len(h.outbound.events) != 1 || !strings.Contains(h.outbound.events[0].Content.Text, "Error: boom") {
+	if len(h.outbound.events) != 2 || !strings.Contains(h.outbound.events[1].Content.Text, "Error: boom") {
 		t.Errorf("outbound = %+v", h.outbound.events)
 	}
 	st, release, err := h.pool.Acquire(h.store)
@@ -564,8 +716,14 @@ func TestRouterTurnSurvivesAdmittedPersistenceFailure(t *testing.T) {
 	if err := h.router.HandleInbound(context.Background(), h.agent, env); err != nil {
 		t.Fatalf("HandleInbound() error: %v, want tolerated ErrInboundNotFound", err)
 	}
-	if len(h.outbound.events) != 1 {
-		t.Fatalf("outbound events = %d, want 1", len(h.outbound.events))
+	if len(h.outbound.events) != 2 {
+		t.Fatalf("outbound events = %d, want ack and reply", len(h.outbound.events))
+	}
+	if h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Errorf("ack id = %q, want %q", h.outbound.events[0].ID, ackEnvelopeID(env.ID))
+	}
+	if h.outbound.events[1].Content.Text != "reply" {
+		t.Errorf("reply text = %q, want %q", h.outbound.events[1].Content.Text, "reply")
 	}
 }
 
@@ -1239,12 +1397,15 @@ func TestRouterNewCommandConcurrency(t *testing.T) {
 	if h.turn.maxActive != 1 {
 		t.Errorf("max active turns = %d, want 1 for the same thread", h.turn.maxActive)
 	}
-	if len(h.outbound.events) != 2 {
-		t.Fatalf("outbound events = %d, want 2", len(h.outbound.events))
+	if len(h.outbound.events) != 3 {
+		t.Fatalf("outbound events = %d, want ack, reply, and /new reply", len(h.outbound.events))
 	}
-	if h.outbound.events[1].Content.Text != NewSessionReply {
+	if h.outbound.events[1].Content.Text != "reply" {
+		t.Errorf("slow turn reply = %q, want %q", h.outbound.events[1].Content.Text, "reply")
+	}
+	if h.outbound.events[2].Content.Text != NewSessionReply {
 		t.Errorf("last outbound text = %q, want %q after the turn finished",
-			h.outbound.events[1].Content.Text, NewSessionReply)
+			h.outbound.events[2].Content.Text, NewSessionReply)
 	}
 	if h.hasSession(t, thread) {
 		t.Error("thread mapping still exists after /new")

@@ -126,7 +126,7 @@ type fakeTurn struct {
 	synthErr    error
 }
 
-func (f *fakeTurn) RunUserTurn(_ context.Context, _, _ string, _ opencode.TurnConfig) (*opencode.TurnResult, error) {
+func (f *fakeTurn) RunUserTurn(_ context.Context, _, _ string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.userCalls++
@@ -134,6 +134,13 @@ func (f *fakeTurn) RunUserTurn(_ context.Context, _, _ string, _ opencode.TurnCo
 		f.userResult = &opencode.TurnResult{SessionID: "ses_user", InputID: "msg_in", ResponseText: "reply", MessageIDs: []string{"msg_out"}}
 	}
 	copy := *f.userResult
+	// Mirror the real client: the marker is handed over at admission, before
+	// the turn is collected.
+	if cfg.OnAdmitted != nil {
+		if err := cfg.OnAdmitted(opencode.Admitted{SessionID: copy.SessionID, InputID: copy.InputID}); err != nil {
+			return nil, err
+		}
+	}
 	return &copy, f.userErr
 }
 
@@ -231,9 +238,9 @@ func TestDaemonStartsAndRoutesInbound(t *testing.T) {
 	turn := &fakeTurn{}
 	svc := startDaemon(t, reg, pool, turn, factory.make)
 
-	comm := factory.get("valet")
-	if comm == nil || !comm.isStarted() {
-		t.Fatalf("valet adapter not started: %+v", comm)
+	adapter := factory.get("valet")
+	if adapter == nil || !adapter.isStarted() {
+		t.Fatalf("valet adapter not started: %+v", adapter)
 	}
 
 	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
@@ -249,11 +256,11 @@ func TestDaemonStartsAndRoutesInbound(t *testing.T) {
 	}
 	release()
 
-	if err := comm.sink(context.Background(), env); err != nil {
+	if err := adapter.sink(context.Background(), env); err != nil {
 		t.Fatalf("inbound sink error: %v", err)
 	}
 
-	if sends := comm.sent(); len(sends) != 0 {
+	if sends := adapter.sent(); len(sends) != 0 {
 		t.Fatalf("adapter sends = %+v, want none (router enqueues durably)", sends)
 	}
 	st, release, err = pool.Acquire(workspaces["valet"])
@@ -262,8 +269,18 @@ func TestDaemonStartsAndRoutesInbound(t *testing.T) {
 	}
 	defer release()
 	outbox, err := st.CommTG().ListOutbox(10)
-	if err != nil || len(outbox) != 1 || outbox[0].Text != "reply" {
-		t.Fatalf("outbox = %+v, %v; want reply", outbox, err)
+	if err != nil || len(outbox) != 2 {
+		t.Fatalf("outbox = %+v, %v; want durable ack and reply", outbox, err)
+	}
+	byID := map[string]string{}
+	for _, item := range outbox {
+		byID[item.EnvelopeID] = item.Text
+	}
+	if ack := byID["ack_"+env.ID]; !strings.HasPrefix(ack, comm.SystemNoticeMarker) {
+		t.Errorf("ack = %q, want a durable system notice", ack)
+	}
+	if reply := byID["out_"+env.ID]; reply != "reply" {
+		t.Errorf("reply = %q, want %q", reply, "reply")
 	}
 	session, ok, err := st.Orch().GetSessionByThread(env.Thread)
 	if err != nil || !ok || session.OpenCodeSessionID != "ses_user" {
@@ -275,7 +292,7 @@ func TestDaemonStartsAndRoutesInbound(t *testing.T) {
 	}
 
 	svc.Stop()
-	if !comm.isStopped() {
+	if !adapter.isStopped() {
 		t.Error("adapter was not stopped")
 	}
 }
