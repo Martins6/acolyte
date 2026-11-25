@@ -559,6 +559,104 @@ func TestReplayReconcilesLinkedRow(t *testing.T) {
 	}
 }
 
+// TestAdmitCollectionErrorHandsMarkerBack covers the window where the sink
+// persisted a marker and then failed to collect: the row must stay pending for
+// the reconciler instead of being settled without its reply.
+func TestAdmitCollectionErrorHandsMarkerBack(t *testing.T) {
+	adapter, _, st, now := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 214, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: *now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+
+	var reconciled []envelope.Envelope
+	adapter.SetReconciler(func(_ context.Context, got envelope.Envelope) (comm.ReconcileOutcome, error) {
+		reconciled = append(reconciled, got)
+		return comm.ReconcileRecovered, nil
+	})
+	adapter.sink = func(_ context.Context, got envelope.Envelope) error {
+		if err := st.CommTG().MarkInboundAdmitted(got.ID, "ses_x", "msg_x", *now); err != nil {
+			return err
+		}
+		return errors.New("collection failed")
+	}
+
+	adapter.admit(context.Background(), env)
+
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.ProcessedAt != nil {
+		t.Error("row was settled despite an admitted turn awaiting collection")
+	}
+	pending, err := st.CommTG().PendingInbound(now.Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("PendingInbound() error: %v", err)
+	}
+	if len(pending) != 1 || pending[0].EnvelopeID != env.ID {
+		t.Fatalf("pending = %+v, want the row handed back to recovery", pending)
+	}
+
+	adapter.replayPending(context.Background())
+	if len(reconciled) != 1 || reconciled[0].ID != env.ID {
+		t.Fatalf("reconciler calls = %+v, want one call for %q", reconciled, env.ID)
+	}
+	item, _, _ = st.CommTG().GetInboxByEnvelope(env.ID)
+	if item.ProcessedAt == nil {
+		t.Error("recovered row was not marked processed")
+	}
+}
+
+// TestReplayIndeterminateAdmissionUsesReconciler ensures a row that OpenCode
+// accepted without a saved marker is never sent back through normal admission.
+func TestReplayIndeterminateAdmissionUsesReconciler(t *testing.T) {
+	adapter, _, st, now := newTestAdapter(t, "42")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(10),
+		envelope.Party{Kind: envelope.PartyUser, ID: "42"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "replay"})
+	raw, _ := json.Marshal(env)
+	if _, err := st.CommTG().RecordInbound(commtg.InboxItem{
+		TGUpdateID: 215, ChatID: 10, EnvelopeID: env.ID, PendingEnvelope: string(raw), ReceivedAt: *now,
+	}); err != nil {
+		t.Fatalf("RecordInbound() error: %v", err)
+	}
+	if err := st.CommTG().MarkInboundAdmissionIndeterminate(env.ID, "ses_x", *now); err != nil {
+		t.Fatalf("MarkInboundAdmissionIndeterminate() error: %v", err)
+	}
+
+	reconciled := 0
+	adapter.SetReconciler(func(context.Context, envelope.Envelope) (comm.ReconcileOutcome, error) {
+		reconciled++
+		return comm.ReconcileRecovered, nil
+	})
+	sinkCalls := 0
+	adapter.sink = func(context.Context, envelope.Envelope) error {
+		sinkCalls++
+		return nil
+	}
+
+	adapter.replayPending(context.Background())
+
+	if reconciled != 1 {
+		t.Errorf("reconciler calls = %d, want 1", reconciled)
+	}
+	if sinkCalls != 0 {
+		t.Errorf("sink calls = %d, want 0 (never re-admit an indeterminate row)", sinkCalls)
+	}
+	item, _, _ := st.CommTG().GetInboxByEnvelope(env.ID)
+	if item.ProcessedAt == nil {
+		t.Error("recovered row was not marked processed")
+	}
+}
+
 func TestReplayReconcileLeavesPendingRowForNextPass(t *testing.T) {
 	outcomes := []struct {
 		name    string

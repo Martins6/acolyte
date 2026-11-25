@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/martins6/acolyte/internal/envelope"
 	"github.com/martins6/acolyte/internal/opencode"
+	"github.com/martins6/acolyte/internal/paths"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store/commtg"
 	"github.com/martins6/acolyte/internal/storepool"
@@ -88,7 +90,13 @@ type fakeProber struct {
 	delivered    bool
 	collectErr   error
 	pending      bool
+	pendingByID  map[string]bool
+	pendingSeq   []bool
+	pendingIndex int
 	inboxErr     error
+	nextInput    string
+	nextFound    bool
+	nextErr      error
 	interrupted  []string
 	interruptErr error
 }
@@ -103,6 +111,13 @@ func (f *fakeProber) GetSession(context.Context, string) (*opencode.SessionInfo,
 	return f.session, nil
 }
 
+func (f *fakeProber) NextInputID(context.Context, string, string) (string, bool, error) {
+	if f.nextErr != nil {
+		return "", false, f.nextErr
+	}
+	return f.nextInput, f.nextFound, nil
+}
+
 func (f *fakeProber) CollectDelivered(context.Context, string, string) (*opencode.TurnResult, bool, error) {
 	if f.collectErr != nil {
 		return nil, false, f.collectErr
@@ -110,9 +125,22 @@ func (f *fakeProber) CollectDelivered(context.Context, string, string) (*opencod
 	return f.collected, f.delivered, nil
 }
 
-func (f *fakeProber) InboxPending(context.Context, string, string) (bool, error) {
+func (f *fakeProber) InboxPending(_ context.Context, _, itemID string) (bool, error) {
 	if f.inboxErr != nil {
 		return false, f.inboxErr
+	}
+	if len(f.pendingSeq) > 0 {
+		index := f.pendingIndex
+		if index >= len(f.pendingSeq) {
+			index = len(f.pendingSeq) - 1
+		}
+		f.pendingIndex++
+		return f.pendingSeq[index], nil
+	}
+	if f.pendingByID != nil {
+		if pending, ok := f.pendingByID[itemID]; ok {
+			return pending, nil
+		}
 	}
 	return f.pending, nil
 }
@@ -148,6 +176,7 @@ type routerHarness struct {
 
 func newRouterHarness(t *testing.T, maxConcurrency int) *routerHarness {
 	t.Helper()
+	t.Setenv(paths.HomeEnv, t.TempDir())
 	ws := filepath.Join(t.TempDir(), "agent")
 	if err := os.MkdirAll(ws, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -421,6 +450,141 @@ func TestRouterAckIsIdempotent(t *testing.T) {
 	}
 }
 
+// failingTurn returns a definite pre-admission rejection and never calls
+// OnAdmitted.
+type failingTurn struct{}
+
+func (failingTurn) RunUserTurn(context.Context, string, string, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, &opencode.PromptError{Err: errors.New("prompt rejected")}
+}
+
+// ambiguousPromptTurn models a prompt request whose response was lost: OpenCode
+// may have accepted it, but the callback never ran.
+type ambiguousPromptTurn struct{}
+
+func (ambiguousPromptTurn) RunUserTurn(context.Context, string, string, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, &opencode.PromptError{Err: errors.New("connection reset"), Ambiguous: true}
+}
+
+// TestRouterPreAdmissionErrorReplies covers a failure before the turn exists:
+// there is nothing to recover, so the user gets the error reply immediately.
+func TestRouterPreAdmissionErrorReplies(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = failingTurn{}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(76),
+		envelope.Party{Kind: envelope.PartyUser, ID: "76"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 703)
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
+		t.Fatal("HandleInbound() error = nil, want the prompt error")
+	}
+	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != replyEnvelopeID(env.ID) {
+		t.Fatalf("outbound events = %+v, want one error reply on the reply identity", h.outbound.events)
+	}
+	if !strings.Contains(h.outbound.events[0].Content.Text, "Error:") {
+		t.Errorf("reply = %q, want an error reply", h.outbound.events[0].Content.Text)
+	}
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.AdmittedAt != nil || item.OpenCodeMessageID != "" {
+		t.Errorf("admission state = %v/%q, want the intent cleared for normal replay", item.AdmittedAt, item.OpenCodeMessageID)
+	}
+}
+
+// TestRouterAmbiguousPromptKeepsIntent covers a prompt whose response was lost:
+// OpenCode may have accepted it, so the row must stay recovery-only instead of
+// being retried through normal admission.
+func TestRouterAmbiguousPromptKeepsIntent(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = ambiguousPromptTurn{}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(80),
+		envelope.Party{Kind: envelope.PartyUser, ID: "80"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 705)
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
+		t.Fatal("HandleInbound() error = nil, want the ambiguous prompt error")
+	}
+	if len(h.outbound.events) != 0 {
+		t.Fatalf("outbound = %+v, want no reply on an unconfirmed prompt", h.outbound.events)
+	}
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.AdmittedAt == nil {
+		t.Error("admission intent was cleared; replay could submit the prompt twice")
+	}
+	if item.ProcessedAt != nil {
+		t.Error("ambiguous row was settled instead of kept for recovery")
+	}
+	release()
+
+	// Recovery recognizes the intent and settles honestly, without re-prompting.
+	h.router.turn = &fakeProber{}
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	assertSettledWithNotice(t, h, env)
+}
+
+// TestRouterPostAdmissionErrorLeavesTurnForRecovery ensures a collection error
+// after admission does not consume the reply identity: the marker must stay
+// eligible for reconciliation so the real reply can still be collected.
+func TestRouterPostAdmissionErrorLeavesTurnForRecovery(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.turn.err = errors.New("stream died")
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(77),
+		envelope.Party{Kind: envelope.PartyUser, ID: "77"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 704)
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
+		t.Fatal("HandleInbound() error = nil, want the collection error")
+	}
+	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Fatalf("outbound events = %+v, want only the ack; the reply slot must stay free", h.outbound.events)
+	}
+
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	defer release()
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.OpenCodeMessageID != "msg_in" || item.OpenCodeSessionID != "ses_fake" {
+		t.Errorf("marker = %q/%q, want the admitted pair", item.OpenCodeSessionID, item.OpenCodeMessageID)
+	}
+	if item.ProcessedAt != nil {
+		t.Error("row was settled despite an admitted turn awaiting collection")
+	}
+	if item.PendingReply != "" {
+		t.Errorf("pending reply = %q, want none (recovery owns the reply)", item.PendingReply)
+	}
+}
+
 func TestRouterTurnRecordsToolActivity(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.turn.events = []opencode.Event{
@@ -575,7 +739,10 @@ func TestRouterPromptIncludesMedia(t *testing.T) {
 	}
 }
 
-func TestRouterTurnErrorPersistsAndRoutesError(t *testing.T) {
+// TestRouterAdmittedTurnErrorLeavesReplyIdentityFree covers an admitted turn
+// without a bookkeeping row: the callback proves OpenCode accepted the input,
+// so the error must not consume the reply identity.
+func TestRouterAdmittedTurnErrorLeavesReplyIdentityFree(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.turn.result = &opencode.TurnResult{SessionID: "ses_err", InputID: "msg_in"}
 	h.turn.err = errors.New("boom")
@@ -586,8 +753,8 @@ func TestRouterTurnErrorPersistsAndRoutesError(t *testing.T) {
 	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
 		t.Fatal("HandleInbound() error = nil, want error")
 	}
-	if len(h.outbound.events) != 2 || !strings.Contains(h.outbound.events[1].Content.Text, "Error: boom") {
-		t.Errorf("outbound = %+v", h.outbound.events)
+	if len(h.outbound.events) != 1 || h.outbound.events[0].ID != ackEnvelopeID(env.ID) {
+		t.Errorf("outbound = %+v, want only the ack with the reply slot free", h.outbound.events)
 	}
 	st, release, err := h.pool.Acquire(h.store)
 	if err != nil {
@@ -1127,7 +1294,8 @@ func TestReconcileLeavesRunningTurnAlone(t *testing.T) {
 		delivered: true,
 		collected: &opencode.TurnResult{SessionID: "ses_1", InputID: "msg_in", ResponseText: "too early"},
 		// Busy is newer than Idle: the service still owns the turn.
-		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		session:   &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound: true,
 	}
 
 	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(81),
@@ -1154,7 +1322,8 @@ func TestReconcileLeavesRunningTurnAlone(t *testing.T) {
 func TestReconcileHealsMissingAdmissionAck(t *testing.T) {
 	h := newRouterHarness(t, 4)
 	h.router.turn = &fakeProber{
-		session: &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		session:   &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound: true,
 	}
 	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(85),
 		envelope.Party{Kind: envelope.PartyUser, ID: "85"},
@@ -1196,6 +1365,252 @@ func TestReconcileHealsMissingAdmissionAck(t *testing.T) {
 	}
 	if len(outbox) != 1 || outbox[0].EnvelopeID != ackEnvelopeID(env.ID) {
 		t.Fatalf("outbox = %+v, want exactly one healed ack", outbox)
+	}
+}
+
+// TestReconcileInterruptsBusyTurnAfterGrace closes the "busy forever" hole: a
+// session that is still in flight past the grace window is interrupted and the
+// message is settled as incomplete instead of being left pending forever.
+func TestReconcileInterruptsBusyTurnAfterGrace(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound: true,
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(79),
+		envelope.Party{Kind: envelope.PartyUser, ID: "79"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 410, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	if len(prober.interrupted) != 1 || prober.interrupted[0] != "ses_busy" {
+		t.Errorf("interrupted = %v, want the busy session interrupted", prober.interrupted)
+	}
+	assertSettledWithNotice(t, h, env)
+	if len(h.outbound.events) == 2 && !strings.Contains(h.outbound.events[1].Content.Text, "still running") {
+		t.Errorf("notice = %q, want the busy-turn wording", h.outbound.events[1].Content.Text)
+	}
+}
+
+// TestReconcileCollectsFinishedTurnWithoutInterruptingLaterTurn covers session
+// ownership: if a later input already delivered, the marker's turn is done and
+// recovery must collect it without touching the later turn.
+func TestReconcileCollectsFinishedTurnWithoutInterruptingLaterTurn(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		delivered: true,
+		collected: &opencode.TurnResult{SessionID: "ses_busy", InputID: "msg_in", ResponseText: "the first answer"},
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextInput: "msg_later", nextFound: true,
+		pendingByID: map[string]bool{"msg_in": false, "msg_later": false},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(78),
+		envelope.Party{Kind: envelope.PartyUser, ID: "78"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedAdmitted(t, env, 411, "ses_busy", "msg_in")
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileRecovered {
+		t.Fatalf("outcome = %v, want recovered", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want the later turn left alone", prober.interrupted)
+	}
+	if len(h.outbound.events) != 2 || h.outbound.events[1].Content.Text != "the first answer" {
+		t.Fatalf("outbound = %+v, want healed ack and the first answer", h.outbound.events)
+	}
+}
+
+// TestReconcileInterruptsWhenLaterInputIsQueued establishes the other side of
+// ownership: a queued next input means the marker's turn is still the head.
+func TestReconcileInterruptsWhenLaterInputIsQueued(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextInput: "msg_later", nextFound: true,
+		pendingByID: map[string]bool{"msg_in": false, "msg_later": true},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(89),
+		envelope.Party{Kind: envelope.PartyUser, ID: "89"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 412, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	if len(prober.interrupted) != 1 || prober.interrupted[0] != "ses_busy" {
+		t.Errorf("interrupted = %v, want the head turn interrupted", prober.interrupted)
+	}
+	assertSettledWithNotice(t, h, env)
+}
+
+// TestReconcileLeavesQueuedMarkerAlone covers an input that has not executed:
+// it must never cause an interrupt, even past the grace window.
+func TestReconcileLeavesQueuedMarkerAlone(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextInput: "msg_later", nextFound: true,
+		pendingByID: map[string]bool{"msg_in": true, "msg_later": true},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(90),
+		envelope.Party{Kind: envelope.PartyUser, ID: "90"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 413, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want no interrupt for a queued input", prober.interrupted)
+	}
+}
+
+// TestReconcileBusyStopNotConfirmed checks the honest wording when an interrupt
+// is rejected: the notice must not claim the turn was stopped.
+func TestReconcileBusyStopNotConfirmed(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:      &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound:    true,
+		interruptErr: &opencode.APIError{Status: http.StatusForbidden},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(91),
+		envelope.Party{Kind: envelope.PartyUser, ID: "91"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 414, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	assertSettledWithNotice(t, h, env)
+	if len(h.outbound.events) == 2 {
+		notice := h.outbound.events[1].Content.Text
+		if !strings.Contains(notice, "could not be confirmed") {
+			t.Errorf("notice = %q, want the unconfirmed-stop wording", notice)
+		}
+		if strings.Contains(notice, "was interrupted") {
+			t.Errorf("notice = %q, must not claim an unconfirmed interruption", notice)
+		}
+		if strings.Contains(notice, "Send it again") {
+			t.Errorf("notice = %q, must not recommend retrying while execution may continue", notice)
+		}
+	}
+}
+
+// TestReconcileSettlesIndeterminateAdmission covers an input OpenCode accepted
+// whose marker was never saved: it must settle without re-admitting.
+func TestReconcileSettlesIndeterminateAdmission(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = &fakeProber{}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(92),
+		envelope.Party{Kind: envelope.PartyUser, ID: "92"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 415)
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	if err := st.CommTG().MarkInboundAdmissionIndeterminate(env.ID, "ses_lost", time.Now().UTC()); err != nil {
+		t.Fatalf("MarkInboundAdmissionIndeterminate() error: %v", err)
+	}
+	release()
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	assertSettledWithNotice(t, h, env)
+}
+
+// TestRecoverRevalidatesQueuedMarkerBeforeInterrupt ensures escalation does not
+// interrupt once the marker executed while the lock was being acquired.
+func TestRecoverRevalidatesQueuedMarkerBeforeInterrupt(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		pendingSeq: []bool{true, false},
+		session:    &opencode.SessionInfo{ID: "ses_1", Time: opencode.SessionTime{Busy: 1, Idle: 2}},
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(93),
+		envelope.Party{Kind: envelope.PartyUser, ID: "93"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 416, "ses_1", "msg_in", 0, time.Now().UTC().Add(-time.Hour))
+	h.seedSession(t, env.Thread, "ses_1")
+
+	outcome, err := h.router.Recover(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Recover() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want no interrupt after the marker executed", prober.interrupted)
+	}
+}
+
+// TestReconcileLeavesUnknownOwnershipPending covers a marker outside the
+// bounded timeline: while the session is busy, recovery must not guess whether
+// this turn or a later one is running.
+func TestReconcileLeavesUnknownOwnershipPending(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound: false,
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(83),
+		envelope.Party{Kind: envelope.PartyUser, ID: "83"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 417, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want no interrupt on unknown ownership", prober.interrupted)
 	}
 }
 

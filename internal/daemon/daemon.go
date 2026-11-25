@@ -301,14 +301,9 @@ func (s *Service) startAgent(agent registry.Agent, seenTokens map[string]string)
 		}
 		return nil
 	}
-	if err := adapter.Start(s.ctx, sink); err != nil {
-		log.Printf("daemon: start communication for %s: %v", agent.Name, err)
-		_ = adapter.Stop()
-		release()
-		return
-	}
-	// Recovery is optional: adapters that support it settle inbounds whose turn
-	// was admitted before a restart instead of dropping or re-prompting them.
+	// Install recovery before polling starts. A reconnect/replay can otherwise
+	// observe a marker-bearing error row while the reconciler is still nil and
+	// settle it without collecting the reply.
 	if setter, ok := adapter.(comm.ReconcilerSetter); ok {
 		setter.SetReconciler(func(ctx context.Context, env envelope.Envelope) (comm.ReconcileOutcome, error) {
 			outcome, err := s.router.Recover(ctx, agent, env)
@@ -317,6 +312,12 @@ func (s *Service) startAgent(agent registry.Agent, seenTokens map[string]string)
 			}
 			return outcome, err
 		})
+	}
+	if err := adapter.Start(s.ctx, sink); err != nil {
+		log.Printf("daemon: start communication for %s: %v", agent.Name, err)
+		_ = adapter.Stop()
+		release()
+		return
 	}
 
 	rt := &agentRuntime{

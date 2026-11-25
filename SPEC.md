@@ -732,8 +732,27 @@ failures (missing session, rejected request) settle the same way.
 **Escalation is bounded and honest.** After a `resumeGraceWindow` (5 min), a stranded turn is
 abandoned: the session is interrupted, the thread→session mapping is forgotten, and the marker is
 cleared so the next pass admits the message into a fresh session. Because the abandoned input provably
-never executed, nothing is duplicated; the cost is that thread's conversation context. After
-`maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
+never executed, nothing is duplicated; the cost is that thread's conversation context. A session that
+is still in flight past the grace window is interrupted and the message is settled as incomplete
+instead: execution cannot be disproved, so it is never re-admitted. Recovery first establishes that
+this marker is the session's head turn (no later delivered input, or the next input is still queued);
+a later turn is never interrupted. The ownership check and interrupt take the same per-session turn
+lock as every admission (router, cron, OutboxSink), so a newer turn cannot start in between; escalation
+re-reads the row and revalidates that the marker is still queued after taking the lock. A marker outside
+the bounded timeline has unknown ownership and is left pending while the session is busy, never
+guessed. If an interrupt is rejected and cannot be confirmed, the notice says so instead of claiming
+the turn stopped, and does not tell the user to resend while the original turn may still run.
+After `maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
+
+**Collection errors do not consume the reply.** Before calling OpenCode, the router records
+`admitted_at` as durable admission intent. The callback then persists the marker; a turn error after
+admission keeps that marker and leaves the reply identity (`out_<inbound>`) free. If the marker cannot
+be saved even after a retry, the intent timestamp remains as the indeterminate signal: replay settles
+it with an honest notice instead of re-admitting and running the request twice. A prompt failure is
+only treated as pre-admission when the service definitively rejected it; transport, timeout, and 5xx
+outcomes keep the intent because the request may already have executed. Only a turn that never
+reached OpenCode clears the intent and gets an immediate error reply. Replay reconciles the turn and
+queues the real reply when it exists; only definitive failures settle with a notice.
 
 **Replies are idempotent per inbound.** The reply envelope ID is derived from the inbound envelope ID
 (`out_<inbound>`), and `comm_tg_outbox` is unique on `envelope_id`, so a repeated or racing reply
@@ -742,6 +761,9 @@ collapses to one row instead of double-sending.
 **Operator notices are labelled.** Text Acolyte generates about its own operation is sent as
 `ACOLYTE SYSTEM MESSAGE: <text>` on its own outbound identity (`sys_<inbound>`), never mixed into agent
 text, and never claims a request completed when it did not.
+
+**Recovery is wired before polling.** The daemon installs the adapter's reconciler before starting the
+adapter, so an initial replay can never mark a marker-bearing row processed while recovery is missing.
 
 **Cron runs recover output, not execution.** A job records the marker of the turn it admitted
 (`orch_cron_jobs.pending_*`). On restart, recovery checks that the session is not still in flight,

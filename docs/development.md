@@ -92,7 +92,20 @@ Behaviour worth remembering when changing this code:
   started; the reply, an error, or an operator notice reports the outcome. Reconciliation heals a
   missing ack (crash between marker and ack) using the same stable identity.
 - Recovery probes; it never waits and never re-prompts. Escalation is the only path that admits again,
-  and only into a fresh session for input that provably never executed.
+  and only into a fresh session for input that provably never executed. A session still in flight past
+  the grace window is interrupted and settled as incomplete, but only when this marker is the head
+  turn; a later delivered turn is left alone. The ownership check and interrupt take the per-session
+  turn lock shared by router, cron, and OutboxSink turns. Unknown ownership (marker outside the bounded
+  timeline) stays pending while the session is busy. An unconfirmed interrupt settles without claiming
+  the turn stopped or asking the user to retry while it may still run.
+- A collection error after admission keeps the marker and the reply identity free. Admission intent is
+  recorded before the prompt; if the marker write fails, that timestamp is the durable indeterminate
+  signal and replay settles instead of re-admitting. An ambiguous prompt failure (transport, timeout,
+  5xx) keeps the intent; only a definitive rejection clears it and replies immediately.
+- Escalation takes the session lock, re-reads the row, and revalidates that the marker is still queued
+  before interrupting; a marker that executed while waiting is handed back for a fresh reconcile.
+- The daemon installs the adapter's reconciler before the adapter starts polling, so an initial replay
+  cannot settle a marker-bearing row while recovery is missing.
 - Definitive outcomes settle with a notice and processed row: an empty finished turn, a truncated
   output, a consumed marker with nothing to collect, and permanent probe failures (missing session,
   rejected request). Only transient probe errors stay pending.

@@ -797,6 +797,57 @@ func (c *Client) messagesAfter(ctx context.Context, sessionID, markerID string) 
 	return after, found, truncated, nil
 }
 
+// NextInputID returns the oldest user/synthetic input newer than markerID, and
+// whether markerID itself was found in the session timeline. Recovery uses it
+// to tell whether an aged marker's turn is still the one owning a busy session.
+func (c *Client) NextInputID(ctx context.Context, sessionID, markerID string) (string, bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	markerID = strings.TrimSpace(markerID)
+	if sessionID == "" || markerID == "" {
+		return "", false, fmt.Errorf("opencode: session id and marker id are required")
+	}
+	next := ""
+	found := false
+	cursor := ""
+	for page := 0; page < messageMaxPages; page++ {
+		path := fmt.Sprintf("/api/session/%s/message?limit=%d", url.PathEscape(sessionID), messagePageSize)
+		if cursor == "" {
+			path += "&order=desc"
+		} else {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		var resp struct {
+			Data   []Message `json:"data"`
+			Cursor struct {
+				Previous string `json:"previous"`
+				Next     string `json:"next"`
+			} `json:"cursor"`
+		}
+		if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+			return "", false, err
+		}
+		for _, m := range resp.Data {
+			if m.ID == markerID {
+				found = true
+				break
+			}
+			if m.Type == "user" || m.Type == "synthetic" {
+				// Walking newest-first: the last input seen before the marker
+				// is the oldest input newer than it.
+				next = m.ID
+			}
+		}
+		if found || resp.Cursor.Next == "" {
+			break
+		}
+		cursor = resp.Cursor.Next
+	}
+	if !found {
+		return "", false, nil
+	}
+	return next, true, nil
+}
+
 // InboxPending reports whether the given inbox item is still awaiting
 // delivery to the session.
 func (c *Client) InboxPending(ctx context.Context, sessionID, itemID string) (bool, error) {

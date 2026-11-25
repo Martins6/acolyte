@@ -47,6 +47,18 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 		_ = a.store.CommTG().RecordInboundFailure(env.ID, token, getErr.Error())
 		return
 	}
+	if ok && item.OpenCodeMessageID == "" && item.AdmittedAt != nil {
+		// OpenCode accepted the input but its marker was never saved. Recovery
+		// must settle it; normal admission would run the request twice.
+		if a.reconciler() != nil {
+			_ = a.store.CommTG().ReleaseInboundClaim(env.ID, token)
+			return
+		}
+		if markErr := a.store.CommTG().MarkInboundProcessed(env.ID, token, a.now()); markErr != nil {
+			log.Printf("telegram: mark indeterminate inbound %s processed for %s: %v", env.ID, a.agent.Name, markErr)
+		}
+		return
+	}
 	if ok && item.OpenCodeMessageID != "" {
 		if item.PendingReply != "" {
 			if deliverErr := a.deliverPendingReply(item); deliverErr != nil {
@@ -102,8 +114,9 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 	}
 
 	// If the router already admitted the input, the turn exists even though
-	// collection failed. Recover any pending reply first.
-	if item, ok, getErr := a.store.CommTG().GetInboxByEnvelope(env.ID); getErr == nil && ok && item.OpenCodeMessageID != "" {
+	// collection failed. Hand it to recovery instead of settling it without
+	// collecting the real reply.
+	if item, ok, getErr := a.store.CommTG().GetInboxByEnvelope(env.ID); getErr == nil && ok && (item.OpenCodeMessageID != "" || item.AdmittedAt != nil) {
 		if item.PendingReply != "" {
 			if deliverErr := a.deliverPendingReply(item); deliverErr != nil {
 				if recordErr := a.store.CommTG().RecordInboundFailure(env.ID, token, deliverErr.Error()); recordErr != nil {
@@ -111,6 +124,12 @@ func (a *Adapter) admit(ctx context.Context, env envelope.Envelope) {
 				}
 				return
 			}
+		}
+		if item.PendingReply == "" && a.reconciler() != nil {
+			// The marker is the recovery handle; marking the row processed here
+			// would drop a reply that may still be collected.
+			_ = a.store.CommTG().ReleaseInboundClaim(env.ID, token)
+			return
 		}
 		if markErr := a.store.CommTG().MarkInboundProcessed(env.ID, token, a.now()); markErr != nil {
 			log.Printf("telegram: mark linked inbound %s processed for %s: %v", env.ID, a.agent.Name, markErr)
@@ -160,7 +179,7 @@ func (a *Adapter) replayPending(ctx context.Context) {
 			_ = a.store.CommTG().MarkInboundProcessed(item.EnvelopeID, token, a.now())
 			continue
 		}
-		if item.OpenCodeMessageID != "" {
+		if item.OpenCodeMessageID != "" || item.AdmittedAt != nil {
 			a.reconcileItem(ctx, item)
 			continue
 		}

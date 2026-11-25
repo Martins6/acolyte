@@ -16,6 +16,33 @@ import (
 // than the newest collection window, so its reply cannot be bounded reliably.
 var ErrTurnTruncated = errors.New("opencode: turn output exceeded the collection window")
 
+// PromptError is a failed admission request. Ambiguous is true when the request
+// may have reached the service (transport failure, timeout, cancellation, or a
+// 5xx), so retrying could execute it twice. It is false for a definitive
+// rejection that proves the input was not admitted.
+type PromptError struct {
+	Err       error
+	Ambiguous bool
+}
+
+func (e *PromptError) Error() string { return e.Err.Error() }
+func (e *PromptError) Unwrap() error { return e.Err }
+
+// promptOutcomeUnknown reports whether a failed prompt may still have been
+// accepted by the service.
+func promptOutcomeUnknown(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return !apiErr.Permanent()
+	}
+	// Transport errors, timeouts, and cancellations can happen after the
+	// request was sent, so the conservative answer is yes.
+	return true
+}
+
 // syntheticRecheckGap is how long to pause before re-waiting when a queued
 // input has not been delivered yet (a var so tests can shorten it).
 var syntheticRecheckGap = 2 * time.Second
@@ -148,7 +175,10 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 
 	item, err := c.Prompt(ctx, info.ID, text)
 	if err != nil {
-		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, &PromptError{
+			Err:       err,
+			Ambiguous: promptOutcomeUnknown(err),
+		}
 	}
 	if err := admitInput(cfg, info.ID, item); err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
@@ -214,7 +244,10 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 
 	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
-		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, &PromptError{
+			Err:       err,
+			Ambiguous: promptOutcomeUnknown(err),
+		}
 	}
 	if err := admitInput(cfg, info.ID, item); err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err

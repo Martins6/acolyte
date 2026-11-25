@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/martins6/acolyte/internal/envelope"
+	"github.com/martins6/acolyte/internal/lock"
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
@@ -33,6 +35,7 @@ type TurnRunner interface {
 // without waiting and without admitting it again.
 type TurnProber interface {
 	GetSession(ctx context.Context, sessionID string) (*opencode.SessionInfo, error)
+	NextInputID(ctx context.Context, sessionID, markerID string) (string, bool, error)
 	CollectDelivered(ctx context.Context, sessionID, markerID string) (*opencode.TurnResult, bool, error)
 	InboxPending(ctx context.Context, sessionID, itemID string) (bool, error)
 	Interrupt(ctx context.Context, sessionID string) error
@@ -41,6 +44,11 @@ type TurnProber interface {
 // resumeGraceWindow is how long a stranded turn may sit before recovery abandons
 // it. It is a variable so tests can shorten it.
 var resumeGraceWindow = 5 * time.Minute
+
+// sessionLockWait bounds how long recovery waits for a live turn's session lock
+// before leaving the row for the next pass. A live turn holds this lock for its
+// whole duration, so waiting without a bound would stall replay.
+var sessionLockWait = 10 * time.Second
 
 // maxResumeAttempts bounds how many times recovery re-admits one message before
 // settling it with an explicit notice.
@@ -194,6 +202,14 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 	defer func() { <-r.sem }()
 
+	// Record admission intent before the prompt. If every later marker write
+	// fails, this durable timestamp stops replay from re-admitting a message
+	// that OpenCode may already be executing.
+	if err := st.CommTG().MarkInboundAdmissionStarted(env.ID, r.now()); err != nil &&
+		!errors.Is(err, commtg.ErrInboundNotFound) {
+		return fmt.Errorf("comm: record admission intent: %w", err)
+	}
+
 	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
 	if r.events != nil {
 		cfg.OnEvent = r.events(agent, st)
@@ -202,10 +218,15 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	// by this pair instead of admitting the message a second time. The same
 	// hook enqueues the durable acknowledgement, so even a turn that never
 	// finishes leaves the user with a retryable outbox row instead of silence.
-	cfg.OnAdmitted = func(admitted opencode.Admitted) error {
-		if err := st.CommTG().MarkInboundAdmitted(env.ID, admitted.SessionID, admitted.InputID, r.now()); err != nil &&
-			!errors.Is(err, commtg.ErrInboundNotFound) {
-			return err
+	admitted := false
+	cfg.OnAdmitted = func(admittedTurn opencode.Admitted) error {
+		// The callback only runs after OpenCode accepted the input, so the turn
+		// exists even if persisting the marker below fails.
+		admitted = true
+		if err := st.CommTG().MarkInboundAdmitted(env.ID, admittedTurn.SessionID, admittedTurn.InputID, r.now()); err != nil {
+			if !errors.Is(err, commtg.ErrInboundNotFound) {
+				return err
+			}
 		}
 		if err := r.sendAck(ctx, agent, env); err != nil {
 			// The marker is already durable, so the turn is recoverable.
@@ -223,6 +244,50 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 
 	if turnErr != nil {
+		if admitted {
+			// The callback means OpenCode accepted the input, so recovery owns
+			// the reply even if the marker write failed. Try the idempotent
+			// write once more from the returned marker.
+			markerErr := errors.New("admitted marker was not returned")
+			if result != nil && strings.TrimSpace(result.SessionID) != "" && strings.TrimSpace(result.InputID) != "" {
+				markerErr = st.CommTG().MarkInboundAdmitted(env.ID, result.SessionID, result.InputID, r.now())
+				if errors.Is(markerErr, commtg.ErrInboundNotFound) {
+					markerErr = nil
+				}
+			}
+			if markerErr != nil {
+				// The marker cannot be persisted, but the turn may be running.
+				// Record a durable indeterminate state so replay never
+				// re-admits it and duplicates the work, then settle honestly.
+				sessionID := ""
+				if result != nil {
+					sessionID = result.SessionID
+				}
+				if indErr := st.CommTG().MarkInboundAdmissionIndeterminate(env.ID, sessionID, r.now()); indErr != nil {
+					return fmt.Errorf("%v: persist admitted marker: %v (indeterminate state: %w)", turnErr, markerErr, indErr)
+				}
+				notice := SystemNotice(indeterminateNotice)
+				if settleErr := r.settleNotice(ctx, st, agent, env, notice); settleErr != nil {
+					return fmt.Errorf("%v: %w", turnErr, settleErr)
+				}
+			}
+			return turnErr
+		}
+		var promptErr *opencode.PromptError
+		if errors.As(turnErr, &promptErr) && promptErr.Ambiguous {
+			// The prompt may have been accepted even though its response was
+			// lost. Keep the admission intent so replay settles the row as
+			// indeterminate instead of submitting it a second time.
+			return turnErr
+		}
+		// No callback means OpenCode never accepted the input. Clear the intent
+		// so replay may admit it; if clearing fails, leave the row for recovery
+		// rather than risk a second execution.
+		if clearErr := st.CommTG().ClearInboundAdmission(env.ID); clearErr != nil &&
+			!errors.Is(clearErr, commtg.ErrInboundNotFound) {
+			log.Printf("comm: clear admission intent for %s: %v", env.ID, clearErr)
+			return fmt.Errorf("%v: clear admission intent: %w", turnErr, clearErr)
+		}
 		if sendErr := r.sendReply(ctx, st, agent, env, result, fmt.Sprintf("Error: %v", turnErr)); sendErr != nil {
 			return fmt.Errorf("%v: %w", turnErr, sendErr)
 		}
@@ -252,10 +317,16 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 // recovery counterpart to HandleInbound: it never admits a new turn, it only
 // looks at the marker already recorded on the inbound row.
 //
-// Callers must hold the inbound claim. That is what makes recovery safe: the
-// row is excluded from PendingInbound while a live turn owns it, so this can
-// never race the turn it is inspecting.
+// Callers must hold the inbound claim. The router's thread lock also serializes
+// the probe with new admissions, so a busy-session decision cannot race a turn
+// that is starting on the same thread.
 func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
+	unlock := r.lockThread(env.Thread)
+	defer unlock()
+	return r.reconcile(ctx, agent, env)
+}
+
+func (r *Router) reconcile(ctx context.Context, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
 	prober, ok := r.turn.(TurnProber)
 	if !ok {
 		return ReconcileUnrecoverable, fmt.Errorf("comm: turn runner does not support recovery")
@@ -276,18 +347,32 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 	}
 	marker := strings.TrimSpace(item.OpenCodeMessageID)
 	sessionID := strings.TrimSpace(item.OpenCodeSessionID)
-	if marker == "" || sessionID == "" {
-		// Nothing was admitted, so there is nothing to collect. The caller
-		// falls back to normal admission.
-		return ReconcileStillPending, nil
-	}
 
 	// OnAdmitted enqueues the acknowledgement, but a crash between persisting
 	// the marker and that enqueue would leave an admitted message silent.
 	// Reconcile heals that window; the stable `ack_<inbound>` identity makes
-	// this a no-op once the row exists.
-	if err := r.sendAck(ctx, agent, env); err != nil {
-		log.Printf("comm: heal acknowledgment for %s: %v", env.ID, err)
+	// this a no-op once the row exists. Only rows that reached admission get
+	// an ack.
+	if item.AdmittedAt != nil || (marker != "" && sessionID != "") {
+		if err := r.sendAck(ctx, agent, env); err != nil {
+			log.Printf("comm: heal acknowledgment for %s: %v", env.ID, err)
+		}
+	}
+
+	if marker == "" || sessionID == "" {
+		if item.AdmittedAt != nil {
+			// OpenCode accepted this input but its marker was never saved.
+			// Re-admitting could run the same request twice, so settle with an
+			// honest notice instead.
+			notice := SystemNotice(indeterminateNotice)
+			if err := r.settleNotice(ctx, st, agent, env, notice); err != nil {
+				return ReconcileUnrecoverable, err
+			}
+			return ReconcileUnrecoverable, nil
+		}
+		// Nothing was admitted, so there is nothing to collect. The caller
+		// falls back to normal admission.
+		return ReconcileStillPending, nil
 	}
 
 	info, err := prober.GetSession(ctx, sessionID)
@@ -299,8 +384,73 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 		return ReconcileStillPending, err
 	}
 	if info.Time.InFlight() {
-		// The service still owns this turn. Recovery must not interfere.
-		return ReconcileStillPending, nil
+		// Another producer (cron, OutboxSink) can admit a turn on the same
+		// session without using the router's thread lock. Take the session's
+		// turn lock so the ownership check and any interrupt are serialized
+		// with every admission, then re-check: the turn may have finished
+		// while we waited.
+		releaseLock, lockErr := r.lockForRecovery(ctx, sessionID)
+		if lockErr != nil {
+			log.Printf("comm: wait for session lock %s: %v", sessionID, lockErr)
+			return ReconcileStillPending, nil
+		}
+		defer releaseLock()
+		info, err = prober.GetSession(ctx, sessionID)
+		if err != nil {
+			if opencode.IsPermanentError(err) {
+				return r.settleProbeFailure(ctx, st, agent, env)
+			}
+			return ReconcileStillPending, err
+		}
+	}
+	if info.Time.InFlight() {
+		active, queued, unknown, err := r.sessionTurnState(ctx, prober, sessionID, marker)
+		if err != nil {
+			if opencode.IsPermanentError(err) {
+				return r.settleProbeFailure(ctx, st, agent, env)
+			}
+			return ReconcileStillPending, err
+		}
+		if queued || unknown {
+			// This input has not executed yet, or the bounded timeline cannot
+			// prove ownership. Never interrupt on ambiguous ownership.
+			return ReconcileStillPending, nil
+		}
+		if active {
+			if !resumeGraceElapsed(item, r.now()) {
+				// This turn still owns the session and is inside the grace
+				// window. Recovery must not interfere.
+				return ReconcileStillPending, nil
+			}
+			// The session has been busy past the grace window with this
+			// marker's turn at the head. Bounded recovery matters more than
+			// waiting forever: stop it and tell the user it did not finish.
+			stopConfirmed := true
+			if err := prober.Interrupt(ctx, sessionID); err != nil {
+				var apiErr *opencode.APIError
+				switch {
+				case errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound:
+					// The session is gone, so the turn cannot still run.
+					return r.settleProbeFailure(ctx, st, agent, env)
+				case opencode.IsPermanentError(err):
+					// A rejected interrupt does not prove the turn stopped.
+					stopConfirmed = false
+				default:
+					return ReconcileStillPending, err
+				}
+			}
+			noticeText := "your message was still running after the recovery grace period, so it was interrupted and no reply was delivered. Send it again to retry."
+			if !stopConfirmed {
+				noticeText = "your message was still running after the recovery grace period, but stopping it could not be confirmed and no reply was delivered. Check whether the turn is still running before sending it again."
+			}
+			if err := r.settleNotice(ctx, st, agent, env, SystemNotice(noticeText)); err != nil {
+				return ReconcileUnrecoverable, err
+			}
+			return ReconcileUnrecoverable, nil
+		}
+		// A later turn owns the session, so this marker's turn is already
+		// finished. Fall through and collect its output; never interrupt the
+		// later turn.
 	}
 
 	result, delivered, err := prober.CollectDelivered(ctx, sessionID, marker)
@@ -358,12 +508,57 @@ func (r *Router) Reconcile(ctx context.Context, agent registry.Agent, env envelo
 	return ReconcileUnrecoverable, nil
 }
 
+// lockForRecovery takes the per-session turn lock shared by every producer
+// (router turns, cron, OutboxSink). It releases the returned function.
+func (r *Router) lockForRecovery(ctx context.Context, sessionID string) (func(), error) {
+	lockCtx, cancel := context.WithTimeout(ctx, sessionLockWait)
+	defer cancel()
+	held, err := lock.AcquireSession(lockCtx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = held.Release() }, nil
+}
+
+// sessionTurnState reports whether this marker's turn owns a busy session.
+// active is true when the marker is the head turn; queued is true when the
+// input has not been delivered yet; unknown is true when the bounded timeline
+// cannot prove either way. Callers must never interrupt on unknown ownership.
+func (r *Router) sessionTurnState(ctx context.Context, prober TurnProber, sessionID, marker string) (active, queued, unknown bool, err error) {
+	pending, err := prober.InboxPending(ctx, sessionID, marker)
+	if err != nil {
+		return false, false, false, err
+	}
+	if pending {
+		return false, true, false, nil
+	}
+	next, found, err := prober.NextInputID(ctx, sessionID, marker)
+	if err != nil {
+		return false, false, false, err
+	}
+	if !found {
+		return false, false, true, nil
+	}
+	if next == "" {
+		return true, false, false, nil
+	}
+	// If the next input is still queued, the marker's turn is the head turn.
+	// If it was delivered, a later turn owns the session and the marker is done.
+	nextPending, err := prober.InboxPending(ctx, sessionID, next)
+	if err != nil {
+		return false, false, false, err
+	}
+	return nextPending, false, false, nil
+}
+
 // Recover applies the escalation policy on top of Reconcile. A stranded turn is
 // left alone until the grace window passes; then it is abandoned, and the
 // message is re-admitted into a fresh session. When the attempt budget runs out
 // the message is settled with an explicit notice instead of retrying forever.
 func (r *Router) Recover(ctx context.Context, agent registry.Agent, env envelope.Envelope) (ReconcileOutcome, error) {
-	outcome, err := r.Reconcile(ctx, agent, env)
+	unlock := r.lockThread(env.Thread)
+	defer unlock()
+	outcome, err := r.reconcile(ctx, agent, env)
 	if err != nil || outcome != ReconcileStranded {
 		return outcome, err
 	}
@@ -394,14 +589,55 @@ func (r *Router) Recover(ctx context.Context, agent registry.Agent, env envelope
 		return ReconcileUnrecoverable, nil
 	}
 
+	prober, ok := r.turn.(TurnProber)
+	if !ok {
+		return ReconcileUnrecoverable, fmt.Errorf("comm: turn runner does not support recovery")
+	}
+	// Hold the session turn lock across the recheck and the interrupt. A cron
+	// or OutboxSink turn can otherwise start between the idle probe and the
+	// interrupt, and recovery would stop newer work.
+	releaseLock, lockErr := r.lockForRecovery(ctx, item.OpenCodeSessionID)
+	if lockErr != nil {
+		log.Printf("comm: wait for session lock %s before abandoning turn: %v", item.OpenCodeSessionID, lockErr)
+		return ReconcileStillPending, nil
+	}
+	defer releaseLock()
+
+	// A live admission may have settled or replaced the row while we waited.
+	current, found, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		return ReconcileStillPending, err
+	}
+	if !found || current.ProcessedAt != nil || current.OpenCodeMessageID != item.OpenCodeMessageID {
+		return ReconcileStillPending, nil
+	}
+	item = current
+	info, err := prober.GetSession(ctx, item.OpenCodeSessionID)
+	if err != nil {
+		if opencode.IsPermanentError(err) {
+			return r.settleProbeFailure(ctx, st, agent, env)
+		}
+		return ReconcileStillPending, err
+	}
+	if info != nil && info.Time.InFlight() {
+		return ReconcileStillPending, nil
+	}
+	queued, err := prober.InboxPending(ctx, item.OpenCodeSessionID, item.OpenCodeMessageID)
+	if err != nil {
+		return ReconcileStillPending, err
+	}
+	if !queued {
+		// The input executed while we waited; hand it back for a fresh
+		// reconcile instead of interrupting whatever now owns the session.
+		return ReconcileStillPending, nil
+	}
+
 	// Abandon the stranded turn: settle the wedged session, forget the thread's
 	// session mapping, and clear the marker so the next pass admits the message
 	// into a fresh session exactly like a new one. Nothing ran, so nothing that
 	// follows is duplicated.
-	if prober, ok := r.turn.(TurnProber); ok && strings.TrimSpace(item.OpenCodeSessionID) != "" {
-		if err := prober.Interrupt(ctx, item.OpenCodeSessionID); err != nil {
-			return ReconcileStillPending, err
-		}
+	if err := prober.Interrupt(ctx, item.OpenCodeSessionID); err != nil {
+		return ReconcileStillPending, err
 	}
 	if _, err := st.Orch().DeleteSession(env.Thread); err != nil {
 		return ReconcileStillPending, err
@@ -456,6 +692,10 @@ func (r *Router) settleUnrecoverable(ctx context.Context, st *store.Store, agent
 // that work started: the reply, an error, or a later operator notice reports
 // what actually happened.
 const acknowledgementText = "working on your message."
+
+// indeterminateNotice is used when admission was confirmed but no marker can be
+// persisted. It must not promise a safe retry while the original turn may run.
+const indeterminateNotice = "your message could not be tracked reliably, so it was not retried automatically to avoid running it twice. Check whether it is still running before sending it again."
 
 // sendAck enqueues the user-facing acknowledgement for an admitted inbound. The
 // ID is stable (`ack_<inbound>`) and the outbox is unique on it, so a repeated
