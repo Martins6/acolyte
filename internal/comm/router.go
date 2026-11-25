@@ -273,6 +273,13 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 			}
 			return turnErr
 		}
+		var promptErr *opencode.PromptError
+		if errors.As(turnErr, &promptErr) && promptErr.Ambiguous {
+			// The prompt may have been accepted even though its response was
+			// lost. Keep the admission intent so replay settles the row as
+			// indeterminate instead of submitting it a second time.
+			return turnErr
+		}
 		// No callback means OpenCode never accepted the input. Clear the intent
 		// so replay may admit it; if clearing fails, leave the row for recovery
 		// rather than risk a second execution.
@@ -397,16 +404,16 @@ func (r *Router) reconcile(ctx context.Context, agent registry.Agent, env envelo
 		}
 	}
 	if info.Time.InFlight() {
-		active, queued, err := r.sessionTurnState(ctx, prober, sessionID, marker)
+		active, queued, unknown, err := r.sessionTurnState(ctx, prober, sessionID, marker)
 		if err != nil {
 			if opencode.IsPermanentError(err) {
 				return r.settleProbeFailure(ctx, st, agent, env)
 			}
 			return ReconcileStillPending, err
 		}
-		if queued {
-			// This input has not executed yet; a later turn may own the
-			// session. Never interrupt on behalf of an input still waiting.
+		if queued || unknown {
+			// This input has not executed yet, or the bounded timeline cannot
+			// prove ownership. Never interrupt on ambiguous ownership.
 			return ReconcileStillPending, nil
 		}
 		if active {
@@ -515,34 +522,33 @@ func (r *Router) lockForRecovery(ctx context.Context, sessionID string) (func(),
 
 // sessionTurnState reports whether this marker's turn owns a busy session.
 // active is true when the marker is the head turn; queued is true when the
-// input has not been delivered yet, so a later turn may own the session.
-// Unknown ownership (the marker is outside the timeline) is reported as
-// neither, so callers never interrupt on a guess.
-func (r *Router) sessionTurnState(ctx context.Context, prober TurnProber, sessionID, marker string) (active, queued bool, err error) {
+// input has not been delivered yet; unknown is true when the bounded timeline
+// cannot prove either way. Callers must never interrupt on unknown ownership.
+func (r *Router) sessionTurnState(ctx context.Context, prober TurnProber, sessionID, marker string) (active, queued, unknown bool, err error) {
 	pending, err := prober.InboxPending(ctx, sessionID, marker)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	if pending {
-		return false, true, nil
+		return false, true, false, nil
 	}
 	next, found, err := prober.NextInputID(ctx, sessionID, marker)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	if !found {
-		return false, false, nil
+		return false, false, true, nil
 	}
 	if next == "" {
-		return true, false, nil
+		return true, false, false, nil
 	}
 	// If the next input is still queued, the marker's turn is the head turn.
 	// If it was delivered, a later turn owns the session and the marker is done.
 	nextPending, err := prober.InboxPending(ctx, sessionID, next)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
-	return nextPending, false, nil
+	return nextPending, false, false, nil
 }
 
 // Recover applies the escalation policy on top of Reconcile. A stranded turn is

@@ -738,16 +738,19 @@ instead: execution cannot be disproved, so it is never re-admitted. Recovery fir
 this marker is the session's head turn (no later delivered input, or the next input is still queued);
 a later turn is never interrupted. The ownership check and interrupt take the same per-session turn
 lock as every admission (router, cron, OutboxSink), so a newer turn cannot start in between; escalation
-re-reads the row and revalidates that the marker is still queued after taking the lock. If an
-interrupt is rejected and cannot be confirmed, the notice says so instead of claiming the turn stopped,
-and does not tell the user to resend while the original turn may still run.
+re-reads the row and revalidates that the marker is still queued after taking the lock. A marker outside
+the bounded timeline has unknown ownership and is left pending while the session is busy, never
+guessed. If an interrupt is rejected and cannot be confirmed, the notice says so instead of claiming
+the turn stopped, and does not tell the user to resend while the original turn may still run.
 After `maxResumeAttempts` (2), the message is settled and the user is told it did not complete.
 
 **Collection errors do not consume the reply.** Before calling OpenCode, the router records
 `admitted_at` as durable admission intent. The callback then persists the marker; a turn error after
 admission keeps that marker and leaves the reply identity (`out_<inbound>`) free. If the marker cannot
 be saved even after a retry, the intent timestamp remains as the indeterminate signal: replay settles
-it with an honest notice instead of re-admitting and running the request twice. Only a turn that never
+it with an honest notice instead of re-admitting and running the request twice. A prompt failure is
+only treated as pre-admission when the service definitively rejected it; transport, timeout, and 5xx
+outcomes keep the intent because the request may already have executed. Only a turn that never
 reached OpenCode clears the intent and gets an immediate error reply. Replay reconciles the turn and
 queues the real reply when it exists; only definitive failures settle with a notice.
 

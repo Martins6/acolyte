@@ -450,11 +450,20 @@ func TestRouterAckIsIdempotent(t *testing.T) {
 	}
 }
 
-// failingTurn returns a pre-admission error and never calls OnAdmitted.
+// failingTurn returns a definite pre-admission rejection and never calls
+// OnAdmitted.
 type failingTurn struct{}
 
 func (failingTurn) RunUserTurn(context.Context, string, string, opencode.TurnConfig) (*opencode.TurnResult, error) {
-	return nil, errors.New("prompt rejected")
+	return nil, &opencode.PromptError{Err: errors.New("prompt rejected")}
+}
+
+// ambiguousPromptTurn models a prompt request whose response was lost: OpenCode
+// may have accepted it, but the callback never ran.
+type ambiguousPromptTurn struct{}
+
+func (ambiguousPromptTurn) RunUserTurn(context.Context, string, string, opencode.TurnConfig) (*opencode.TurnResult, error) {
+	return nil, &opencode.PromptError{Err: errors.New("connection reset"), Ambiguous: true}
 }
 
 // TestRouterPreAdmissionErrorReplies covers a failure before the turn exists:
@@ -489,6 +498,52 @@ func TestRouterPreAdmissionErrorReplies(t *testing.T) {
 	if item.AdmittedAt != nil || item.OpenCodeMessageID != "" {
 		t.Errorf("admission state = %v/%q, want the intent cleared for normal replay", item.AdmittedAt, item.OpenCodeMessageID)
 	}
+}
+
+// TestRouterAmbiguousPromptKeepsIntent covers a prompt whose response was lost:
+// OpenCode may have accepted it, so the row must stay recovery-only instead of
+// being retried through normal admission.
+func TestRouterAmbiguousPromptKeepsIntent(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	h.router.turn = ambiguousPromptTurn{}
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(80),
+		envelope.Party{Kind: envelope.PartyUser, ID: "80"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedInbound(t, env, 705)
+
+	if err := h.router.HandleInbound(context.Background(), h.agent, env); err == nil {
+		t.Fatal("HandleInbound() error = nil, want the ambiguous prompt error")
+	}
+	if len(h.outbound.events) != 0 {
+		t.Fatalf("outbound = %+v, want no reply on an unconfirmed prompt", h.outbound.events)
+	}
+	st, release, err := h.pool.Acquire(h.store)
+	if err != nil {
+		t.Fatalf("Acquire() error: %v", err)
+	}
+	item, _, err := st.CommTG().GetInboxByEnvelope(env.ID)
+	if err != nil {
+		t.Fatalf("GetInboxByEnvelope() error: %v", err)
+	}
+	if item.AdmittedAt == nil {
+		t.Error("admission intent was cleared; replay could submit the prompt twice")
+	}
+	if item.ProcessedAt != nil {
+		t.Error("ambiguous row was settled instead of kept for recovery")
+	}
+	release()
+
+	// Recovery recognizes the intent and settles honestly, without re-prompting.
+	h.router.turn = &fakeProber{}
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileUnrecoverable {
+		t.Fatalf("outcome = %v, want unrecoverable", outcome)
+	}
+	assertSettledWithNotice(t, h, env)
 }
 
 // TestRouterPostAdmissionErrorLeavesTurnForRecovery ensures a collection error
@@ -1528,6 +1583,34 @@ func TestRecoverRevalidatesQueuedMarkerBeforeInterrupt(t *testing.T) {
 	}
 	if len(prober.interrupted) != 0 {
 		t.Errorf("interrupted = %v, want no interrupt after the marker executed", prober.interrupted)
+	}
+}
+
+// TestReconcileLeavesUnknownOwnershipPending covers a marker outside the
+// bounded timeline: while the session is busy, recovery must not guess whether
+// this turn or a later one is running.
+func TestReconcileLeavesUnknownOwnershipPending(t *testing.T) {
+	h := newRouterHarness(t, 4)
+	prober := &fakeProber{
+		session:   &opencode.SessionInfo{ID: "ses_busy", Time: opencode.SessionTime{Busy: 2, Idle: 1}},
+		nextFound: false,
+	}
+	h.router.turn = prober
+	env := envelope.New(envelope.DirectionIn, "telegram", envelope.TelegramThread(83),
+		envelope.Party{Kind: envelope.PartyUser, ID: "83"},
+		envelope.Party{Kind: envelope.PartyAgent, ID: "valet"},
+		envelope.Content{Type: envelope.ContentText, Text: "hello"})
+	h.seedStranded(t, env, 417, "ses_busy", "msg_in", 0, time.Now().UTC().Add(-2*resumeGraceWindow))
+
+	outcome, err := h.router.Reconcile(context.Background(), h.agent, env)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if outcome != ReconcileStillPending {
+		t.Fatalf("outcome = %v, want still-pending", outcome)
+	}
+	if len(prober.interrupted) != 0 {
+		t.Errorf("interrupted = %v, want no interrupt on unknown ownership", prober.interrupted)
 	}
 }
 

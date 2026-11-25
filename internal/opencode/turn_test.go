@@ -18,6 +18,31 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestPromptOutcomeUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "definitive bad request", err: &APIError{Status: http.StatusBadRequest}, want: false},
+		{name: "definitive not found", err: &APIError{Status: http.StatusNotFound}, want: false},
+		{name: "server error", err: &APIError{Status: http.StatusServiceUnavailable}, want: true},
+		{name: "rate limited", err: &APIError{Status: http.StatusTooManyRequests}, want: true},
+		{name: "request timeout", err: &APIError{Status: http.StatusRequestTimeout}, want: true},
+		{name: "transport", err: errors.New("connection reset"), want: true},
+		{name: "deadline", err: context.DeadlineExceeded, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := promptOutcomeUnknown(tc.err); got != tc.want {
+				t.Errorf("promptOutcomeUnknown(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunTurnTimeout(t *testing.T) {
 	t.Parallel()
 
