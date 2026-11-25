@@ -1068,19 +1068,25 @@ func cronReplyChat(st *store.Store, sessionID string) (int64, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
-	if ok {
-		if chatID, parsed := envelope.ParseTelegramThread(session.Thread); parsed && chatID != 0 {
-			chat, found, err := st.CommTG().GetChat(chatID)
-			if err != nil {
-				return 0, false, err
-			}
-			if !found || !chat.Allowed || !chat.Private {
-				// The mapped destination exists but is no longer authorized.
-				// Fail closed instead of leaking to another allowed chat.
-				return 0, false, nil
-			}
-			return chatID, true, nil
+	if !ok {
+		// A session-bound inbox response with no mapping must fail closed;
+		// falling back could disclose it to a different user.
+		return 0, false, nil
+	}
+	if chatID, parsed := envelope.ParseTelegramThread(session.Thread); parsed && chatID != 0 {
+		chat, found, err := st.CommTG().GetChat(chatID)
+		if err != nil {
+			return 0, false, err
 		}
+		if !found || !chat.Allowed || !chat.Private {
+			return 0, false, nil
+		}
+		return chatID, true, nil
+	}
+	if !strings.HasPrefix(session.Thread, "cron:") {
+		// An unknown/non-Telegram user mapping must not fall through to
+		// another allowed chat.
+		return 0, false, nil
 	}
 	chat, ok, err := st.CommTG().LatestAllowedChat()
 	if err != nil {

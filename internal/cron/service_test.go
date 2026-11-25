@@ -361,6 +361,9 @@ func TestInboxRouteRecoversAdmittedTurn(t *testing.T) {
 	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_x", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 
 	if err := pair.store.Orch().AddCronRoute(orch.CronRoute{
 		ID:                "route_inbox",
@@ -460,6 +463,9 @@ func TestInboxResponseCapped(t *testing.T) {
 	pair := servicePair(t, svc, "valet")
 	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_x", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
 	}
 	big := strings.Repeat("x", maxOutputBytes+100)
 	if err := svc.queueInboxResponse(pair, orch.CronRoute{ID: "route_big"}, &opencode.TurnResult{SessionID: "ses_x", ResponseText: big}); err != nil {
@@ -722,6 +728,9 @@ func TestLiveCollectionConsumesMarkerBeforeSessionLockRelease(t *testing.T) {
 	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -902,6 +911,9 @@ func TestExecuteRoutesOutputAfterPostCollectionCleanupError(t *testing.T) {
 	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -1073,6 +1085,9 @@ func TestPromptInboxRouteKeepsMarkerUntilRouted(t *testing.T) {
 	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -1136,6 +1151,9 @@ func TestExecuteRoutesCollectedOutputWhenSessionMappingFails(t *testing.T) {
 	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
 	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
 		t.Fatalf("GetCronJobByTitle() error: %v", err)
@@ -1195,6 +1213,9 @@ func TestAdmittedPendingRetriesTransientWrite(t *testing.T) {
 	pair := servicePair(t, svc, "valet")
 	if err := pair.store.CommTG().UpsertChat(10, "alice", true, true, now); err != nil {
 		t.Fatalf("UpsertChat() error: %v", err)
+	}
+	if _, err := pair.store.Orch().UpsertSession("telegram:10", "ses_fake", now); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
 	}
 	job, err := pair.store.Orch().GetCronJobByTitle("report")
 	if err != nil {
