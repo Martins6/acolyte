@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -235,6 +236,68 @@ func TestBoardAutomationRecoversDeletedSession(t *testing.T) {
 	}
 	if automation == nil || automation.SessionID == "ses_gone" || automation.SessionID == "" {
 		t.Errorf("automation = %+v, want a fresh session", automation)
+	}
+}
+
+func TestBoardAutomationAmbiguousAdmissionKeepsClaim(t *testing.T) {
+	setupBoardCLI(t)
+	fake := &fakeCLITurn{
+		admitErrOn: "",
+		admitErr:   errors.New("timeout"),
+	}
+	withFakeTurn(t, fake)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+
+	result, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "ambiguous",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	if err := runBoardAutomate(context.Background(), &bytes.Buffer{}, boardAutomateOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+	}); err != nil {
+		t.Fatalf("runBoardAutomate() error: %v", err)
+	}
+	if err := runBoardMessage(context.Background(), &bytes.Buffer{}, boardMessageOptions{
+		Target: valet,
+		Post:   result.Post.ID,
+		Text:   "ping",
+	}); err != nil {
+		t.Fatalf("runBoardMessage() error: %v", err)
+	}
+	if fake.synthCalls != 1 {
+		t.Fatalf("admissions = %d, want 1", fake.synthCalls)
+	}
+
+	st := openBoardTestStore(t)
+	automation, err := st.Automation(context.Background(), "scribe", result.Post.ID)
+	if err != nil {
+		t.Fatalf("Automation() error: %v", err)
+	}
+	if automation == nil || automation.Turns != 1 {
+		t.Fatalf("automation = %+v, want one reserved turn", automation)
+	}
+	inbox, err := st.Inbox(context.Background(), "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ClaimedAt == nil || inbox[0].ProcessedAt != nil {
+		t.Fatalf("ambiguous ping = %+v, want a preserved claim", inbox)
+	}
+
+	// A quick retry is blocked by the same reservation/cooldown, so the
+	// ambiguous admission is not repeated immediately.
+	if err := runBoardInbox(context.Background(), &bytes.Buffer{}, boardInboxOptions{
+		Target: scribe,
+		Retry:  true,
+	}); err != nil {
+		t.Fatalf("runBoardInbox(retry) error: %v", err)
+	}
+	if fake.synthCalls != 1 {
+		t.Errorf("ambiguous retry admitted again: %d calls", fake.synthCalls)
 	}
 }
 

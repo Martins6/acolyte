@@ -104,6 +104,23 @@ func TestPlanBoardArtifacts(t *testing.T) {
 	}
 }
 
+func TestApplyArtifactChangesRejectsSymlinkParent(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(ws, ".acolyte")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	err := ApplyArtifactChanges(ws, []ArtifactChange{{
+		Path: ".acolyte/CONFIG.md", After: "external", Action: "create",
+	}})
+	if err == nil {
+		t.Fatal("ApplyArtifactChanges() succeeded through a symlinked parent")
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "CONFIG.md")); !os.IsNotExist(statErr) {
+		t.Errorf("external file created: %v", statErr)
+	}
+}
+
 func TestPlanBoardArtifactsRejectsSymlink(t *testing.T) {
 	ws := t.TempDir()
 	target := filepath.Join(t.TempDir(), "outside.md")
@@ -160,8 +177,8 @@ func TestEnsureBoardTools(t *testing.T) {
 	// Existing files are preserved.
 	path := filepath.Join(ws, BoardReadToolPath)
 	writeArtifact(t, path, "user-owned")
-	if err := EnsureBoardTools(ws); err != nil {
-		t.Fatalf("EnsureBoardTools() error: %v", err)
+	if err := EnsureBoardTools(ws); err == nil || !strings.Contains(err.Error(), "not the Acolyte board tool") {
+		t.Fatalf("EnsureBoardTools(user file) error = %v, want conflict", err)
 	}
 	raw, _ := os.ReadFile(path)
 	if string(raw) != "user-owned" {

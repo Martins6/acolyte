@@ -1,10 +1,14 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -167,11 +171,14 @@ func EnsureBoardTools(workspace string) error {
 		BoardReplyToolPath: agentBoardReplyTool,
 	}
 	for path, content := range files {
-		_, exists, err := readArtifact(workspace, path)
+		before, exists, err := readArtifact(workspace, path)
 		if err != nil {
 			return err
 		}
 		if exists {
+			if before != content {
+				return fmt.Errorf("workspace: %s is not the Acolyte board tool; refusing automation", path)
+			}
 			continue
 		}
 		if err := ApplyArtifactChanges(workspace, []ArtifactChange{{
@@ -300,60 +307,110 @@ func checkArtifactParent(workspace, path, relative string) error {
 	return nil
 }
 
-// ApplyArtifactChanges writes or deletes the planned files atomically.
+// ApplyArtifactChanges writes or deletes the planned files atomically. Parent
+// directories are created with openat/mkdirat and O_NOFOLLOW so a symlinked
+// artifact directory cannot redirect writes outside the workspace.
 func ApplyArtifactChanges(workspacePath string, changes []ArtifactChange) error {
 	for _, change := range changes {
-		path, err := artifactPath(workspacePath, change.Path)
-		if err != nil {
-			return err
-		}
 		if change.Delete {
-			if err := checkArtifactParent(workspacePath, path, change.Path); err != nil {
+			if err := deleteArtifactNoFollow(workspacePath, change.Path); err != nil {
 				return err
-			}
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("workspace: delete %s: %w", change.Path, err)
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			return fmt.Errorf("workspace: create directory for %s: %w", change.Path, err)
-		}
-		if err := checkArtifactParent(workspacePath, path, change.Path); err != nil {
+		if err := writeArtifactNoFollow(workspacePath, change.Path, change.After); err != nil {
 			return err
 		}
-		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("workspace: %s is a symlink", change.Path)
+	}
+	return nil
+}
+
+func writeArtifactNoFollow(workspace, relative, content string) error {
+	rel := filepath.Clean(relative)
+	if rel == "." || filepath.IsAbs(rel) || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("workspace: invalid artifact path %q", relative)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	dirfd, err := unix.Open(workspace, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("workspace: open %s: %w", workspace, err)
+	}
+	defer unix.Close(dirfd)
+	for _, part := range parts[:len(parts)-1] {
+		if err := unix.Mkdirat(dirfd, part, 0755); err != nil && !errors.Is(err, unix.EEXIST) {
+			return fmt.Errorf("workspace: create directory %s: %w", part, err)
 		}
-		tmp, err := os.CreateTemp(filepath.Dir(path), ".acolyte-*")
+		next, err := unix.Openat(dirfd, part, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
-			return fmt.Errorf("workspace: create %s: %w", change.Path, err)
+			return fmt.Errorf("workspace: open directory %s: %w", part, err)
 		}
-		tmpName := tmp.Name()
-		cleanup := func() {
-			tmp.Close()
-			os.Remove(tmpName)
+		unix.Close(dirfd)
+		dirfd = next
+	}
+	base := parts[len(parts)-1]
+	tmp := fmt.Sprintf(".acolyte-tmp-%d-%d", os.Getpid(), time.Now().UnixNano())
+	fd, err := unix.Openat(dirfd, tmp,
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+	if err != nil {
+		return fmt.Errorf("workspace: create %s: %w", relative, err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = unix.Unlinkat(dirfd, tmp, 0)
 		}
-		if err := tmp.Chmod(0644); err != nil {
-			cleanup()
-			return fmt.Errorf("workspace: chmod %s: %w", change.Path, err)
+	}()
+
+	data := []byte(content)
+	for len(data) > 0 {
+		written, err := unix.Write(fd, data)
+		if err != nil {
+			unix.Close(fd)
+			return fmt.Errorf("workspace: write %s: %w", relative, err)
 		}
-		if _, err := tmp.WriteString(change.After); err != nil {
-			cleanup()
-			return fmt.Errorf("workspace: write %s: %w", change.Path, err)
+		data = data[written:]
+	}
+	if err := unix.Fsync(fd); err != nil {
+		unix.Close(fd)
+		return fmt.Errorf("workspace: sync %s: %w", relative, err)
+	}
+	if err := unix.Close(fd); err != nil {
+		return fmt.Errorf("workspace: close %s: %w", relative, err)
+	}
+	if err := unix.Renameat(dirfd, tmp, dirfd, base); err != nil {
+		return fmt.Errorf("workspace: replace %s: %w", relative, err)
+	}
+	cleanup = false
+	return nil
+}
+
+func deleteArtifactNoFollow(workspace, relative string) error {
+	rel := filepath.Clean(relative)
+	if rel == "." || filepath.IsAbs(rel) || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("workspace: invalid artifact path %q", relative)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	dirfd, err := unix.Open(workspace, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("workspace: open %s: %w", workspace, err)
+	}
+	defer unix.Close(dirfd)
+	for _, part := range parts[:len(parts)-1] {
+		next, err := unix.Openat(dirfd, part, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if errors.Is(err, unix.ENOENT) {
+			return nil
 		}
-		if err := tmp.Sync(); err != nil {
-			cleanup()
-			return fmt.Errorf("workspace: sync %s: %w", change.Path, err)
+		if err != nil {
+			return fmt.Errorf("workspace: open directory %s: %w", part, err)
 		}
-		if err := tmp.Close(); err != nil {
-			os.Remove(tmpName)
-			return fmt.Errorf("workspace: close %s: %w", change.Path, err)
-		}
-		if err := os.Rename(tmpName, path); err != nil {
-			os.Remove(tmpName)
-			return fmt.Errorf("workspace: replace %s: %w", change.Path, err)
-		}
+		unix.Close(dirfd)
+		dirfd = next
+	}
+	base := parts[len(parts)-1]
+	if err := unix.Unlinkat(dirfd, base, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("workspace: delete %s: %w", relative, err)
 	}
 	return nil
 }

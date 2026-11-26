@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/martins6/acolyte/internal/board"
@@ -31,6 +32,16 @@ type boardAutomationEngine struct {
 	Turn   boardTurnAdmitter
 	Now    func() time.Time
 	Agent  func(name string) (registry.Agent, error)
+
+	mu sync.Map
+}
+
+func (e *boardAutomationEngine) lock(agentID, postID string) func() {
+	key := agentID + "\x00" + postID
+	value, _ := e.mu.LoadOrStore(key, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
 }
 
 func (e *boardAutomationEngine) now() time.Time {
@@ -43,6 +54,9 @@ func (e *boardAutomationEngine) now() time.Time {
 // processPost admits at most one pending automated ping for an agent+post,
 // respecting the cooldown, turn cap, retry budget, and a durable claim.
 func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID string) (bool, error) {
+	unlock := e.lock(agentID, postID)
+	defer unlock()
+
 	automation, err := e.Board.Automation(ctx, agentID, postID)
 	if err != nil {
 		return false, err
@@ -68,19 +82,29 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 	if entryID == "" {
 		return false, nil
 	}
+	reserved, err := e.Board.ReserveAutomationTurn(ctx, agentID, postID, boardAutomationCooldown, boardAutomationMaxTurns)
+	if err != nil {
+		_ = e.Board.ReleaseInboxClaim(ctx, agentID, entryID)
+		return false, err
+	}
+	if !reserved {
+		_ = e.Board.ReleaseInboxClaim(ctx, agentID, entryID)
+		return false, nil
+	}
+
 	entry, err := e.Board.ResolveEntry(ctx, postID, entryID)
 	if err != nil {
-		_ = e.Board.MarkInboxError(ctx, agentID, entryID, err.Error())
+		e.fail(ctx, agentID, postID, entryID, err)
 		return false, err
 	}
 	post, err := e.Board.ResolvePost(ctx, postID)
 	if err != nil {
-		_ = e.Board.MarkInboxError(ctx, agentID, entryID, err.Error())
+		e.fail(ctx, agentID, postID, entryID, err)
 		return false, err
 	}
 	agent, err := e.Agent(agentID)
 	if err != nil {
-		_ = e.Board.MarkInboxError(ctx, agentID, entryID, err.Error())
+		e.fail(ctx, agentID, postID, entryID, err)
 		if pauseErr := e.pause(ctx, agentID, postID, "agent is not registered"); pauseErr != nil {
 			return false, pauseErr
 		}
@@ -99,6 +123,9 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 			}
 		}
 		if admitted {
+			if err := e.Board.RecordAutomationAdmission(ctx, agentID, postID, sessionID); err != nil {
+				return false, err
+			}
 			if err := e.Board.MarkInboxProcessed(ctx, agentID, entry.ID, sessionID, messageID); err != nil {
 				return false, err
 			}
@@ -107,7 +134,7 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 	}
 
 	if err := workspace.EnsureBoardTools(agent.Workspace); err != nil {
-		_ = e.Board.MarkInboxError(ctx, agentID, entryID, err.Error())
+		e.fail(ctx, agentID, postID, entryID, err)
 		return false, err
 	}
 
@@ -118,19 +145,16 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		result, admitErr = e.admit(ctx, "", agent, post.Title, entry)
 	}
 	if admitErr != nil {
-		attempts, _ := e.Board.InboxAttempts(ctx, agentID, entry.ID)
-		if markErr := e.Board.MarkInboxError(ctx, agentID, entry.ID, admitErr.Error()); markErr != nil {
-			return false, markErr
+		if opencode.PromptOutcomeUnknown(admitErr) {
+			// OpenCode may have accepted the event before the error. Keep the
+			// claim and reservation; a stale retry reconciles the marker.
+			return false, admitErr
 		}
-		if attempts >= boardAutomationMaxAttempts {
-			if pauseErr := e.pause(ctx, agentID, postID, "delivery failed"); pauseErr != nil {
-				return false, pauseErr
-			}
-		}
+		e.fail(ctx, agentID, postID, entryID, admitErr)
 		return false, admitErr
 	}
 
-	if err := e.Board.RecordAutomationTurn(ctx, agentID, postID, result.SessionID); err != nil {
+	if err := e.Board.RecordAutomationSession(ctx, agentID, postID, result.SessionID); err != nil {
 		return false, err
 	}
 	if err := e.Board.MarkInboxProcessed(ctx, agentID, entry.ID, result.SessionID, result.InputID); err != nil {
@@ -143,6 +167,16 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		}
 	}
 	return true, nil
+}
+
+func (e *boardAutomationEngine) fail(ctx context.Context, agentID, postID, entryID string, cause error) {
+	attempts, _ := e.Board.InboxAttempts(ctx, agentID, entryID)
+	if err := e.Board.MarkInboxError(ctx, agentID, entryID, cause.Error()); err != nil {
+		return
+	}
+	if attempts+1 >= boardAutomationMaxAttempts {
+		_ = e.pause(ctx, agentID, postID, "delivery failed")
+	}
 }
 
 func (e *boardAutomationEngine) wasAdmitted(ctx context.Context, sessionID, entryID string) (bool, string, error) {

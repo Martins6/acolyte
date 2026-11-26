@@ -925,15 +925,29 @@ func (s *Store) MarkInboxProcessed(ctx context.Context, agentID, entryID, sessio
 	return nil
 }
 
-// MarkInboxError records a failed automated admission attempt and releases
-// the claim so a later retry can pick it up.
+// MarkInboxError records a failed automated admission attempt, increments the
+// attempt counter, and releases the claim so a later retry can pick it up.
 func (s *Store) MarkInboxError(ctx context.Context, agentID, entryID, message string) error {
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE brd_inbox SET error = ?, claimed_at = NULL, claim_token = ''
+		`UPDATE brd_inbox
+		 SET attempts = attempts + 1, error = ?, claimed_at = NULL, claim_token = ''
 		 WHERE agent_id = ? AND entry_id = ?`,
 		message, agentID, entryID,
 	); err != nil {
 		return fmt.Errorf("board: mark inbox error: %w", err)
+	}
+	return nil
+}
+
+// ReleaseInboxClaim releases a claim without recording a failure. It is used
+// when another turn already reserved the per-post budget.
+func (s *Store) ReleaseInboxClaim(ctx context.Context, agentID, entryID string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE brd_inbox SET claimed_at = NULL, claim_token = ''
+		 WHERE agent_id = ? AND entry_id = ? AND processed_at IS NULL`,
+		agentID, entryID,
+	); err != nil {
+		return fmt.Errorf("board: release inbox claim: %w", err)
 	}
 	return nil
 }
@@ -999,7 +1013,7 @@ func (s *Store) ClaimPendingAutomated(ctx context.Context, agentID, postID, clai
 
 	result, err := tx.ExecContext(ctx,
 		`UPDATE brd_inbox
-		 SET claimed_at = ?, claim_token = ?, attempts = attempts + 1
+		 SET claimed_at = ?, claim_token = ?
 		 WHERE agent_id = ? AND entry_id = ? AND processed_at IS NULL
 		   AND (claimed_at IS NULL OR claimed_at < ?)`,
 		now, claimToken, agentID, entryID, cutoff,
@@ -1020,9 +1034,53 @@ func (s *Store) ClaimPendingAutomated(ctx context.Context, agentID, postID, clai
 	return entryID, claimedAt.Valid, nil
 }
 
-// RecordAutomationTurn stores the admitted session, stamps the cooldown, and
-// increments the turn counter.
-func (s *Store) RecordAutomationTurn(ctx context.Context, agentID, postID, sessionID string) error {
+// ReserveAutomationTurn atomically reserves the cooldown and one turn of the
+// per-post budget before an admission. It returns false when the post is
+// paused, cooling down, or at the cap.
+func (s *Store) ReserveAutomationTurn(ctx context.Context, agentID, postID string, cooldown time.Duration, maxTurns int) (bool, error) {
+	if maxTurns <= 0 {
+		return false, fmt.Errorf("%w: max turns must be > 0", ErrInvalid)
+	}
+	if cooldown < 0 {
+		cooldown = 0
+	}
+	now := s.now()
+	cutoff := now.Add(-cooldown)
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE brd_automations
+		 SET last_turn_at = ?, turns = turns + 1, updated_at = ?
+		 WHERE agent_id = ? AND post_id = ? AND paused_at IS NULL
+		   AND turns < ? AND (last_turn_at IS NULL OR last_turn_at <= ?)`,
+		now, now, agentID, postID, maxTurns, cutoff,
+	)
+	if err != nil {
+		return false, fmt.Errorf("board: reserve automation turn: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("board: reserve automation turn: %w", err)
+	}
+	return rows > 0, nil
+}
+
+// RecordAutomationSession stores the dedicated session after an admission
+// that already reserved its turn.
+func (s *Store) RecordAutomationSession(ctx context.Context, agentID, postID, sessionID string) error {
+	now := s.now()
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE brd_automations SET session_id = ?, updated_at = ?
+		 WHERE agent_id = ? AND post_id = ?`,
+		sessionID, now, agentID, postID,
+	); err != nil {
+		return fmt.Errorf("board: record automation session: %w", err)
+	}
+	return nil
+}
+
+// RecordAutomationAdmission reconciles a stale claim that was already
+// admitted. It records the session and stamps the turn budget, since the
+// original reservation may have been lost with a crash.
+func (s *Store) RecordAutomationAdmission(ctx context.Context, agentID, postID, sessionID string) error {
 	now := s.now()
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE brd_automations
@@ -1030,7 +1088,7 @@ func (s *Store) RecordAutomationTurn(ctx context.Context, agentID, postID, sessi
 		 WHERE agent_id = ? AND post_id = ?`,
 		sessionID, now, now, agentID, postID,
 	); err != nil {
-		return fmt.Errorf("board: record automation turn: %w", err)
+		return fmt.Errorf("board: reconcile automation admission: %w", err)
 	}
 	return nil
 }

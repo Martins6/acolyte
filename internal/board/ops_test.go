@@ -766,6 +766,55 @@ func TestEnqueue(t *testing.T) {
 	}
 }
 
+func TestReserveAutomationTurn(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	post, _ := mustCreatePost(t, st, AgentActor("valet"), CreatePostInput{
+		Text: "reserve",
+		With: []string{"scribe"},
+	})
+	if err := st.SetAutomation(ctx, AgentActor("scribe"), post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+
+	ok, err := st.ReserveAutomationTurn(ctx, "scribe", post.ID, 2*time.Minute, 20)
+	if err != nil || !ok {
+		t.Fatalf("first reserve = %v, %v", ok, err)
+	}
+	ok, err = st.ReserveAutomationTurn(ctx, "scribe", post.ID, 2*time.Minute, 20)
+	if err != nil || ok {
+		t.Fatalf("cooldown reserve = %v, %v, want false", ok, err)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE brd_automations SET last_turn_at = ? WHERE agent_id = 'scribe' AND post_id = ?`,
+		st.now().Add(-time.Hour).UTC(), post.ID,
+	); err != nil {
+		t.Fatalf("age reserve: %v", err)
+	}
+	ok, err = st.ReserveAutomationTurn(ctx, "scribe", post.ID, 2*time.Minute, 20)
+	if err != nil || !ok {
+		t.Fatalf("second reserve = %v, %v", ok, err)
+	}
+	automation, err := st.Automation(ctx, "scribe", post.ID)
+	if err != nil {
+		t.Fatalf("Automation() error: %v", err)
+	}
+	if automation.Turns != 2 {
+		t.Errorf("turns = %d, want 2", automation.Turns)
+	}
+
+	if _, err := st.DB().Exec(
+		`UPDATE brd_automations SET turns = 20, last_turn_at = ? WHERE agent_id = 'scribe' AND post_id = ?`,
+		st.now().Add(-time.Hour).UTC(), post.ID,
+	); err != nil {
+		t.Fatalf("seed cap: %v", err)
+	}
+	ok, err = st.ReserveAutomationTurn(ctx, "scribe", post.ID, 30*time.Second, 20)
+	if err != nil || ok {
+		t.Fatalf("cap reserve = %v, %v, want false", ok, err)
+	}
+}
+
 func TestClaimPendingAutomated(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

@@ -43,6 +43,11 @@ func promptOutcomeUnknown(err error) bool {
 	return true
 }
 
+// PromptOutcomeUnknown reports whether an admission error might have
+// delivered the prompt. Callers that must not duplicate an admission keep
+// their claim when this is true and reconcile before retrying.
+func PromptOutcomeUnknown(err error) bool { return promptOutcomeUnknown(err) }
+
 // syntheticRecheckGap is how long to pause before re-waiting when a queued
 // input has not been delivered yet (a var so tests can shorten it).
 var syntheticRecheckGap = 2 * time.Second
