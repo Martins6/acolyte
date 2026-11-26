@@ -220,7 +220,7 @@ func memoryPolicyViolation(path string, file memoryFile) string {
 
 func allowedMemoryPath(path string) bool {
 	parts := strings.Split(path, "/")
-	if len(parts) == 2 && parts[0] == ".acolyte" && parts[1] != "HEARTBEAT.md" {
+	if len(parts) == 2 && parts[0] == ".acolyte" && parts[1] != "HEARTBEAT.md" && parts[1] != "WORKSPACE.md" {
 		return strings.HasSuffix(parts[1], ".md")
 	}
 	if len(parts) == 4 && parts[0] == ".agents" && parts[1] == "skills" && parts[2] != "" {

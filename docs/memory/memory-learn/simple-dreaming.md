@@ -23,8 +23,8 @@ whether anything is worth distilling into the **persona files** or a **skill**. 
    restored afterwards:
    - analysis: every tool is denied except read-only memory access
      (`.acolyte/`, `.agents/skills/`) and path discovery;
-   - writer: the same, plus `edit` only for `.acolyte/*.md` (excluding `HEARTBEAT.md`) and
-     `.agents/skills/<id>/SKILL.md`.
+   - writer: the same, plus `edit` only for `.acolyte/*.md` (excluding `HEARTBEAT.md` and
+     `WORKSPACE.md`) and `.agents/skills/<id>/SKILL.md`.
    `shell`, `edit` outside those paths, `external_directory`, subagents, and network tools are
    denied, so a prompt-injected turn cannot modify source/configuration or replace a memory root with
    a symlink. The post-turn snapshot is a second, policy-level check.

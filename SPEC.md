@@ -43,7 +43,7 @@ serves all registered agents**; per-agent isolation hardening is deferred
   Documented in `docs/`, applied at `acolyte new` as concrete OpenCode + cron artifacts.
 - **Envelope** — the universal message type between Communication and Orchestrator (§7).
 - **Turn** — one inbound envelope in → zero-or-more outbound envelopes out.
-- **Persona** — the `.acolyte/{CONFIG,SOUL,TOOLS,USER,HEARTBEAT}.md` bundle (who the agent is).
+- **Persona** — the `.acolyte/{CONFIG,SOUL,TOOLS,USER,WORKSPACE,HEARTBEAT}.md` bundle (who the agent is).
 - **Skill** — a learned capability under `.agents/skills/` (an OpenCode skill).
 - **Cron service** — an Orchestrator service any module registers jobs with; all visible via
   `acolyte cron list` (§10).
@@ -67,8 +67,10 @@ The folder _is_ the contract. It is an **OpenCode project** (left) + an **Acolyt
 │   ├── SOUL.md                       #   core behaviour / unbreakable traits
 │   ├── TOOLS.md                      #   tool behaviour + workflows (skills add more)
 │   ├── USER.md                       #   user profile memory
+│   ├── WORKSPACE.md                  #   where files go (projects/, temp, root rules)
 │   └── HEARTBEAT.md                  #   "what to look for and do every N minutes"
 │
+├── projects/                         # ACOLYTE work products: one folder per unit of work
 ├── .agents/skills/                   # OPENCODE-native skill source (learned skills)
 │   └── <skill-id>/SKILL.md           #   one dir per skill (+ scripts/references)
 │
@@ -294,7 +296,7 @@ it produces**, documented in `docs/memory/…`.
   session; every run records a `mem_dreams` audit row (sessions scanned, skills created, dry-run,
   changed paths). `acolyte cron --dry-run` makes the same prompt proposal-only. Both model phases run
   under a **session-scoped OpenCode permission ruleset** (`PATCH /api/session/{id}`): the analysis
-  phase is read-only, and the writer phase can edit only `.acolyte/*.md` (never `HEARTBEAT.md`) or
+  phase is read-only, and the writer phase can edit only `.acolyte/*.md` (never `HEARTBEAT.md` or `WORKSPACE.md`) or
   `.agents/skills/<id>/SKILL.md`. Edit and shell are denied everywhere else (including
   `external_directory`), so a prompt-injected phase cannot write outside the memory roots or replace
   a root with a symlink; the post-turn snapshot remains as a second, policy-level check.

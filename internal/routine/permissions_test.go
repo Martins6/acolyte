@@ -88,6 +88,7 @@ func TestDreamWriterPermissionsAllowOnlyMemoryPaths(t *testing.T) {
 		{"read", base + "/.env", opencode.PermissionDeny},
 		{"edit", base + "/.acolyte/USER.md", opencode.PermissionAllow},
 		{"edit", base + "/.acolyte/HEARTBEAT.md", opencode.PermissionDeny},
+		{"edit", base + "/.acolyte/WORKSPACE.md", opencode.PermissionDeny},
 		{"edit", base + "/.acolyte", opencode.PermissionDeny},
 		{"edit", base + "/.agents", opencode.PermissionDeny},
 		{"edit", base + "/.agents/skills", opencode.PermissionDeny},

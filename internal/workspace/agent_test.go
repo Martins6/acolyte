@@ -33,6 +33,7 @@ func TestScaffoldAgent(t *testing.T) {
 		".acolyte/SOUL.md",
 		".acolyte/TOOLS.md",
 		".acolyte/USER.md",
+		".acolyte/WORKSPACE.md",
 		".acolyte/HEARTBEAT.md",
 		".opencode/tools/send_image.ts",
 		".gitignore",
@@ -42,7 +43,7 @@ func TestScaffoldAgent(t *testing.T) {
 		}
 	}
 	for _, dir := range []string{
-		".agents/skills", ".opencode/agents", ".opencode/tools", ".logs",
+		".agents/skills", ".opencode/agents", ".opencode/tools", ".logs", "projects",
 		"media/inbound/images", "media/inbound/audio", "media/inbound/documents", "media/inbound/videos",
 		"media/outbound/images",
 	} {
@@ -84,6 +85,14 @@ func TestScaffoldAgent(t *testing.T) {
 	}
 	if !strings.Contains(string(tool), "notify-user") || !strings.Contains(string(tool), "--media") {
 		t.Errorf("send_image tool does not call notify-user --media")
+	}
+
+	agents, err := os.ReadFile(filepath.Join(ws, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agents), "[WORKSPACE](.acolyte/WORKSPACE.md)") {
+		t.Errorf("AGENTS.md does not index the workspace persona file")
 	}
 }
 

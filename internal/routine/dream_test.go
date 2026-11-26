@@ -166,6 +166,9 @@ func TestDreamRoutineTwoPhaseWritesAndAudit(t *testing.T) {
 	if got := permissionEffect(writerRules, "edit", filepath.Join(ws, ".acolyte", "HEARTBEAT.md")); got != opencode.PermissionDeny {
 		t.Errorf("writer HEARTBEAT.md permission = %s, want deny", got)
 	}
+	if got := permissionEffect(writerRules, "edit", filepath.Join(ws, ".acolyte", "WORKSPACE.md")); got != opencode.PermissionDeny {
+		t.Errorf("writer WORKSPACE.md permission = %s, want deny", got)
+	}
 	if got := permissionEffect(writerRules, "shell", "touch "+filepath.Join(ws, "pwned")); got != opencode.PermissionDeny {
 		t.Errorf("writer shell permission = %s, want deny", got)
 	}
@@ -498,6 +501,7 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 	ws := t.TempDir()
 	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "SOUL.md"), "old soul")
 	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "HEARTBEAT.md"), "original notes")
+	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "WORKSPACE.md"), "original layout")
 	writeRoutineFile(t, filepath.Join(ws, ".acolyte", "USER.md"), "user facts")
 	st, err := store.Open(ws)
 	if err != nil {
@@ -527,6 +531,7 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_validator/synthetic":
 			writeRoutineFile(t, filepath.Join(ws, ".acolyte", "SOUL.md"), "new soul")
 			writeRoutineFile(t, filepath.Join(ws, ".acolyte", "HEARTBEAT.md"), "poisoned")
+			writeRoutineFile(t, filepath.Join(ws, ".acolyte", "WORKSPACE.md"), "poisoned layout")
 			writeRoutineFile(t, filepath.Join(ws, ".agents", "skills", "evil", "run.sh"), "#!/bin/sh\necho pwned")
 			writeRoutineFile(t, filepath.Join(ws, ".agents", "skills", "good", "SKILL.md"), "---\nname: good\n---\n")
 			if err := os.Remove(filepath.Join(ws, ".acolyte", "USER.md")); err != nil {
@@ -559,6 +564,9 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 	if raw, err := os.ReadFile(filepath.Join(ws, ".acolyte", "HEARTBEAT.md")); err != nil || string(raw) != "original notes" {
 		t.Errorf("HEARTBEAT.md = %q, %v; want restored content", raw, err)
 	}
+	if raw, err := os.ReadFile(filepath.Join(ws, ".acolyte", "WORKSPACE.md")); err != nil || string(raw) != "original layout" {
+		t.Errorf("WORKSPACE.md = %q, %v; want restored content", raw, err)
+	}
 	if raw, err := os.ReadFile(filepath.Join(ws, ".acolyte", "USER.md")); err != nil || string(raw) != "user facts" {
 		t.Errorf("USER.md = %q, %v; want deleted file restored", raw, err)
 	}
@@ -577,7 +585,7 @@ func TestDreamRoutineRevertsOutOfPolicyWrites(t *testing.T) {
 	if skills != 1 {
 		t.Errorf("skills_created = %d, want 1", skills)
 	}
-	for _, want := range []string{"reverted out-of-policy writes", ".acolyte/HEARTBEAT.md", ".acolyte/USER.md", ".agents/skills/evil/run.sh"} {
+	for _, want := range []string{"reverted out-of-policy writes", ".acolyte/HEARTBEAT.md", ".acolyte/WORKSPACE.md", ".acolyte/USER.md", ".agents/skills/evil/run.sh"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note missing %q:\n%s", want, note)
 		}
