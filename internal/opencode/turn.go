@@ -248,12 +248,9 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
 	}
-	if cfg.OnCollected != nil {
-		if err := cfg.OnCollected(turn); err != nil {
-			return turn, turnCause(turnCtx, err)
-		}
-	}
-
+	// Stop the poller and verify the final settlement before OnCollected
+	// consumes the recovery marker. Otherwise a failed final sweep could be
+	// reported after the caller has already treated the turn as collected.
 	if stopErr := stopSettler(); stopErr != nil {
 		settlerStopped = true
 		return turn, stopErr
@@ -261,6 +258,12 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 	settlerStopped = true
 	if sweepErr := settler.finalSweep(turnCtx); sweepErr != nil {
 		return turn, fmt.Errorf("%w: final sweep: %v", ErrInteractionUnsettled, sweepErr)
+	}
+
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(turn); err != nil {
+			return turn, turnCause(turnCtx, err)
+		}
 	}
 	return turn, nil
 }
@@ -375,12 +378,9 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
 	}
-	if cfg.OnCollected != nil {
-		if err := cfg.OnCollected(turn); err != nil {
-			return turn, turnCause(turnCtx, err)
-		}
-	}
-
+	// Stop the poller and verify the final settlement before OnCollected
+	// consumes the recovery marker. Otherwise a failed final sweep could be
+	// reported after the caller has already treated the turn as collected.
 	if stopErr := stopSettler(); stopErr != nil {
 		settlerStopped = true
 		return turn, stopErr
@@ -388,6 +388,12 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 	settlerStopped = true
 	if sweepErr := settler.finalSweep(turnCtx); sweepErr != nil {
 		return turn, fmt.Errorf("%w: final sweep: %v", ErrInteractionUnsettled, sweepErr)
+	}
+
+	if cfg.OnCollected != nil {
+		if err := cfg.OnCollected(turn); err != nil {
+			return turn, turnCause(turnCtx, err)
+		}
 	}
 	return turn, nil
 }

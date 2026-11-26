@@ -355,7 +355,14 @@ func TestRunUserTurnFinalSweepSettlesLateForm(t *testing.T) {
 		}
 	})
 
-	result, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{})
+	result, err := client.RunUserTurn(context.Background(), "ses_x", "hello", TurnConfig{
+		OnCollected: func(*TurnResult) error {
+			if atomic.LoadInt32(&cancelled) == 0 {
+				t.Error("OnCollected ran before the final sweep settled the late form")
+			}
+			return nil
+		},
+	})
 	if err != nil {
 		t.Fatalf("RunUserTurn: %v", err)
 	}
