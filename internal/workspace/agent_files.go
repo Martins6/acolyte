@@ -111,6 +111,45 @@ Surface something only when it is genuinely interesting; otherwise stay silent.
 Do not repeat what the user has already seen.
 `
 
+const agentWorkspaceContent = `# Workspace
+
+Every file you create or keep — scripts, notes, reports, generated assets, downloads, build
+output — lives under ` + "`projects/`" + ` in your workspace. Never write loose files at the workspace
+root.
+
+## Project work
+
+` + "`projects/{HH}-{MM}-{DD}-{MM}-{YYYY}-{brief-title}/`" + `
+
+- ` + "`HH` `MM`" + ` = local 24-hour time the project was started, zero-padded; then
+  ` + "`DD` `MM` `YYYY`" + ` = local date. Example:
+  ` + "`projects/14-32-24-11-2026-aws-budget-report/`" + `.
+- ` + "`brief-title`" + ` = lowercase kebab-case, English, 2–5 words.
+- One folder per unit of work: put everything for that work in it (scripts, inputs, outputs,
+  notes) and keep adding as the work continues. Do not create a new folder per file or per turn.
+- Before starting, list ` + "`projects/`" + ` and resume the existing folder when the request continues
+  earlier work; only create a new folder for genuinely new work.
+- Keep the folder self-contained: relative paths inside a script should resolve within the
+  project folder, so it can be moved or archived without breaking.
+
+## Truly temporary work
+
+` + "`projects/temp/`" + ` is for scratch scripts, one-off conversions, throwaway experiments, and
+agent tool dumps — anything you would be happy to delete tomorrow. When unsure, use a project
+folder instead.
+
+## Workspace root
+
+The root stays config-only: ` + "`AGENTS.md`" + `, ` + "`opencode.jsonc`" + `, ` + "`.acolyte/`" + `, ` + "`.opencode/`" + `,
+` + "`.agents/`" + `, ` + "`media/`" + `, ` + "`downloads/`" + `, ` + "`.logs/`" + `, ` + "`projects/`" + `, ` + "`.gitignore`" + `, ` + "`.env`" + `, and
+` + "`.acolyte.sqlite.db*`" + `. Do not create new files at the root or restructure config.
+
+Files the user sends arrive under ` + "`media/inbound/<type>/`" + ` and stay there; copy what a project
+needs into that project's folder.
+
+When you finish a task that wrote files, say which project folder you used.
+`
+
 const agentGitignore = `# Agent-local secrets and state
 .env
 .acolyte.sqlite.db
@@ -141,6 +180,7 @@ This workspace is an **OpenCode project** with an Acolyte overlay.
 - [SOUL](.acolyte/SOUL.md) — core behaviour.
 - [TOOLS](.acolyte/TOOLS.md) — tool behaviour and workflows.
 - [USER](.acolyte/USER.md) — what you know about the user.
+- [WORKSPACE](.acolyte/WORKSPACE.md) — where files go.
 - [HEARTBEAT](.acolyte/HEARTBEAT.md) — what to look for on a heartbeat.
 
 ## Capabilities

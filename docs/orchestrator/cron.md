@@ -33,7 +33,7 @@ the [routines catalog](../README.md#routines) and `acolyte cron routine-list`.
 - **`dream`** — reviews recent sessions and conservatively writes persona/skill memory. Direct write by
   default; `--dry-run` makes the prompt proposal-only and audits any changed paths in `mem_dreams`.
   Both phases run under a session-scoped permission ruleset: analysis is read-only; the writer may
-  edit only `.acolyte/*.md` (not `HEARTBEAT.md`) and `.agents/skills/<id>/SKILL.md`.
+  edit only `.acolyte/*.md` (not `HEARTBEAT.md` or `WORKSPACE.md`) and `.agents/skills/<id>/SKILL.md`.
 - **`heartbeat`** — prompt-guided: reads `HEARTBEAT.md` + the latest non-cron session and instructs the
   agent to reply `NOTIFY: <message>` only when something is genuinely interesting; otherwise
   `NO_ACTION`. Its turn is fully read-only; the routine delivers the notification itself.

@@ -55,6 +55,7 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 		".opencode/agents",
 		".opencode/tools",
 		".logs",
+		"projects",
 	}
 	for _, dir := range dirs {
 		created, err := filesystem.ensureDir(dir)
@@ -76,6 +77,7 @@ func ScaffoldAgent(workspace string, opts AgentOptions) error {
 		".acolyte/SOUL.md":              agentSoulContent,
 		".acolyte/TOOLS.md":             agentToolsContent,
 		".acolyte/USER.md":              agentUserContent,
+		".acolyte/WORKSPACE.md":         agentWorkspaceContent,
 		".acolyte/HEARTBEAT.md":         agentHeartbeatContent,
 		".opencode/tools/send_image.ts": agentSendImageTool,
 		".gitignore":                    agentGitignore,

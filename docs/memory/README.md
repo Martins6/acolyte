@@ -25,7 +25,7 @@ Each sub-component is selected per agent (baked at `acolyte new`) as either:
 
 ## Where memory lives
 
-- **Persona** (who the agent is): `.acolyte/{CONFIG,SOUL,TOOLS,USER,HEARTBEAT}.md`.
+- **Persona** (who the agent is): `.acolyte/{CONFIG,SOUL,TOOLS,USER,WORKSPACE,HEARTBEAT}.md`.
 - **Learned skills** (what it can do): `.agents/skills/<id>/SKILL.md` (OpenCode-native).
 - **Bookkeeping** (optional): `.acolyte.sqlite.db` tables prefixed `mem_` (§ `SPEC.md` §9).
 

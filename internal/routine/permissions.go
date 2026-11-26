@@ -30,19 +30,20 @@ func dreamAnalysisPermissions(workspace string) []opencode.PermissionRule {
 }
 
 // dreamWriterPermissions confines the writer turn to the memory allowlist:
-// `.acolyte/*.md` (except HEARTBEAT.md) and `.agents/skills/<id>/SKILL.md`.
-// Shell stays denied so the model cannot create symlinks, replace memory
-// roots, or write elsewhere through commands. The post-turn snapshot remains
-// as a second, policy-level check.
+// `.acolyte/*.md` (except HEARTBEAT.md and WORKSPACE.md) and
+// `.agents/skills/<id>/SKILL.md`. Shell stays denied so the model cannot create
+// symlinks, replace memory roots, or write elsewhere through commands. The
+// post-turn snapshot remains as a second, policy-level check.
 func dreamWriterPermissions(workspace string) []opencode.PermissionRule {
 	base := filepath.ToSlash(filepath.Clean(workspace))
 	rules := readOnlyPermissions(workspace)
 	rules = append(rules,
 		opencode.PermissionRule{Action: "edit", Resource: base + "/.acolyte/*.md", Effect: opencode.PermissionAllow},
 		opencode.PermissionRule{Action: "edit", Resource: base + "/.agents/skills/*/SKILL.md", Effect: opencode.PermissionAllow},
-		// The allow glob also matches HEARTBEAT.md; deny it after the allow so
-		// the last matching rule wins.
+		// The allow glob also matches the user-authored files below; deny them
+		// after the allow so the last matching rule wins.
 		opencode.PermissionRule{Action: "edit", Resource: base + "/.acolyte/HEARTBEAT.md", Effect: opencode.PermissionDeny},
+		opencode.PermissionRule{Action: "edit", Resource: base + "/.acolyte/WORKSPACE.md", Effect: opencode.PermissionDeny},
 	)
 	return rules
 }

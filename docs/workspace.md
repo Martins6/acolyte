@@ -12,7 +12,9 @@
 │   ├── SOUL.md               #   core behaviour
 │   ├── TOOLS.md              #   tool behaviour + workflows
 │   ├── USER.md               #   user profile memory
+│   ├── WORKSPACE.md          #   where files go
 │   └── HEARTBEAT.md          #   what to look for on a heartbeat
+├── projects/                 # agent-created work (one folder per unit of work)
 ├── .agents/skills/           # learned OpenCode skills
 ├── .opencode/agents/         # optional OpenCode agent overrides
 ├── media/                    # inbound/ and outbound/ media
@@ -22,6 +24,9 @@
 
 ## Notes
 
+- `projects/` is the only home for files the agent creates: one `HH-MM-DD-MM-YYYY-<title>/` folder
+  per unit of work, scratch work in `projects/temp/`. The workspace root stays config-only;
+  `.acolyte/WORKSPACE.md` carries the rules.
 - The registry lives outside the workspace, in `$ACOLYTE_HOME/registry.sqlite.db` (`~/.acolyte` by
   default). `$ACOLYTE_HOME` also holds the global `.env` and, under launchd, `logs/`.
 - `workspace/.env` and `$ACOLYTE_HOME/.env` are optional, gitignored, and never scaffolded by
