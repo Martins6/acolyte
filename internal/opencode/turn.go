@@ -415,6 +415,14 @@ func (c *Client) AdmitSyntheticTurn(ctx context.Context, sessionID string, ev Sy
 	if err != nil {
 		return nil, err
 	}
+	// Admission-only turns own a dedicated session (board automation), so the
+	// ruleset is applied and left in place instead of being restored after a
+	// collected turn.
+	if cfg.Permissions != nil {
+		if err := c.SetSessionPermissions(ctx, info.ID, cfg.Permissions); err != nil {
+			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: apply session permissions: %w", err)
+		}
+	}
 	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err

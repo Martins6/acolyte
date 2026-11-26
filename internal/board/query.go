@@ -450,7 +450,7 @@ func (s *Store) Inbox(ctx context.Context, agentID string, all bool) ([]InboxVie
 		return nil, fmt.Errorf("%w: agent id is required", ErrInvalid)
 	}
 	query := `SELECT i.agent_id, i.entry_id, i.post_id, i.created_at, i.read_at, i.processed_at,
-	                i.mode, i.aware, i.session_id, i.message_id, i.attempts, i.error,
+	                i.mode, i.aware, i.session_id, i.message_id, i.attempts, i.error, i.claimed_at,
 	                p.title, e.seq, e.kind, e.text, e.author_kind, e.author_id
 	         FROM brd_inbox i
 	         JOIN brd_posts p ON p.id = i.post_id
@@ -470,12 +470,12 @@ func (s *Store) Inbox(ctx context.Context, agentID string, all bool) ([]InboxVie
 	var items []InboxView
 	for rows.Next() {
 		var item InboxView
-		var readAt, processedAt sql.NullTime
+		var readAt, processedAt, claimedAt sql.NullTime
 		var aware int
 		var entryKind, authorKind string
 		if err := rows.Scan(
 			&item.AgentID, &item.EntryID, &item.PostID, &item.CreatedAt, &readAt, &processedAt,
-			&item.Mode, &aware, &item.SessionID, &item.MessageID, &item.Attempts, &item.Error,
+			&item.Mode, &aware, &item.SessionID, &item.MessageID, &item.Attempts, &item.Error, &claimedAt,
 			&item.PostTitle, &item.EntrySeq, &entryKind, &item.EntryText, &authorKind, &item.EntryAuthor.ID,
 		); err != nil {
 			return nil, fmt.Errorf("board: list inbox: %w", err)
@@ -488,6 +488,10 @@ func (s *Store) Inbox(ctx context.Context, agentID string, all bool) ([]InboxVie
 		if processedAt.Valid {
 			value := processedAt.Time.UTC()
 			item.ProcessedAt = &value
+		}
+		if claimedAt.Valid {
+			value := claimedAt.Time.UTC()
+			item.ClaimedAt = &value
 		}
 		item.EntryKind = EntryKind(entryKind)
 		item.EntryAuthor.Kind = ActorKind(authorKind)

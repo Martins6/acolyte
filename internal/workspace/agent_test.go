@@ -36,6 +36,8 @@ func TestScaffoldAgent(t *testing.T) {
 		".acolyte/WORKSPACE.md",
 		".acolyte/HEARTBEAT.md",
 		".opencode/tools/send_image.ts",
+		".opencode/tools/board_read.ts",
+		".opencode/tools/board_reply.ts",
 		".gitignore",
 	} {
 		if _, err := os.Stat(filepath.Join(ws, name)); err != nil {

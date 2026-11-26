@@ -11,6 +11,7 @@ import (
 	"github.com/martins6/acolyte/internal/opencode"
 	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/storepool"
+	"github.com/martins6/acolyte/internal/workspace"
 )
 
 const (
@@ -21,6 +22,7 @@ const (
 
 type boardTurnAdmitter interface {
 	AdmitSyntheticTurn(ctx context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error)
+	SessionMessages(ctx context.Context, sessionID string, maxPages int) ([]opencode.Message, bool, error)
 }
 
 type boardAutomationEngine struct {
@@ -39,7 +41,7 @@ func (e *boardAutomationEngine) now() time.Time {
 }
 
 // processPost admits at most one pending automated ping for an agent+post,
-// respecting the cooldown, turn cap, and retry budget.
+// respecting the cooldown, turn cap, retry budget, and a durable claim.
 func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID string) (bool, error) {
 	automation, err := e.Board.Automation(ctx, agentID, postID)
 	if err != nil {
@@ -59,23 +61,26 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		return false, nil
 	}
 
-	pending, err := e.Board.PendingAutomated(ctx, agentID, postID, 1)
+	entryID, stale, err := e.Board.ClaimPendingAutomated(ctx, agentID, postID, board.NewClaimToken(), 10*time.Minute)
 	if err != nil {
 		return false, err
 	}
-	if len(pending) == 0 {
+	if entryID == "" {
 		return false, nil
 	}
-	entry, err := e.Board.ResolveEntry(ctx, postID, pending[0])
+	entry, err := e.Board.ResolveEntry(ctx, postID, entryID)
 	if err != nil {
+		_ = e.Board.MarkInboxError(ctx, agentID, entryID, err.Error())
 		return false, err
 	}
 	post, err := e.Board.ResolvePost(ctx, postID)
 	if err != nil {
+		_ = e.Board.MarkInboxError(ctx, agentID, entryID, err.Error())
 		return false, err
 	}
 	agent, err := e.Agent(agentID)
 	if err != nil {
+		_ = e.Board.MarkInboxError(ctx, agentID, entryID, err.Error())
 		if pauseErr := e.pause(ctx, agentID, postID, "agent is not registered"); pauseErr != nil {
 			return false, pauseErr
 		}
@@ -83,6 +88,29 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 	}
 
 	sessionID := automation.SessionID
+	if stale && sessionID != "" {
+		admitted, messageID, scanErr := e.wasAdmitted(ctx, sessionID, entry.ID)
+		if scanErr != nil {
+			if isBoardSessionNotFound(scanErr) {
+				sessionID = ""
+			} else {
+				// Leave the claim in place; a later stale retry can reconcile.
+				return false, scanErr
+			}
+		}
+		if admitted {
+			if err := e.Board.MarkInboxProcessed(ctx, agentID, entry.ID, sessionID, messageID); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
+
+	if err := workspace.EnsureBoardTools(agent.Workspace); err != nil {
+		_ = e.Board.MarkInboxError(ctx, agentID, entryID, err.Error())
+		return false, err
+	}
+
 	result, admitErr := e.admit(ctx, sessionID, agent, post.Title, entry)
 	if admitErr != nil && sessionID != "" && isBoardSessionNotFound(admitErr) {
 		// The dedicated session was deleted; start a fresh one.
@@ -94,7 +122,7 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		if markErr := e.Board.MarkInboxError(ctx, agentID, entry.ID, admitErr.Error()); markErr != nil {
 			return false, markErr
 		}
-		if attempts+1 >= boardAutomationMaxAttempts {
+		if attempts >= boardAutomationMaxAttempts {
 			if pauseErr := e.pause(ctx, agentID, postID, "delivery failed"); pauseErr != nil {
 				return false, pauseErr
 			}
@@ -117,6 +145,20 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 	return true, nil
 }
 
+func (e *boardAutomationEngine) wasAdmitted(ctx context.Context, sessionID, entryID string) (bool, string, error) {
+	messages, _, err := e.Turn.SessionMessages(ctx, sessionID, 5)
+	if err != nil {
+		return false, "", err
+	}
+	marker := boardEntryMarker(entryID)
+	for _, message := range messages {
+		if strings.Contains(message.Text, marker) {
+			return true, message.ID, nil
+		}
+	}
+	return false, "", nil
+}
+
 func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, agent registry.Agent, title string, entry board.Entry) (*opencode.TurnResult, error) {
 	return e.Turn.AdmitSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        boardAutomationPrompt(title, entry),
@@ -130,7 +172,24 @@ func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, age
 			"automation": true,
 		},
 		Delivery: "queue",
-	}, opencode.TurnConfig{Workspace: agent.Workspace})
+	}, opencode.TurnConfig{
+		Workspace:   agent.Workspace,
+		Permissions: boardAutomationPermissions(),
+	})
+}
+
+// boardAutomationPermissions keeps the dedicated automation session
+// deny-by-default. Only the board read/reply tools are allowed, so untrusted
+// board text cannot reach shell, edit, network, or the wider tool surface.
+func boardAutomationPermissions() []opencode.PermissionRule {
+	return []opencode.PermissionRule{
+		{Action: "*", Resource: "*", Effect: opencode.PermissionDeny},
+		{Action: "board_read", Resource: "*", Effect: opencode.PermissionAllow},
+		{Action: "board_reply", Resource: "*", Effect: opencode.PermissionAllow},
+		// Some OpenCode builds namespace custom tools under "tool".
+		{Action: "tool", Resource: "board_read", Effect: opencode.PermissionAllow},
+		{Action: "tool", Resource: "board_reply", Effect: opencode.PermissionAllow},
+	}
 }
 
 func (e *boardAutomationEngine) pause(ctx context.Context, agentID, postID, reason string) error {
@@ -261,11 +320,17 @@ func boardAutomationPrompt(title string, entry board.Entry) string {
 	if len(entry.Files) > 0 {
 		fmt.Fprintf(&b, "Files: %d (use `acolyte board show %s` to see paths)\n", len(entry.Files), entry.PostID)
 	}
-	fmt.Fprintf(&b, "Read: acolyte board show %s\n", entry.PostID)
-	fmt.Fprintf(&b, "If you can contribute, reply: acolyte board message %s \"...\"\n", entry.PostID)
+	fmt.Fprintf(&b, "Read: use the board_read tool with post %s\n", entry.PostID)
+	fmt.Fprintf(&b, "If you can contribute, use the board_reply tool with post %s and your message.\n", entry.PostID)
 	b.WriteString("Be succinct. If you cannot add value, do nothing (NO_REPLY).\n")
+	b.WriteString("Do not use shell or any other tool.\n")
+	fmt.Fprintf(&b, "Entry marker: %s\n", boardEntryMarker(entry.ID))
 	b.WriteString("Your final turn text is not delivered to the user.\n")
 	return b.String()
+}
+
+func boardEntryMarker(entryID string) string {
+	return "[[acolyte-board-entry:" + entryID + "]]"
 }
 
 func boardAutomationSessionKey(agentID, postID string) string {

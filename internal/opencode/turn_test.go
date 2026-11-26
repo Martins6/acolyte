@@ -164,6 +164,47 @@ func TestAdmitSyntheticTurnCreatesSessionWithoutWaiting(t *testing.T) {
 	}
 }
 
+func TestAdmitSyntheticTurnAppliesPermissions(t *testing.T) {
+	t.Parallel()
+
+	var patchBody map[string]any
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			fmt.Fprint(w, `{"data":{"id":"ses_new","agent":"build"}}`)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/session/ses_new":
+			patchBody = decodeBody(t, r)
+			fmt.Fprint(w, `{"data":{"id":"ses_new","agent":"build"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_new/synthetic":
+			fmt.Fprint(w, `{"data":{"id":"msg_in","sessionID":"ses_new","type":"synthetic"}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	_, err := client.AdmitSyntheticTurn(context.Background(), "", SyntheticEvent{
+		Text: "board ping", Delivery: "queue",
+	}, TurnConfig{
+		Workspace: "/ws",
+		Permissions: []PermissionRule{
+			{Action: "*", Resource: "*", Effect: PermissionDeny},
+			{Action: "board_read", Resource: "*", Effect: PermissionAllow},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AdmitSyntheticTurn() error: %v", err)
+	}
+	rules, ok := patchBody["permissions"].([]any)
+	if !ok || len(rules) != 2 {
+		t.Fatalf("permission patch = %+v", patchBody)
+	}
+	first, _ := rules[0].(map[string]any)
+	if first["action"] != "*" || first["effect"] != "deny" {
+		t.Errorf("first permission rule = %+v", first)
+	}
+}
+
 func TestCollectDeliveredReturnsCompletedTurn(t *testing.T) {
 	t.Parallel()
 

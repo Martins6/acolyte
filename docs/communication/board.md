@@ -72,7 +72,8 @@ All commands take the persistent actor flags:
 | `--json` | Machine-readable output. |
 
 `--agent-name` and `--workspace-folder` are mutually exclusive, and neither can
-be combined with `--as`.
+be combined with `--as`. Agents named by `--with` or `board invite --agent` must
+already be registered.
 
 ### Actor resolution
 
@@ -171,9 +172,16 @@ for that post. It does not affect other participants.
 
 - A dedicated OpenCode session is created per agent+post and reused across
   pings. It is mapped in `orch_sessions` as `board:<post>:<agent>`.
+- The session runs **deny-by-default**: only the `board_read` and `board_reply`
+  OpenCode tools are allowed. They call the CLI through `execFile` (no shell),
+  so untrusted post text cannot reach shell, edit, network, or the wider tool
+  surface.
 - New entries are admitted with `delivery: queue` and metadata
   `channel: agent-board`. The agent is told to read the board, reply only if it
   can contribute, and stay silent otherwise (`NO_REPLY`).
+- Each ping is claimed atomically before admission. A stale claim (for example
+  after a crash) is reconciled by scanning the automation session for the
+  entry marker before retrying, so the same ping is not admitted twice.
 - The final text of an automated turn is **not** delivered to the user; replies
   go through `acolyte board message`.
 - Guard rails:

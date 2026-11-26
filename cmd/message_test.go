@@ -34,6 +34,7 @@ type fakeCLITurn struct {
 
 	admitSessions []string
 	admitEvents   []opencode.SyntheticEvent
+	admitConfigs  []opencode.TurnConfig
 	admitErr      error
 	admitErrOn    string
 }
@@ -55,10 +56,11 @@ func (f *fakeCLITurn) RunSyntheticTurn(context.Context, string, opencode.Synthet
 	return f.turnResult(), nil
 }
 
-func (f *fakeCLITurn) AdmitSyntheticTurn(_ context.Context, sessionID string, ev opencode.SyntheticEvent, _ opencode.TurnConfig) (*opencode.TurnResult, error) {
+func (f *fakeCLITurn) AdmitSyntheticTurn(_ context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.synthCalls++
 	f.admitSessions = append(f.admitSessions, sessionID)
 	f.admitEvents = append(f.admitEvents, ev)
+	f.admitConfigs = append(f.admitConfigs, cfg)
 	if f.admitErr != nil && sessionID == f.admitErrOn {
 		return nil, f.admitErr
 	}

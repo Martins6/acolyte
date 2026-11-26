@@ -123,3 +123,48 @@ func TestPlanBoardArtifactsRejectsMalformedMarkers(t *testing.T) {
 		t.Fatalf("PlanBoardArtifacts() error = %v, want malformed marker error", err)
 	}
 }
+
+func TestPlanBoardArtifactsRefusesUserSkill(t *testing.T) {
+	ws := t.TempDir()
+	skillPath := filepath.Join(ws, BoardSkillPath)
+	writeArtifact(t, skillPath, "# my own board skill\n")
+	if _, err := PlanBoardArtifacts(ws, true, false); err == nil || !strings.Contains(err.Error(), "not Acolyte-managed") {
+		t.Fatalf("PlanBoardArtifacts(enable) error = %v, want managed-file error", err)
+	}
+	if _, err := PlanBoardArtifacts(ws, false, false); err == nil || !strings.Contains(err.Error(), "not Acolyte-managed") {
+		t.Fatalf("PlanBoardArtifacts(disable) error = %v, want managed-file error", err)
+	}
+	raw, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read user skill: %v", err)
+	}
+	if string(raw) != "# my own board skill\n" {
+		t.Errorf("user skill changed: %q", raw)
+	}
+}
+
+func TestEnsureBoardTools(t *testing.T) {
+	ws := t.TempDir()
+	if err := EnsureBoardTools(ws); err != nil {
+		t.Fatalf("EnsureBoardTools() error: %v", err)
+	}
+	for _, relative := range []string{BoardReadToolPath, BoardReplyToolPath} {
+		raw, err := os.ReadFile(filepath.Join(ws, relative))
+		if err != nil {
+			t.Fatalf("read %s: %v", relative, err)
+		}
+		if !strings.Contains(string(raw), "acolyte") {
+			t.Errorf("%s = %q", relative, raw)
+		}
+	}
+	// Existing files are preserved.
+	path := filepath.Join(ws, BoardReadToolPath)
+	writeArtifact(t, path, "user-owned")
+	if err := EnsureBoardTools(ws); err != nil {
+		t.Fatalf("EnsureBoardTools() error: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if string(raw) != "user-owned" {
+		t.Errorf("EnsureBoardTools overwrote user file: %q", raw)
+	}
+}

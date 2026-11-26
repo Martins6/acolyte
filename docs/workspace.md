@@ -36,6 +36,9 @@
   `.agents/skills/board/SKILL.md` and marker blocks in `AGENTS.md` and
   `.acolyte/CONFIG.md`. `args.heartbeat: true` adds the block in
   `.acolyte/HEARTBEAT.md`.
+- Every workspace also gets `.opencode/tools/board_read.ts` and
+  `.opencode/tools/board_reply.ts` (the safe automation tools). They call
+  `acolyte board` through `execFile`, never a shell.
 - `workspace/.env` and `$ACOLYTE_HOME/.env` are optional, gitignored, and never scaffolded by
   `acolyte new`; see [Secrets](README.md#secrets).
 - Inbound Telegram media is written under `media/inbound/<type>/`, outbound images under

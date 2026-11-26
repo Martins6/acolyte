@@ -175,6 +175,7 @@ type InboxItem struct {
 	MessageID   string     `json:"message_id,omitempty"`
 	Attempts    int        `json:"attempts"`
 	Error       string     `json:"error,omitempty"`
+	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
 }
 
 // InboxView adds display fields from the post and entry.
@@ -256,6 +257,9 @@ func newID(prefix string) string {
 	}
 	return prefix + hex.EncodeToString(raw[:])
 }
+
+// NewClaimToken returns a fresh token for an automation inbox claim.
+func NewClaimToken() string { return newID("clm_") }
 
 func deriveTitle(text string) string {
 	line := strings.TrimSpace(strings.SplitN(text, "\n", 2)[0])

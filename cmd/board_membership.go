@@ -106,14 +106,8 @@ func runBoardInvite(ctx context.Context, w io.Writer, opts boardInviteOptions) e
 		return err
 	}
 	defer reg.Close()
-	for _, raw := range opts.Agents {
-		name := strings.TrimSpace(raw)
-		if name == "" || name == board.UserActorID {
-			continue
-		}
-		if _, err := reg.GetByName(name); err != nil {
-			return fmt.Errorf("agent %q is not registered", name)
-		}
+	if err := validateBoardAgents(reg, opts.Agents); err != nil {
+		return err
 	}
 
 	st, err := openBoardStore()
@@ -220,4 +214,26 @@ func enqueueBoardPost(ctx context.Context, st *board.Store, actor board.Actor, p
 		}
 	}
 	return board.Entry{}, nil, fmt.Errorf("board: post %q has no opening entry", postRef)
+}
+
+func validateBoardAgents(reg *registry.Registry, names []string) error {
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" || name == board.UserActorID {
+			continue
+		}
+		if _, err := reg.GetByName(name); err != nil {
+			return fmt.Errorf("agent %q is not registered", name)
+		}
+	}
+	return nil
+}
+
+func validateBoardAgentNames(names []string) error {
+	reg, err := registry.OpenDefault()
+	if err != nil {
+		return err
+	}
+	defer reg.Close()
+	return validateBoardAgents(reg, names)
 }

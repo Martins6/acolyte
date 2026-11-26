@@ -86,6 +86,9 @@ func runBoardPost(ctx context.Context, w io.Writer, opts boardPostOptions) error
 	if err != nil {
 		return err
 	}
+	if err := validateBoardAgentNames(opts.With); err != nil {
+		return err
+	}
 	post, entry, err := st.CreatePost(ctx, actor, board.CreatePostInput{
 		Title:   opts.Title,
 		Text:    opts.Text,

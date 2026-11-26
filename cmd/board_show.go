@@ -70,9 +70,16 @@ func printBoardView(w io.Writer, view board.PostView, limit int) {
 
 	entries := view.Entries
 	omitted := 0
-	if limit > 0 && len(entries) > limit+1 {
-		omitted = len(entries) - limit - 1
-		entries = append([]board.Entry{entries[0]}, entries[len(entries)-limit:]...)
+	if limit > 0 && len(entries) > 1 {
+		keep := limit
+		if keep > len(entries)-1 {
+			keep = len(entries) - 1
+		}
+		if keep < len(entries)-1 {
+			omitted = len(entries) - 1 - keep
+			tail := entries[len(entries)-keep:]
+			entries = append([]board.Entry{entries[0]}, tail...)
+		}
 	}
 	seqByID := make(map[string]int, len(view.Entries))
 	for _, entry := range view.Entries {

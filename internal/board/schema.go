@@ -166,6 +166,8 @@ CREATE TABLE IF NOT EXISTS brd_inbox (
   message_id   TEXT NOT NULL DEFAULT '',
   attempts     INTEGER NOT NULL DEFAULT 0,
   error        TEXT NOT NULL DEFAULT '',
+  claimed_at   DATETIME,
+  claim_token  TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (agent_id, entry_id)
 );
 CREATE INDEX IF NOT EXISTS brd_inbox_agent ON brd_inbox(agent_id, read_at);

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,25 @@ func TestBoardAutomationAdmissionAndCooldown(t *testing.T) {
 	}
 	if !strings.Contains(fake.admitEvents[0].Text, "ACOLYTE BOARD AUTOMATION") {
 		t.Errorf("prompt = %q", fake.admitEvents[0].Text)
+	}
+	if !strings.Contains(fake.admitEvents[0].Text, boardEntryMarker(fake.admitEvents[0].Metadata["entry_id"].(string))) {
+		t.Errorf("prompt missing entry marker: %q", fake.admitEvents[0].Text)
+	}
+	if len(fake.admitConfigs) != 1 {
+		t.Fatalf("admit configs = %+v", fake.admitConfigs)
+	}
+	rules := fake.admitConfigs[0].Permissions
+	if len(rules) < 3 || rules[0].Action != "*" || rules[0].Effect != opencode.PermissionDeny {
+		t.Fatalf("automation permissions = %+v", rules)
+	}
+	allowed := map[string]bool{}
+	for _, rule := range rules {
+		if rule.Effect == opencode.PermissionAllow {
+			allowed[rule.Action] = true
+		}
+	}
+	if !allowed["board_read"] || !allowed["board_reply"] {
+		t.Errorf("automation permissions missing board tools: %+v", rules)
 	}
 
 	st := openBoardTestStore(t)
@@ -215,6 +235,129 @@ func TestBoardAutomationRecoversDeletedSession(t *testing.T) {
 	}
 	if automation == nil || automation.SessionID == "ses_gone" || automation.SessionID == "" {
 		t.Errorf("automation = %+v, want a fresh session", automation)
+	}
+}
+
+func TestBoardAutomationReconcilesStaleClaim(t *testing.T) {
+	setupBoardCLI(t)
+	fake := &fakeCLITurn{}
+	withFakeTurn(t, fake)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+	ctx := context.Background()
+
+	result, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "stale claim",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	if err := runBoardAutomate(ctx, &bytes.Buffer{}, boardAutomateOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+	}); err != nil {
+		t.Fatalf("runBoardAutomate() error: %v", err)
+	}
+
+	st := openBoardTestStore(t)
+	entry, err := st.AppendMessage(ctx, board.AgentActor("valet"), result.Post.ID, board.AppendMessageInput{
+		Text: "pending automation",
+	})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if _, err := st.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("Enqueue() error: %v", err)
+	}
+	claimed, stale, err := st.ClaimPendingAutomated(ctx, "scribe", result.Post.ID, "claim-1", time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimPendingAutomated() error: %v", err)
+	}
+	if claimed != entry.ID || stale {
+		t.Fatalf("claim = %q stale=%v, want %q", claimed, stale, entry.ID)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE brd_automations SET session_id = 'ses_cli' WHERE agent_id = 'scribe' AND post_id = ?`,
+		result.Post.ID,
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE brd_inbox SET claimed_at = ? WHERE agent_id = 'scribe' AND entry_id = ?`,
+		time.Now().Add(-time.Hour).UTC(), entry.ID,
+	); err != nil {
+		t.Fatalf("age claim: %v", err)
+	}
+	fake.bySession = map[string][]opencode.Message{
+		"ses_cli": {{ID: "msg_admitted", Type: "synthetic", Text: "admitted " + boardEntryMarker(entry.ID)}},
+	}
+
+	if err := runBoardInbox(ctx, &bytes.Buffer{}, boardInboxOptions{
+		Target: scribe,
+		Retry:  true,
+	}); err != nil {
+		t.Fatalf("runBoardInbox(retry) error: %v", err)
+	}
+	if fake.synthCalls != 0 {
+		t.Errorf("stale claim admitted again: %d calls", fake.synthCalls)
+	}
+	inbox, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	found := false
+	for _, item := range inbox {
+		if item.EntryID == entry.ID {
+			found = true
+			if item.ProcessedAt == nil {
+				t.Errorf("reconciled ping not processed: %+v", item)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("reconciled ping missing from inbox: %+v", inbox)
+	}
+}
+
+func TestBoardPostRejectsUnregisteredWith(t *testing.T) {
+	setupBoardCLI(t)
+	err := runBoardPost(context.Background(), &bytes.Buffer{}, boardPostOptions{
+		Target: boardTarget{AgentName: "valet"},
+		Text:   "invalid invite",
+		With:   []string{"ghost"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("runBoardPost(unknown with) error = %v", err)
+	}
+}
+
+func TestBoardShowLimitOverflow(t *testing.T) {
+	setupBoardCLI(t)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+	result, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "limit",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	if err := runBoardMessage(context.Background(), &bytes.Buffer{}, boardMessageOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+		Text:   "reply",
+	}); err != nil {
+		t.Fatalf("runBoardMessage() error: %v", err)
+	}
+	var out bytes.Buffer
+	if err := runBoardShow(context.Background(), &out, boardShowOptions{
+		Target: valet,
+		Post:   result.Post.ID,
+		Limit:  math.MaxInt,
+	}); err != nil {
+		t.Fatalf("runBoardShow(max limit) error: %v", err)
+	}
+	if !strings.Contains(out.String(), "reply") {
+		t.Errorf("show output = %q", out.String())
 	}
 }
 

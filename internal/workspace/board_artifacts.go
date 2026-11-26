@@ -10,8 +10,13 @@ import (
 const (
 	BoardSkillPath = ".agents/skills/board/SKILL.md"
 
+	BoardReadToolPath  = ".opencode/tools/board_read.ts"
+	BoardReplyToolPath = ".opencode/tools/board_reply.ts"
+
 	boardMarkerStart = "<!-- acolyte:board -->"
 	boardMarkerEnd   = "<!-- /acolyte:board -->"
+
+	boardSkillMarker = "<!-- acolyte:managed:board-skill -->"
 )
 
 var boardAgentsBlock = strings.Join([]string{
@@ -45,6 +50,8 @@ var BoardSkillContent = strings.Join([]string{
 	"metadata:",
 	"  opencode/autoinvoke: true",
 	"---",
+	"",
+	boardSkillMarker,
 	"",
 	"# Internal board",
 	"",
@@ -97,7 +104,7 @@ type ArtifactChange struct {
 func PlanBoardArtifacts(workspace string, enabled, heartbeat bool) ([]ArtifactChange, error) {
 	var changes []ArtifactChange
 
-	skill, err := planFile(workspace, BoardSkillPath, enabled, BoardSkillContent)
+	skill, err := planSkill(workspace, enabled)
 	if err != nil {
 		return nil, err
 	}
@@ -125,25 +132,55 @@ func PlanBoardArtifacts(workspace string, enabled, heartbeat bool) ([]ArtifactCh
 	return changes, nil
 }
 
-func planFile(workspace, relative string, enabled bool, content string) (ArtifactChange, error) {
-	before, exists, err := readArtifact(workspace, relative)
+func planSkill(workspace string, enabled bool) (ArtifactChange, error) {
+	before, exists, err := readArtifact(workspace, BoardSkillPath)
 	if err != nil {
 		return ArtifactChange{}, err
 	}
 	if enabled {
-		if exists && before == content {
+		if exists && !strings.Contains(before, boardSkillMarker) {
+			return ArtifactChange{}, fmt.Errorf("workspace: %s exists and is not Acolyte-managed; refusing to overwrite", BoardSkillPath)
+		}
+		if exists && before == BoardSkillContent {
 			return ArtifactChange{}, nil
 		}
 		action := "create"
 		if exists {
 			action = "update"
 		}
-		return ArtifactChange{Path: relative, Before: before, After: content, Action: action}, nil
+		return ArtifactChange{Path: BoardSkillPath, Before: before, After: BoardSkillContent, Action: action}, nil
 	}
 	if !exists {
 		return ArtifactChange{}, nil
 	}
-	return ArtifactChange{Path: relative, Before: before, Delete: true, Action: "delete"}, nil
+	if !strings.Contains(before, boardSkillMarker) {
+		return ArtifactChange{}, fmt.Errorf("workspace: %s is not Acolyte-managed; refusing to delete", BoardSkillPath)
+	}
+	return ArtifactChange{Path: BoardSkillPath, Before: before, Delete: true, Action: "delete"}, nil
+}
+
+// EnsureBoardTools creates the board tool files when they are missing. It
+// never overwrites an existing file.
+func EnsureBoardTools(workspace string) error {
+	files := map[string]string{
+		BoardReadToolPath:  agentBoardReadTool,
+		BoardReplyToolPath: agentBoardReplyTool,
+	}
+	for path, content := range files {
+		_, exists, err := readArtifact(workspace, path)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if err := ApplyArtifactChanges(workspace, []ArtifactChange{{
+			Path: path, After: content, Action: "create",
+		}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func planMarker(workspace, relative, block string, enabled bool) (ArtifactChange, error) {

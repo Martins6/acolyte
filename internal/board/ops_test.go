@@ -766,6 +766,80 @@ func TestEnqueue(t *testing.T) {
 	}
 }
 
+func TestClaimPendingAutomated(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "claim",
+		With: []string{"scribe"},
+	})
+	if err := st.SetAutomation(ctx, scribe, post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	entry, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "ping"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if _, err := st.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("Enqueue() error: %v", err)
+	}
+
+	claimed, stale, err := st.ClaimPendingAutomated(ctx, "scribe", post.ID, "claim-1", time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPendingAutomated() error: %v", err)
+	}
+	if claimed != entry.ID || stale {
+		t.Fatalf("first claim = %q stale=%v", claimed, stale)
+	}
+	claimed, stale, err = st.ClaimPendingAutomated(ctx, "scribe", post.ID, "claim-2", time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPendingAutomated() error: %v", err)
+	}
+	if claimed != "" || stale {
+		t.Fatalf("second claim = %q stale=%v, want none", claimed, stale)
+	}
+
+	if _, err := st.DB().Exec(
+		`UPDATE brd_inbox SET claimed_at = ? WHERE agent_id = 'scribe' AND entry_id = ?`,
+		st.now().Add(-2*time.Hour).UTC(), entry.ID,
+	); err != nil {
+		t.Fatalf("age claim: %v", err)
+	}
+	claimed, stale, err = st.ClaimPendingAutomated(ctx, "scribe", post.ID, "claim-3", time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPendingAutomated() error: %v", err)
+	}
+	if claimed != entry.ID || !stale {
+		t.Fatalf("stale claim = %q stale=%v", claimed, stale)
+	}
+	if err := st.MarkInboxProcessed(ctx, "scribe", entry.ID, "ses_x", "msg_x"); err != nil {
+		t.Fatalf("MarkInboxProcessed() error: %v", err)
+	}
+	claimed, stale, err = st.ClaimPendingAutomated(ctx, "scribe", post.ID, "claim-4", time.Hour)
+	if err != nil {
+		t.Fatalf("ClaimPendingAutomated() error: %v", err)
+	}
+	if claimed != "" || stale {
+		t.Fatalf("post-process claim = %q stale=%v, want none", claimed, stale)
+	}
+}
+
+func TestReplyToStrict(t *testing.T) {
+	st := openTestStore(t)
+	post, _ := mustCreatePost(t, st, AgentActor("valet"), CreatePostInput{
+		Text: "strict",
+		With: []string{"scribe"},
+	})
+	if _, err := st.AppendMessage(context.Background(), AgentActor("scribe"), post.ID, AppendMessageInput{
+		Text:      "bad reference",
+		ReplyToID: "#1junk",
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("AppendMessage() error = %v, want ErrInvalid", err)
+	}
+}
+
 func TestResolvePrefixes(t *testing.T) {
 	st := openTestStore(t)
 	now := st.now()

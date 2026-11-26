@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -227,8 +228,8 @@ func resolveEntryTx(ctx context.Context, q queryer, postID, ref string) (Entry, 
 		return Entry{}, fmt.Errorf("%w: empty entry reference", ErrInvalid)
 	}
 	if strings.HasPrefix(ref, "#") {
-		var seq int
-		if _, err := fmt.Sscanf(strings.TrimPrefix(ref, "#"), "%d", &seq); err != nil || seq < 0 {
+		seq, err := strconv.Atoi(strings.TrimPrefix(ref, "#"))
+		if err != nil || seq < 0 {
 			return Entry{}, fmt.Errorf("%w: invalid entry reference %q", ErrInvalid, ref)
 		}
 		return getEntryBySeqTx(ctx, q, postID, seq)
@@ -914,7 +915,8 @@ func (s *Store) MarkInboxProcessed(ctx context.Context, agentID, entryID, sessio
 	now := s.now()
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE brd_inbox
-		 SET processed_at = ?, read_at = COALESCE(read_at, ?), session_id = ?, message_id = ?, error = ''
+		 SET processed_at = ?, read_at = COALESCE(read_at, ?), session_id = ?, message_id = ?,
+		     claimed_at = NULL, claim_token = '', error = ''
 		 WHERE agent_id = ? AND entry_id = ?`,
 		now, now, sessionID, messageID, agentID, entryID,
 	); err != nil {
@@ -923,10 +925,11 @@ func (s *Store) MarkInboxProcessed(ctx context.Context, agentID, entryID, sessio
 	return nil
 }
 
-// MarkInboxError records a failed automated admission attempt.
+// MarkInboxError records a failed automated admission attempt and releases
+// the claim so a later retry can pick it up.
 func (s *Store) MarkInboxError(ctx context.Context, agentID, entryID, message string) error {
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE brd_inbox SET attempts = attempts + 1, error = ?
+		`UPDATE brd_inbox SET error = ?, claimed_at = NULL, claim_token = ''
 		 WHERE agent_id = ? AND entry_id = ?`,
 		message, agentID, entryID,
 	); err != nil {
@@ -957,6 +960,64 @@ func (s *Store) PendingAutomated(ctx context.Context, agentID, postID string, li
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ClaimPendingAutomated atomically claims one pending automated ping. It
+// returns stale=true when a previous claim expired, so the caller can reconcile
+// the admission before retrying.
+func (s *Store) ClaimPendingAutomated(ctx context.Context, agentID, postID, claimToken string, staleAfter time.Duration) (entryID string, stale bool, err error) {
+	claimToken = strings.TrimSpace(claimToken)
+	if claimToken == "" {
+		return "", false, fmt.Errorf("%w: claim token is required", ErrInvalid)
+	}
+	if staleAfter <= 0 {
+		staleAfter = 10 * time.Minute
+	}
+	now := s.now()
+	cutoff := now.Add(-staleAfter)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, fmt.Errorf("board: begin claim: %w", err)
+	}
+	defer tx.Rollback()
+
+	var claimedAt sql.NullTime
+	err = tx.QueryRowContext(ctx,
+		`SELECT entry_id, claimed_at FROM brd_inbox
+		 WHERE agent_id = ? AND post_id = ? AND mode = 'automated' AND processed_at IS NULL
+		   AND (claimed_at IS NULL OR claimed_at < ?)
+		 ORDER BY created_at, entry_id LIMIT 1`,
+		agentID, postID, cutoff,
+	).Scan(&entryID, &claimedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("board: select claim: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE brd_inbox
+		 SET claimed_at = ?, claim_token = ?, attempts = attempts + 1
+		 WHERE agent_id = ? AND entry_id = ? AND processed_at IS NULL
+		   AND (claimed_at IS NULL OR claimed_at < ?)`,
+		now, claimToken, agentID, entryID, cutoff,
+	)
+	if err != nil {
+		return "", false, fmt.Errorf("board: claim inbox: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return "", false, fmt.Errorf("board: claim inbox: %w", err)
+	}
+	if rows == 0 {
+		return "", false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, fmt.Errorf("board: commit claim: %w", err)
+	}
+	return entryID, claimedAt.Valid, nil
 }
 
 // RecordAutomationTurn stores the admitted session, stamps the cooldown, and
