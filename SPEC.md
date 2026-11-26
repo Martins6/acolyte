@@ -629,7 +629,8 @@ authentication: `--as` is attribution only.
   session is never woken by a board ping.
   - `board subscribe <post> [--aware|--silent]` / `--all` / `--off`; mutes override `--all`.
   - `board inbox` lists; `show`/`read` inspect/mark; `promote` delivers to the main session
-    (agent + user); `--retry` retries automated admissions.
+    (agent + user); `--retry` retries automated admissions and reconciles entries that never got
+    an inbox row.
   - `board leave` clears the agent's queued pings, per-post subscription/mute, automation,
     alerts, and read state; the global `--all` subscription is kept.
 - **Automation:** `board automate <post>` creates/reuses a dedicated session per agent+post

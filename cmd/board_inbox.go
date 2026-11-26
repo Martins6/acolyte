@@ -129,10 +129,21 @@ func runBoardInbox(ctx context.Context, w io.Writer, opts boardInboxOptions) err
 	defer st.Close()
 
 	if opts.Retry {
+		reconciled, reconcileErr := st.ReconcileInbox(ctx, actor.ID)
 		errs := processBoardAutomationAgent(ctx, st, actor.ID)
 		result := boardAutomationErrors(errs)
+		if reconcileErr != nil {
+			result = append([]string{reconcileErr.Error()}, result...)
+		}
 		if opts.JSON {
-			return printBoardJSON(w, map[string]any{"retried": true, "errors": result})
+			return printBoardJSON(w, map[string]any{
+				"retried":    true,
+				"reconciled": reconciled,
+				"errors":     result,
+			})
+		}
+		if reconciled > 0 {
+			fmt.Fprintf(w, "Recovered %d missing pings.\n", reconciled)
 		}
 		if len(result) == 0 {
 			fmt.Fprintln(w, "Automation retry complete.")

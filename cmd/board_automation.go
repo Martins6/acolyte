@@ -82,33 +82,10 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 	if entryID == "" {
 		return false, nil
 	}
-	reserved, err := e.Board.ReserveAutomationTurn(ctx, agentID, postID, boardAutomationCooldown, boardAutomationMaxTurns)
-	if err != nil {
-		_ = e.Board.ReleaseInboxClaim(ctx, agentID, entryID)
-		return false, err
-	}
-	if !reserved {
-		_ = e.Board.ReleaseInboxClaim(ctx, agentID, entryID)
-		return false, nil
-	}
-
 	entry, err := e.Board.ResolveEntry(ctx, postID, entryID)
 	if err != nil {
 		e.fail(ctx, agentID, postID, entryID, err)
 		return false, err
-	}
-	post, err := e.Board.ResolvePost(ctx, postID)
-	if err != nil {
-		e.fail(ctx, agentID, postID, entryID, err)
-		return false, err
-	}
-	agent, err := e.Agent(agentID)
-	if err != nil {
-		e.fail(ctx, agentID, postID, entryID, err)
-		if pauseErr := e.pause(ctx, agentID, postID, "agent is not registered"); pauseErr != nil {
-			return false, pauseErr
-		}
-		return false, fmt.Errorf("board: automation agent %q: %w", agentID, err)
 	}
 
 	sessionID := automation.SessionID
@@ -123,6 +100,8 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 			}
 		}
 		if admitted {
+			// The original reservation already counted this turn; record the
+			// session/cooldown without incrementing the counter again.
 			if err := e.Board.RecordAutomationAdmission(ctx, agentID, postID, sessionID); err != nil {
 				return false, err
 			}
@@ -136,6 +115,30 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 			// without proof; retain the claim for a later reconciliation.
 			return false, fmt.Errorf("board: automation session %s history is truncated; cannot reconcile entry %s", sessionID, entry.ID)
 		}
+	}
+
+	reserved, err := e.Board.ReserveAutomationTurn(ctx, agentID, postID, boardAutomationCooldown, boardAutomationMaxTurns)
+	if err != nil {
+		_ = e.Board.ReleaseInboxClaim(ctx, agentID, entryID)
+		return false, err
+	}
+	if !reserved {
+		_ = e.Board.ReleaseInboxClaim(ctx, agentID, entryID)
+		return false, nil
+	}
+
+	post, err := e.Board.ResolvePost(ctx, postID)
+	if err != nil {
+		e.fail(ctx, agentID, postID, entryID, err)
+		return false, err
+	}
+	agent, err := e.Agent(agentID)
+	if err != nil {
+		e.fail(ctx, agentID, postID, entryID, err)
+		if pauseErr := e.pause(ctx, agentID, postID, "agent is not registered"); pauseErr != nil {
+			return false, pauseErr
+		}
+		return false, fmt.Errorf("board: automation agent %q: %w", agentID, err)
 	}
 
 	if err := workspace.EnsureBoardTools(agent.Workspace); err != nil {
@@ -324,6 +327,20 @@ func processBoardAutomation(ctx context.Context, st *board.Store, entry board.En
 }
 
 func processBoardAutomationAgent(ctx context.Context, st *board.Store, agentID string) []error {
+	automations, err := st.Automations(ctx, agentID)
+	if err != nil {
+		return []error{err}
+	}
+	active := false
+	for _, automation := range automations {
+		if !automation.Paused() {
+			active = true
+			break
+		}
+	}
+	if !active {
+		return nil
+	}
 	engine, cleanup, err := newBoardAutomationEngine(ctx, st)
 	if err != nil {
 		return []error{err}

@@ -443,6 +443,93 @@ func (s *Store) getAutomation(ctx context.Context, q queryer, agentID, postID st
 	return &automation, nil
 }
 
+// ReconcileInbox finds subscribed entries that have no inbox row for an agent
+// and enqueues them. It is the durable recovery path for a post/message whose
+// Enqueue call never completed.
+func (s *Store) ReconcileInbox(ctx context.Context, agentID string) (int, error) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return 0, fmt.Errorf("%w: agent id is required", ErrInvalid)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.id, e.post_id, COALESCE(ps.aware, gs.aware),
+		        EXISTS (SELECT 1 FROM brd_automations a
+		                WHERE a.agent_id = ? AND a.post_id = e.post_id AND a.paused_at IS NULL)
+		 FROM brd_entries e
+		 LEFT JOIN brd_subscriptions ps ON ps.agent_id = ? AND ps.post_id = e.post_id
+		 LEFT JOIN brd_subscriptions gs ON gs.agent_id = ? AND gs.post_id = ''
+		 WHERE (ps.agent_id IS NOT NULL OR gs.agent_id IS NOT NULL)
+		   AND e.created_at >= COALESCE(ps.created_at, gs.created_at)
+		   AND EXISTS (SELECT 1 FROM brd_participants p
+		               WHERE p.post_id = e.post_id AND p.kind = 'agent' AND p.id = ?)
+		   AND NOT (e.author_kind = 'agent' AND e.author_id = ?)
+		   AND NOT EXISTS (SELECT 1 FROM brd_mutes m
+		                   WHERE m.agent_id = ? AND m.post_id = e.post_id)
+		   AND NOT EXISTS (SELECT 1 FROM brd_inbox i
+		                   WHERE i.agent_id = ? AND i.entry_id = e.id)
+		 ORDER BY e.created_at, e.id
+		 LIMIT 1000`,
+		agentID, agentID, agentID, agentID, agentID, agentID, agentID)
+	if err != nil {
+		return 0, fmt.Errorf("board: reconcile inbox: %w", err)
+	}
+	defer rows.Close()
+
+	type missing struct {
+		entryID string
+		postID  string
+		aware   bool
+		mode    string
+	}
+	var pending []missing
+	for rows.Next() {
+		var item missing
+		var aware, automated int
+		if err := rows.Scan(&item.entryID, &item.postID, &aware, &automated); err != nil {
+			return 0, fmt.Errorf("board: reconcile inbox: %w", err)
+		}
+		item.aware = aware != 0
+		item.mode = "manual"
+		if automated != 0 {
+			item.mode = "automated"
+			item.aware = false
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(pending) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("board: begin inbox reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+	now := s.now()
+	count := 0
+	for _, item := range pending {
+		result, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO brd_inbox
+			 (agent_id, entry_id, post_id, created_at, mode, aware)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			agentID, item.entryID, item.postID, now, item.mode, boolInt(item.aware),
+		)
+		if err != nil {
+			return 0, fmt.Errorf("board: reconcile inbox: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err == nil && rows > 0 {
+			count++
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("board: commit inbox reconciliation: %w", err)
+	}
+	return count, nil
+}
+
 // Inbox returns an agent's queued board pings.
 func (s *Store) Inbox(ctx context.Context, agentID string, all bool) ([]InboxView, error) {
 	agentID = strings.TrimSpace(agentID)

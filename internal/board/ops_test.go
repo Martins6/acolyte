@@ -901,6 +901,120 @@ func TestRecordAutomationAdmissionDoesNotDoubleCount(t *testing.T) {
 	}
 }
 
+func TestReconcileInbox(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "reconcile",
+		With: []string{"scribe"},
+	})
+	if err := st.Subscribe(ctx, scribe, post.ID, true); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+	entry, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "lost enqueue"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+
+	count, err := st.ReconcileInbox(ctx, "scribe")
+	if err != nil {
+		t.Fatalf("ReconcileInbox() error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("reconciled = %d, want 1", count)
+	}
+	inbox, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].EntryID != entry.ID || inbox[0].Mode != "manual" || !inbox[0].Aware {
+		t.Fatalf("inbox = %+v", inbox)
+	}
+	count, err = st.ReconcileInbox(ctx, "scribe")
+	if err != nil || count != 0 {
+		t.Fatalf("second reconcile = %d, %v, want 0", count, err)
+	}
+}
+
+func TestReconcileInboxRespectsSubscriptionTimeAndMute(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "cutoff",
+		With: []string{"scribe"},
+	})
+	if _, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "before subscribe"}); err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if err := st.Subscribe(ctx, scribe, post.ID, true); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+	if count, err := st.ReconcileInbox(ctx, "scribe"); err != nil || count != 0 {
+		t.Fatalf("pre-subscription reconcile = %d, %v, want 0", count, err)
+	}
+	if _, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "after subscribe"}); err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if err := st.Mute(ctx, scribe, post.ID); err != nil {
+		t.Fatalf("Mute() error: %v", err)
+	}
+	if _, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "while muted"}); err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if count, err := st.ReconcileInbox(ctx, "scribe"); err != nil || count != 0 {
+		t.Fatalf("muted reconcile = %d, %v, want 0", count, err)
+	}
+	if err := st.Subscribe(ctx, scribe, post.ID, true); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+	afterUnmute, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "after unmute"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if count, err := st.ReconcileInbox(ctx, "scribe"); err != nil || count != 1 {
+		t.Fatalf("unmuted reconcile = %d, %v, want 1", count, err)
+	}
+	inbox, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].EntryID != afterUnmute.ID {
+		t.Errorf("inbox = %+v, want the after-unmute entry", inbox)
+	}
+}
+
+func TestReconcileInboxAutomated(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "automated reconcile",
+		With: []string{"scribe"},
+	})
+	if err := st.SetAutomation(ctx, scribe, post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	if _, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "lost automated"}); err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	count, err := st.ReconcileInbox(ctx, "scribe")
+	if err != nil || count != 1 {
+		t.Fatalf("reconcile = %d, %v, want 1", count, err)
+	}
+	inbox, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].Mode != "automated" || inbox[0].Aware {
+		t.Fatalf("inbox = %+v", inbox)
+	}
+}
+
 func TestReserveAutomationTurn(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

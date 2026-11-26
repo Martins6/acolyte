@@ -407,9 +407,14 @@ func TestBoardAutomationReconcilesStaleClaim(t *testing.T) {
 	if claimed != entry.ID || stale {
 		t.Fatalf("claim = %q stale=%v, want %q", claimed, stale, entry.ID)
 	}
+	ok, err := st.ReserveAutomationTurn(ctx, "scribe", result.Post.ID, 2*time.Minute, 20)
+	if err != nil || !ok {
+		t.Fatalf("ReserveAutomationTurn() = %v, %v", ok, err)
+	}
 	if _, err := st.DB().Exec(
-		`UPDATE brd_automations SET session_id = 'ses_cli' WHERE agent_id = 'scribe' AND post_id = ?`,
-		result.Post.ID,
+		`UPDATE brd_automations SET session_id = 'ses_cli', last_turn_at = ?
+		 WHERE agent_id = 'scribe' AND post_id = ?`,
+		time.Now().Add(-time.Hour).UTC(), result.Post.ID,
 	); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
@@ -496,6 +501,58 @@ func TestBoardShowLimitOverflow(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "reply") {
 		t.Errorf("show output = %q", out.String())
+	}
+}
+
+func TestBoardInboxRetryReconcilesMissing(t *testing.T) {
+	setupBoardCLI(t)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+	ctx := context.Background()
+
+	result, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "lost enqueue",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	if err := runBoardSubscribe(ctx, &bytes.Buffer{}, boardSubscribeOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+		Aware:  true,
+	}); err != nil {
+		t.Fatalf("runBoardSubscribe() error: %v", err)
+	}
+	st := openBoardTestStore(t)
+	entry, err := st.AppendMessage(ctx, board.AgentActor("valet"), result.Post.ID, board.AppendMessageInput{
+		Text: "missing ping",
+	})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runBoardInbox(ctx, &out, boardInboxOptions{
+		Target: scribe,
+		Retry:  true,
+	}); err != nil {
+		t.Fatalf("runBoardInbox(retry) error: %v", err)
+	}
+	if !strings.Contains(out.String(), "Recovered 1 missing pings") {
+		t.Errorf("output = %q", out.String())
+	}
+	inbox, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	found := false
+	for _, item := range inbox {
+		if item.EntryID == entry.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("reconciled entry missing from inbox: %+v", inbox)
 	}
 }
 
