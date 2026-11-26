@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
@@ -491,6 +492,13 @@ func TestBoardShowLimitOverflow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("runBoardMessage() error: %v", err)
 	}
+	if err := runBoardMessage(context.Background(), &bytes.Buffer{}, boardMessageOptions{
+		Target: valet,
+		Post:   result.Post.ID,
+		Text:   "second reply",
+	}); err != nil {
+		t.Fatalf("runBoardMessage() error: %v", err)
+	}
 	var out bytes.Buffer
 	if err := runBoardShow(context.Background(), &out, boardShowOptions{
 		Target: valet,
@@ -501,6 +509,23 @@ func TestBoardShowLimitOverflow(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "reply") {
 		t.Errorf("show output = %q", out.String())
+	}
+
+	var jsonOut bytes.Buffer
+	if err := runBoardShow(context.Background(), &jsonOut, boardShowOptions{
+		Target: valet,
+		Post:   result.Post.ID,
+		Limit:  1,
+		JSON:   true,
+	}); err != nil {
+		t.Fatalf("runBoardShow(json limit) error: %v", err)
+	}
+	var view board.PostView
+	if err := json.Unmarshal(jsonOut.Bytes(), &view); err != nil {
+		t.Fatalf("decode limited view: %v\n%s", err, jsonOut.String())
+	}
+	if len(view.Entries) != 2 || view.Entries[0].Kind != board.EntryPost || view.Entries[1].Text != "second reply" {
+		t.Errorf("limited JSON entries = %+v, want post + second reply", view.Entries)
 	}
 }
 

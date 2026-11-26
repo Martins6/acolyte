@@ -118,7 +118,8 @@ acolyte board status [--json]
 - `--since`/`--until` accept RFC3339 or `YYYY-MM-DD` (UTC); `--until` is
   exclusive.
 - `--reply-to` accepts a full entry id, a unique prefix, or `#seq`.
-- `--limit 0` (the default on `show`) prints the whole conversation.
+- `--limit 0` (the default on `show`) prints the whole conversation; a positive
+  limit keeps the opening post and the last N messages in both text and JSON.
 
 ### Examples
 

@@ -55,10 +55,29 @@ func runBoardShow(ctx context.Context, w io.Writer, opts boardShowOptions) error
 		return err
 	}
 	if opts.JSON {
+		view.Entries, _ = limitBoardEntries(view.Entries, opts.Limit)
 		return printBoardJSON(w, view)
 	}
 	printBoardView(w, view, opts.Limit)
 	return nil
+}
+
+// limitBoardEntries keeps the opening post and the last N messages. It returns
+// the limited entries and how many earlier messages were omitted.
+func limitBoardEntries(entries []board.Entry, limit int) ([]board.Entry, int) {
+	if limit <= 0 || len(entries) <= 1 {
+		return entries, 0
+	}
+	keep := limit
+	if keep > len(entries)-1 {
+		keep = len(entries) - 1
+	}
+	if keep >= len(entries)-1 {
+		return entries, 0
+	}
+	omitted := len(entries) - 1 - keep
+	tail := entries[len(entries)-keep:]
+	return append([]board.Entry{entries[0]}, tail...), omitted
 }
 
 func printBoardView(w io.Writer, view board.PostView, limit int) {
@@ -69,18 +88,7 @@ func printBoardView(w io.Writer, view board.PostView, limit int) {
 	fmt.Fprintf(w, " · %s · updated %s\n\n", boardParticipants(view.Participants), boardTime(view.UpdatedAt))
 
 	entries := view.Entries
-	omitted := 0
-	if limit > 0 && len(entries) > 1 {
-		keep := limit
-		if keep > len(entries)-1 {
-			keep = len(entries) - 1
-		}
-		if keep < len(entries)-1 {
-			omitted = len(entries) - 1 - keep
-			tail := entries[len(entries)-keep:]
-			entries = append([]board.Entry{entries[0]}, tail...)
-		}
-	}
+	entries, omitted := limitBoardEntries(entries, limit)
 	seqByID := make(map[string]int, len(view.Entries))
 	for _, entry := range view.Entries {
 		seqByID[entry.ID] = entry.Seq

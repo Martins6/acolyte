@@ -565,6 +565,15 @@ func TestAutomation(t *testing.T) {
 	if err := st.SetAutomation(context.Background(), scribe, post.ID); err != nil {
 		t.Fatalf("SetAutomation() error: %v", err)
 	}
+	if err := st.SetAutomation(context.Background(), AgentActor("ghost"), post.ID); !errors.Is(err, ErrForbidden) {
+		t.Errorf("SetAutomation(non participant) error = %v, want ErrForbidden", err)
+	}
+	if err := st.ClearAutomation(context.Background(), AgentActor("ghost"), post.ID); !errors.Is(err, ErrForbidden) {
+		t.Errorf("ClearAutomation(non participant) error = %v, want ErrForbidden", err)
+	}
+	if err := st.ResetAutomation(context.Background(), AgentActor("ghost"), post.ID); !errors.Is(err, ErrForbidden) {
+		t.Errorf("ResetAutomation(non participant) error = %v, want ErrForbidden", err)
+	}
 	automation, err := st.Automation(context.Background(), "scribe", post.ID)
 	if err != nil {
 		t.Fatalf("Automation() error: %v", err)

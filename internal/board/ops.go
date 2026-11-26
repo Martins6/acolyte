@@ -694,6 +694,9 @@ func (s *Store) SetAutomation(ctx context.Context, actor Actor, postRef string) 
 		return fmt.Errorf("board: begin automation: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.requireParticipant(ctx, tx, post.ID, actor); err != nil {
+		return err
+	}
 
 	var existing SessionState
 	var paused sql.NullTime
@@ -757,10 +760,21 @@ func (s *Store) ClearAutomation(ctx context.Context, actor Actor, postRef string
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("board: begin clear automation: %w", err)
+	}
+	defer tx.Rollback()
+	if err := s.requireParticipant(ctx, tx, post.ID, actor); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM brd_automations WHERE agent_id = ? AND post_id = ?`, actor.ID, post.ID,
 	); err != nil {
 		return fmt.Errorf("board: clear automation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("board: commit clear automation: %w", err)
 	}
 	return nil
 }
@@ -774,7 +788,15 @@ func (s *Store) ResetAutomation(ctx context.Context, actor Actor, postRef string
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("board: begin reset automation: %w", err)
+	}
+	defer tx.Rollback()
+	if err := s.requireParticipant(ctx, tx, post.ID, actor); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx,
 		`UPDATE brd_automations
 		 SET session_id = '', turns = 0, paused_at = NULL, pause_reason = '', updated_at = ?
 		 WHERE agent_id = ? AND post_id = ?`,
@@ -785,6 +807,9 @@ func (s *Store) ResetAutomation(ctx context.Context, actor Actor, postRef string
 	}
 	if count, err := result.RowsAffected(); err == nil && count == 0 {
 		return fmt.Errorf("%w: automation for post %q", ErrNotFound, post.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("board: commit reset automation: %w", err)
 	}
 	return nil
 }
