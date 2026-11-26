@@ -101,6 +101,16 @@ func Create(ctx context.Context, opts CreateOptions) (*CreateResult, error) {
 		return nil, err
 	}
 
+	if opts.Config.Communication.Board.Mode == "skill" {
+		changes, err := workspace.PlanBoardArtifacts(ws, true, opts.Config.Communication.Board.Heartbeat())
+		if err != nil {
+			return nil, err
+		}
+		if err := workspace.ApplyArtifactChanges(ws, changes); err != nil {
+			return nil, err
+		}
+	}
+
 	st, err := store.Open(ws)
 	if err != nil {
 		return nil, err
@@ -309,6 +319,12 @@ func applyCapabilities(st *store.Store, cfg Config, name string) ([]JobResult, e
 			); err != nil {
 				return nil, err
 			}
+		}
+	}
+
+	if cfg.Communication.Board.Mode == "skill" {
+		if err := setSettingIfMissing(st.Orch(), "communication.board", mustJSON(cfg.Communication.Board)); err != nil {
+			return nil, err
 		}
 	}
 

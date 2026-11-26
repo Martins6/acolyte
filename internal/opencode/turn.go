@@ -405,6 +405,23 @@ func inboxID(item *InboxItem) string {
 	return item.ID
 }
 
+// AdmitSyntheticTurn ensures the session and admits one synthetic event
+// without waiting for the agent loop to finish. Callers use it for
+// fire-and-forget background work, such as board automation. Delivery should
+// be "queue" so an in-flight turn is not interrupted.
+func (c *Client) AdmitSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (*TurnResult, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	info, err := c.ensureSession(ctx, sessionID, cfg)
+	if err != nil {
+		return nil, err
+	}
+	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
+	if err != nil {
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, nil
+}
+
 // admitInput hands the newly admitted marker to the caller's persistence hook.
 func admitInput(cfg TurnConfig, sessionID string, item *InboxItem) error {
 	if cfg.OnAdmitted == nil {

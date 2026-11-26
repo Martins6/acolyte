@@ -827,3 +827,57 @@ func TestCreateRejectsLegacyWorkspace(t *testing.T) {
 		t.Fatalf("Create(legacy) error = %v", err)
 	}
 }
+
+func TestCreateBoardSkill(t *testing.T) {
+	_, ws := setup(t)
+	cfg := createTestConfig(t, `{"communication":{"board":{"mode":"skill","args":{"heartbeat":true}}}}`)
+	if _, err := Create(context.Background(), CreateOptions{
+		Name:      "valet",
+		Workspace: ws,
+		Config:    cfg,
+	}); err != nil {
+		t.Fatalf("Create() error: %v", err)
+	}
+
+	skill, err := os.ReadFile(filepath.Join(ws, workspace.BoardSkillPath))
+	if err != nil {
+		t.Fatalf("read board skill: %v", err)
+	}
+	if !strings.Contains(string(skill), "name: board") {
+		t.Errorf("skill = %q", skill)
+	}
+	agents, err := os.ReadFile(filepath.Join(ws, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agents), "acolyte:board") {
+		t.Errorf("AGENTS.md = %q", agents)
+	}
+	config, err := os.ReadFile(filepath.Join(ws, ".acolyte", "CONFIG.md"))
+	if err != nil {
+		t.Fatalf("read CONFIG.md: %v", err)
+	}
+	if !strings.Contains(string(config), "acolyte:board") {
+		t.Errorf("CONFIG.md = %q", config)
+	}
+	heartbeat, err := os.ReadFile(filepath.Join(ws, ".acolyte", "HEARTBEAT.md"))
+	if err != nil {
+		t.Fatalf("read HEARTBEAT.md: %v", err)
+	}
+	if !strings.Contains(string(heartbeat), "acolyte:board") || !strings.Contains(string(heartbeat), "notify-user") {
+		t.Errorf("HEARTBEAT.md = %q", heartbeat)
+	}
+
+	st, err := store.Open(ws)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	loaded, err := LoadConfig(st, runtimeAgent(t, "valet"))
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if loaded.Communication.Board.Mode != "skill" {
+		t.Errorf("board mode = %q, want skill", loaded.Communication.Board.Mode)
+	}
+}

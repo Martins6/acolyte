@@ -46,6 +46,23 @@ type MemoryConfig struct {
 type CommunicationConfig struct {
 	Channels []string       `json:"channels"`
 	Telegram TelegramConfig `json:"telegram"`
+	Board    BoardConfig    `json:"board"`
+}
+
+// BoardConfig selects the internal board awareness mode.
+type BoardConfig struct {
+	Mode string     `json:"mode"`
+	Args *BoardArgs `json:"args,omitempty"`
+}
+
+// BoardArgs configures optional board artifacts.
+type BoardArgs struct {
+	Heartbeat bool `json:"heartbeat,omitempty"`
+}
+
+// Heartbeat reports whether the opt-in HEARTBEAT.md block is requested.
+func (b BoardConfig) Heartbeat() bool {
+	return b.Args != nil && b.Args.Heartbeat
 }
 
 // TelegramConfig holds non-secret Telegram settings.
@@ -149,6 +166,13 @@ func (c *Config) Validate() error {
 		}
 	}
 	c.Communication.Telegram.AllowedUsers = normalizeUsers(c.Communication.Telegram.AllowedUsers)
+	switch c.Communication.Board.Mode {
+	case "":
+		c.Communication.Board.Mode = "disable"
+	case "disable", "skill":
+	default:
+		return fmt.Errorf("config: communication.board.mode %q is not available (supported: skill, disable)", c.Communication.Board.Mode)
+	}
 
 	if c.Schedule.HeartbeatMinutes < 0 {
 		return fmt.Errorf("config: schedule.heartbeat_minutes must be >= 0")

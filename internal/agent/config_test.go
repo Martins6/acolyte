@@ -242,3 +242,28 @@ func TestParseConfigNegativeHeartbeat(t *testing.T) {
 		t.Fatal("ParseConfig(negative heartbeat) error = nil, want error")
 	}
 }
+
+func TestParseConfigBoard(t *testing.T) {
+	cfg, err := ParseConfig(`{"communication":{"board":{"mode":"skill","args":{"heartbeat":true}}}}`)
+	if err != nil {
+		t.Fatalf("ParseConfig() error: %v", err)
+	}
+	if cfg.Communication.Board.Mode != "skill" || !cfg.Communication.Board.Heartbeat() {
+		t.Errorf("board = %+v", cfg.Communication.Board)
+	}
+
+	cfg, err = ParseConfig(`{}`)
+	if err != nil {
+		t.Fatalf("ParseConfig() error: %v", err)
+	}
+	if cfg.Communication.Board.Mode != "disable" {
+		t.Errorf("default board = %+v, want disable", cfg.Communication.Board)
+	}
+
+	if _, err := ParseConfig(`{"communication":{"board":{"mode":"nope"}}}`); err == nil {
+		t.Fatal("ParseConfig(invalid board mode) error = nil, want error")
+	}
+	if _, err := ParseConfig(`{"communication":{"board":{"mode":"skill","args":{"bogus":true}}}}`); err == nil {
+		t.Fatal("ParseConfig(unknown board arg) error = nil, want error")
+	}
+}

@@ -31,6 +31,11 @@ type fakeCLITurn struct {
 	userText      string
 	userConfig    opencode.TurnConfig
 	userErr       error
+
+	admitSessions []string
+	admitEvents   []opencode.SyntheticEvent
+	admitErr      error
+	admitErrOn    string
 }
 
 func (f *fakeCLITurn) RunUserTurn(_ context.Context, sessionID, text string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
@@ -48,6 +53,20 @@ func (f *fakeCLITurn) RunUserTurn(_ context.Context, sessionID, text string, cfg
 func (f *fakeCLITurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.synthCalls++
 	return f.turnResult(), nil
+}
+
+func (f *fakeCLITurn) AdmitSyntheticTurn(_ context.Context, sessionID string, ev opencode.SyntheticEvent, _ opencode.TurnConfig) (*opencode.TurnResult, error) {
+	f.synthCalls++
+	f.admitSessions = append(f.admitSessions, sessionID)
+	f.admitEvents = append(f.admitEvents, ev)
+	if f.admitErr != nil && sessionID == f.admitErrOn {
+		return nil, f.admitErr
+	}
+	result := f.turnResult()
+	if sessionID != "" {
+		result.SessionID = sessionID
+	}
+	return result, nil
 }
 
 func (f *fakeCLITurn) SessionMessages(_ context.Context, sessionID string, _ int) ([]opencode.Message, bool, error) {

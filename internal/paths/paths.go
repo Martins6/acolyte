@@ -47,6 +47,33 @@ func GlobalEnv() (string, error) {
 	return filepath.Join(home, ".env"), nil
 }
 
+// BoardDB returns the global board database path.
+func BoardDB() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "board.sqlite.db"), nil
+}
+
+// BoardDir returns the global board assets directory.
+func BoardDir() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "board"), nil
+}
+
+// BoardFilesDir returns the global board attachment directory.
+func BoardFilesDir() (string, error) {
+	dir, err := BoardDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "files"), nil
+}
+
 // WorkspaceDB returns the per-agent database path.
 func WorkspaceDB(workspace string) string {
 	return filepath.Join(workspace, ".acolyte.sqlite.db")

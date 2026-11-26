@@ -29,6 +29,13 @@
   `.acolyte/WORKSPACE.md` carries the rules.
 - The registry lives outside the workspace, in `$ACOLYTE_HOME/registry.sqlite.db` (`~/.acolyte` by
   default). `$ACOLYTE_HOME` also holds the global `.env` and, under launchd, `logs/`.
+- The internal board lives in `$ACOLYTE_HOME/board.sqlite.db`; `--copy` attachments
+  are stored under `$ACOLYTE_HOME/board/files/<sha256>/`. See
+  [`communication/board.md`](communication/board.md).
+- When `communication.board.mode` is `skill`, the workspace also gets
+  `.agents/skills/board/SKILL.md` and marker blocks in `AGENTS.md` and
+  `.acolyte/CONFIG.md`. `args.heartbeat: true` adds the block in
+  `.acolyte/HEARTBEAT.md`.
 - `workspace/.env` and `$ACOLYTE_HOME/.env` are optional, gitignored, and never scaffolded by
   `acolyte new`; see [Secrets](README.md#secrets).
 - Inbound Telegram media is written under `media/inbound/<type>/`, outbound images under

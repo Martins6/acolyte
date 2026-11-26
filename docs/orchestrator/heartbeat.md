@@ -37,6 +37,22 @@ There is **no `acolyte heartbeat` command** — the routine runs on schedule. To
 - `schedule.heartbeat_minutes` — interval; `0` disables.
 - `schedule.timezone` — schedule timezone.
 
+## Board inbox block (opt-in)
+
+When `communication.board` is `{"mode":"skill","args":{"heartbeat":true}}`, the
+board feature appends a marker block to `.acolyte/HEARTBEAT.md` instructing the
+agent to check `acolyte board inbox --json` and `acolyte board status --json`,
+then tell the user with `acolyte notify-user` if there are unread pings or
+automation alerts. The block is removed when the setting is `false` or
+`disable`.
+
+The heartbeat routine itself is unchanged and still read-only today. The block
+assumes the redesign in
+[#139](https://github.com/Martins6/acolyte/issues/139) (a plain routine cron job
+that runs `HEARTBEAT.md` with normal permissions). Under the current read-only
+heartbeat it is inert; the board inbox remains available through the CLI. See
+[`../communication/board.md`](../communication/board.md#heartbeat).
+
 ## Artifacts
 - A `routine`-kind cron job (`owner=heartbeat`), visible in `acolyte cron list`.
 - Its own session; surfaces findings to the user's latest session when warranted.
