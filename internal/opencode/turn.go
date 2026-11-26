@@ -416,7 +416,7 @@ func inboxID(item *InboxItem) string {
 // be "queue" so an in-flight turn is not interrupted.
 func (c *Client) AdmitSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (*TurnResult, error) {
 	sessionID = strings.TrimSpace(sessionID)
-	info, err := c.ensureSession(ctx, sessionID, cfg)
+	info, _, err := c.getOrCreateSession(ctx, sessionID, cfg)
 	if err != nil {
 		return nil, err
 	}
