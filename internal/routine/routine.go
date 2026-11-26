@@ -62,6 +62,27 @@ func (e Env) Clock() time.Time {
 	return e.Now()
 }
 
+// interactionLogger persists headless settlement outcomes through the
+// routine's audit logger. It is nil when the environment has no logger, which
+// leaves the opencode package's daemon-log fallback in place.
+func interactionLogger(env Env) func(opencode.InteractionSettlement) {
+	if env.Log == nil {
+		return nil
+	}
+	return func(settlement opencode.InteractionSettlement) {
+		level := "info"
+		if settlement.Err != nil {
+			level = "warn"
+		}
+		env.Log(level, "headless "+settlement.Kind+" "+settlement.Action, map[string]any{
+			"session_id": settlement.SessionID,
+			"kind":       settlement.Kind,
+			"id":         settlement.ID,
+			"action":     settlement.Action,
+		})
+	}
+}
+
 // Routine is one named headless behavior.
 type Routine interface {
 	Name() string

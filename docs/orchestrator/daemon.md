@@ -54,6 +54,18 @@ tool-call IDs; tool input/results, prompts, and text/reasoning deltas are never 
 reads `orch_logs`, so tool activity is available to memory/learning feeds. Recording failures are
 ignored and never fail or stall a turn.
 
+## Headless interaction settlement
+
+Turn activity recording is separate from the headless invariant. Every turn pre-sweeps pending
+OpenCode forms/permissions for the session and its descendants, polls every second while it runs, and
+sweeps once more after collection. Question forms are cancelled with the non-interactive question
+message, other forms get a generic headless message, and permission requests are rejected. A turn
+that cannot settle a pending interaction fails with `ErrInteractionUnsettled` instead of waiting.
+Settlement is independent of the best-effort event stream: a missed event, a stale form from a
+crashed turn, or a dropped stream cannot leave the turn blocked. Background subagents that outlive
+root idle are settled by the next turn's pre-sweep. See
+[`docs/opencode/v2-contract.md#headless-turn-invariant`](../opencode/v2-contract.md#headless-turn-invariant).
+
 ## Sessions and inspection
 
 OpenCode owns the conversation history. Acolyte stores only routing/delivery metadata plus the
@@ -64,7 +76,9 @@ OpenCode session/message IDs needed to join the two.
   message-ID links. Outbound media rows include the `media_path` attribution when available.
 - `acolyte attach` runs `opencode attach <service-url> --dir <workspace> [--session <id>]` with the
   service credentials in the environment. Running `opencode` directly starts a separate server and
-  will not see Acolyte's sessions.
+  will not see Acolyte's sessions. Attach is **debug-only and not concurrency-safe**: it does not take
+  the per-session turn lock, so the headless settler can cancel a form or permission a human is
+  answering. Do not attach while Acolyte is running a turn on that session.
 
 ## Database locations
 

@@ -32,6 +32,24 @@ func ActivityEventRecorder(agent registry.Agent, st *store.Store) opencode.Event
 	return ActivityRecorder{Agent: agent.Name}.Handler(st)
 }
 
+// InteractionRecorder builds the OnInteraction callback that persists headless
+// settlement outcomes as IDs-only orch_logs rows. It is best-effort; a logging
+// failure never changes the settlement or the turn.
+func InteractionRecorder(agent registry.Agent, st *store.Store) func(opencode.InteractionSettlement) {
+	return func(settlement opencode.InteractionSettlement) {
+		if st == nil {
+			return
+		}
+		level := "info"
+		if settlement.Err != nil {
+			level = "warn"
+		}
+		_ = st.Orch().AppendLog(level, "opencode:"+agent.Name,
+			"headless "+settlement.Kind+" "+settlement.Action,
+			opencode.SettlementAuditMeta(settlement), settlement.Time)
+	}
+}
+
 // Handler returns an event handler that appends tool activity to st. The
 // handler is best-effort: it ignores every other event type and always returns
 // nil, so logging failures can never fail or stall a turn.

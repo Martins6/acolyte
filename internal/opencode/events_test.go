@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -275,6 +276,12 @@ func TestRunUserTurnObservesEvents(t *testing.T) {
 				}},
 				map[string]any{"id": "inp_1", "type": "user", "text": "say hi"},
 			}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/form"):
+			writeJSON(w, map[string]any{"data": []any{}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/permission"):
+			writeJSON(w, map[string]any{"data": []any{}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session" && r.URL.Query().Get("parentID") != "":
+			writeJSON(w, map[string]any{"data": []any{}, "cursor": map[string]any{}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -365,6 +372,12 @@ func TestRunUserTurnWaitsForEventStream(t *testing.T) {
 				}},
 				map[string]any{"id": "inp_1", "type": "user", "text": "say hi"},
 			}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/form"):
+			writeJSON(w, map[string]any{"data": []any{}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/permission"):
+			writeJSON(w, map[string]any{"data": []any{}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session" && r.URL.Query().Get("parentID") != "":
+			writeJSON(w, map[string]any{"data": []any{}, "cursor": map[string]any{}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -438,6 +451,12 @@ func TestRunUserTurnProceedsWhenEventStreamStalls(t *testing.T) {
 				}},
 				map[string]any{"id": "inp_1", "type": "user", "text": "say hi"},
 			}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/form"):
+			writeJSON(w, map[string]any{"data": []any{}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/permission"):
+			writeJSON(w, map[string]any{"data": []any{}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/session" && r.URL.Query().Get("parentID") != "":
+			writeJSON(w, map[string]any{"data": []any{}, "cursor": map[string]any{}})
 		default:
 			http.NotFound(w, r)
 		}

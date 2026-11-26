@@ -75,6 +75,10 @@ type TurnConfig struct {
 	// turn waits a bounded time for the subscription to be established before
 	// admitting the prompt, but a subscription failure never fails the turn.
 	OnEvent EventHandler
+	// OnInteraction, when non-nil, receives every headless form/permission
+	// settlement outcome. It is best-effort and must not block: settlement is
+	// already decided when it runs. A nil callback falls back to the daemon log.
+	OnInteraction func(InteractionSettlement)
 	// OnAdmitted, when non-nil, runs after the input is durably admitted and
 	// before the turn is collected. Callers persist the marker here so the turn
 	// can be re-collected after a restart. An error aborts the turn, and the
@@ -128,6 +132,10 @@ type TurnResult struct {
 // RunUserTurn drives one real user turn: ensure session, sync agent/model,
 // admit a prompt, wait for the agent loop to go idle, and collect the reply.
 // An empty sessionID creates a fresh session rooted at cfg.Workspace.
+//
+// Every turn is headless: pending forms and permission requests are settled
+// before the prompt and while the turn runs. A turn that cannot settle one
+// fails with ErrInteractionUnsettled instead of waiting forever.
 func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg TurnConfig) (result *TurnResult, err error) {
 	if cfg.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -135,6 +143,9 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 		defer cancel()
 	}
 	sessionID = strings.TrimSpace(sessionID)
+
+	turnCtx, cancelTurn := context.WithCancelCause(ctx)
+	defer cancelTurn(nil)
 
 	var held *lock.Lock
 	defer func() {
@@ -149,61 +160,107 @@ func (c *Client) RunUserTurn(ctx context.Context, sessionID, text string, cfg Tu
 	// Existing sessions are locked before any session mutation so two
 	// callers cannot interleave prompts on the same conversation.
 	if sessionID != "" {
-		held, err = lock.AcquireSession(ctx, sessionID)
+		held, err = lock.AcquireSession(turnCtx, sessionID)
 		if err != nil {
 			return nil, fmt.Errorf("opencode: lock session %s: %w", sessionID, err)
 		}
 	}
 
-	info, err := c.ensureSession(ctx, sessionID, cfg)
+	info, created, err := c.getOrCreateSession(turnCtx, sessionID, cfg)
 	if err != nil {
-		return nil, err
+		return nil, turnCause(turnCtx, err)
 	}
 
 	// A new session id is unique to this call, so it only needs a lock once
 	// the server has assigned it.
-	if sessionID == "" {
-		held, err = lock.AcquireSession(ctx, info.ID)
+	if created {
+		held, err = lock.AcquireSession(turnCtx, info.ID)
 		if err != nil {
 			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: lock session %s: %w", info.ID, err)
 		}
 	}
 
 	if err := callLockHook(cfg); err != nil {
-		return &TurnResult{SessionID: info.ID}, err
+		return &TurnResult{SessionID: info.ID}, turnCause(turnCtx, err)
 	}
 
-	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
-	if err != nil {
-		return &TurnResult{SessionID: info.ID}, err
-	}
+	settler := newInteractionSettler(c, info.ID, cfg.OnInteraction)
+	stopSettler := func() error { return nil }
+	settlerStarted := false
+	settlerStopped := false
+	restore := func() error { return nil }
+	// Cleanup order matters: stop the poller before restoring the session's
+	// previous permissions, and keep the session lock until both are done.
 	defer func() {
+		if settlerStarted && !settlerStopped {
+			if stopErr := stopSettler(); stopErr != nil {
+				err = errors.Join(err, stopErr)
+			}
+		}
 		if restoreErr := restore(); restoreErr != nil {
 			err = errors.Join(err, restoreErr)
 		}
 	}()
 
-	stopEvents := c.startEventObserver(ctx, info.ID, cfg.OnEvent)
+	if created {
+		stopSettler = settler.start(turnCtx, cancelTurn)
+		settlerStarted = true
+	} else {
+		settled, sweepErr := c.preSweepTurn(turnCtx, settler)
+		if sweepErr != nil {
+			return &TurnResult{SessionID: info.ID}, sweepErr
+		}
+		stopSettler = settler.start(turnCtx, cancelTurn)
+		settlerStarted = true
+		if settled > 0 {
+			if err := c.waitSettledSessionIdle(turnCtx, info.ID); err != nil {
+				return &TurnResult{SessionID: info.ID}, err
+			}
+		}
+	}
+
+	if !created {
+		if err := c.syncSessionSettings(turnCtx, info, cfg); err != nil {
+			return &TurnResult{SessionID: info.ID}, turnCause(turnCtx, err)
+		}
+	}
+
+	restoreFn, restoreErr := c.restrictSession(turnCtx, info, cfg.Permissions)
+	if restoreErr != nil {
+		return &TurnResult{SessionID: info.ID}, turnCause(turnCtx, restoreErr)
+	}
+	restore = restoreFn
+
+	stopEvents := c.startEventObserver(turnCtx, info.ID, cfg.OnEvent)
 	defer stopEvents()
 
-	item, err := c.Prompt(ctx, info.ID, text)
+	item, err := c.Prompt(turnCtx, info.ID, text)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, &PromptError{
-			Err:       err,
+			Err:       turnCause(turnCtx, err),
 			Ambiguous: promptOutcomeUnknown(err),
 		}
 	}
 	if err := admitInput(cfg, info.ID, item); err != nil {
-		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, turnCause(turnCtx, err)
 	}
-	turn, err := c.collectTurn(ctx, info.ID, item.ID)
+	turn, err := c.collectTurn(turnCtx, info.ID, item.ID)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
 	}
 	if cfg.OnCollected != nil {
 		if err := cfg.OnCollected(turn); err != nil {
-			return turn, err
+			return turn, turnCause(turnCtx, err)
 		}
+	}
+
+	if stopErr := stopSettler(); stopErr != nil {
+		settlerStopped = true
+		return turn, stopErr
+	}
+	settlerStopped = true
+	if sweepErr := settler.finalSweep(turnCtx); sweepErr != nil {
+		return turn, fmt.Errorf("%w: final sweep: %v", ErrInteractionUnsettled, sweepErr)
 	}
 	return turn, nil
 }
@@ -218,6 +275,9 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 	}
 	sessionID = strings.TrimSpace(sessionID)
 
+	turnCtx, cancelTurn := context.WithCancelCause(ctx)
+	defer cancelTurn(nil)
+
 	var held *lock.Lock
 	defer func() {
 		if held == nil {
@@ -229,59 +289,105 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 	}()
 
 	if sessionID != "" {
-		held, err = lock.AcquireSession(ctx, sessionID)
+		held, err = lock.AcquireSession(turnCtx, sessionID)
 		if err != nil {
 			return nil, fmt.Errorf("opencode: lock session %s: %w", sessionID, err)
 		}
 	}
 
-	info, err := c.ensureSession(ctx, sessionID, cfg)
+	info, created, err := c.getOrCreateSession(turnCtx, sessionID, cfg)
 	if err != nil {
-		return nil, err
+		return nil, turnCause(turnCtx, err)
 	}
 
-	if sessionID == "" {
-		held, err = lock.AcquireSession(ctx, info.ID)
+	if created {
+		held, err = lock.AcquireSession(turnCtx, info.ID)
 		if err != nil {
 			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: lock session %s: %w", info.ID, err)
 		}
 	}
 
 	if err := callLockHook(cfg); err != nil {
-		return &TurnResult{SessionID: info.ID}, err
+		return &TurnResult{SessionID: info.ID}, turnCause(turnCtx, err)
 	}
 
-	restore, err := c.restrictSession(ctx, info, cfg.Permissions)
-	if err != nil {
-		return &TurnResult{SessionID: info.ID}, err
-	}
+	settler := newInteractionSettler(c, info.ID, cfg.OnInteraction)
+	stopSettler := func() error { return nil }
+	settlerStarted := false
+	settlerStopped := false
+	restore := func() error { return nil }
+	// Cleanup order matters: stop the poller before restoring the session's
+	// previous permissions, and keep the session lock until both are done.
 	defer func() {
+		if settlerStarted && !settlerStopped {
+			if stopErr := stopSettler(); stopErr != nil {
+				err = errors.Join(err, stopErr)
+			}
+		}
 		if restoreErr := restore(); restoreErr != nil {
 			err = errors.Join(err, restoreErr)
 		}
 	}()
 
-	stopEvents := c.startEventObserver(ctx, info.ID, cfg.OnEvent)
+	if created {
+		stopSettler = settler.start(turnCtx, cancelTurn)
+		settlerStarted = true
+	} else {
+		settled, sweepErr := c.preSweepTurn(turnCtx, settler)
+		if sweepErr != nil {
+			return &TurnResult{SessionID: info.ID}, sweepErr
+		}
+		stopSettler = settler.start(turnCtx, cancelTurn)
+		settlerStarted = true
+		if settled > 0 {
+			if err := c.waitSettledSessionIdle(turnCtx, info.ID); err != nil {
+				return &TurnResult{SessionID: info.ID}, err
+			}
+		}
+	}
+
+	if !created {
+		if err := c.syncSessionSettings(turnCtx, info, cfg); err != nil {
+			return &TurnResult{SessionID: info.ID}, turnCause(turnCtx, err)
+		}
+	}
+
+	restoreFn, restoreErr := c.restrictSession(turnCtx, info, cfg.Permissions)
+	if restoreErr != nil {
+		return &TurnResult{SessionID: info.ID}, turnCause(turnCtx, restoreErr)
+	}
+	restore = restoreFn
+
+	stopEvents := c.startEventObserver(turnCtx, info.ID, cfg.OnEvent)
 	defer stopEvents()
 
-	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
+	item, err := c.Synthetic(turnCtx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, &PromptError{
-			Err:       err,
+			Err:       turnCause(turnCtx, err),
 			Ambiguous: promptOutcomeUnknown(err),
 		}
 	}
 	if err := admitInput(cfg, info.ID, item); err != nil {
-		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, turnCause(turnCtx, err)
 	}
-	turn, err := c.collectTurn(ctx, info.ID, item.ID)
+	turn, err := c.collectTurn(turnCtx, info.ID, item.ID)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
 	}
 	if cfg.OnCollected != nil {
 		if err := cfg.OnCollected(turn); err != nil {
-			return turn, err
+			return turn, turnCause(turnCtx, err)
 		}
+	}
+
+	if stopErr := stopSettler(); stopErr != nil {
+		settlerStopped = true
+		return turn, stopErr
+	}
+	settlerStopped = true
+	if sweepErr := settler.finalSweep(turnCtx); sweepErr != nil {
+		return turn, fmt.Errorf("%w: final sweep: %v", ErrInteractionUnsettled, sweepErr)
 	}
 	return turn, nil
 }
@@ -308,34 +414,76 @@ func callLockHook(cfg TurnConfig) error {
 	return cfg.OnLockAcquired()
 }
 
-// ensureSession creates the session when missing and brings its agent/model in
-// line with cfg on existing sessions.
-func (c *Client) ensureSession(ctx context.Context, sessionID string, cfg TurnConfig) (*SessionInfo, error) {
-	model := modelRef(cfg)
-
+// getOrCreateSession creates the session when missing. It deliberately does not
+// mutate an existing session: the headless pre-sweep runs before the agent/model
+// switches, so a session blocked on a stale interaction can be cleared first.
+func (c *Client) getOrCreateSession(ctx context.Context, sessionID string, cfg TurnConfig) (*SessionInfo, bool, error) {
 	if sessionID == "" {
-		info, err := c.CreateSession(ctx, cfg.Workspace, cfg.Agent, model)
+		info, err := c.CreateSession(ctx, cfg.Workspace, cfg.Agent, modelRef(cfg))
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return info, nil
+		return info, true, nil
 	}
-
 	info, err := c.GetSession(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	return info, false, nil
+}
+
+// syncSessionSettings brings an existing session's agent/model in line with cfg
+// after the pre-sweep has settled any stale interaction.
+func (c *Client) syncSessionSettings(ctx context.Context, info *SessionInfo, cfg TurnConfig) error {
+	model := modelRef(cfg)
 	if cfg.Agent != "" && info.Agent != cfg.Agent {
-		if err := c.SwitchAgent(ctx, sessionID, cfg.Agent); err != nil {
-			return nil, err
+		if err := c.SwitchAgent(ctx, info.ID, cfg.Agent); err != nil {
+			return err
 		}
 	}
 	if model != nil && (info.Model == nil || info.Model.ID != model.ID || info.Model.ProviderID != model.ProviderID) {
-		if err := c.SwitchModel(ctx, sessionID, *model); err != nil {
-			return nil, err
+		if err := c.SwitchModel(ctx, info.ID, *model); err != nil {
+			return err
 		}
 	}
-	return info, nil
+	return nil
+}
+
+// preSweepTurn clears interactions left by an earlier turn. It is fail-closed:
+// if the sweep cannot verify and settle them, the turn does not start.
+func (c *Client) preSweepTurn(ctx context.Context, settler *interactionSettler) (int, error) {
+	sweepCtx, cancel := context.WithTimeout(ctx, interactionSweepTimeout)
+	defer cancel()
+	settled, err := settler.sweep(sweepCtx)
+	if err != nil {
+		return 0, fmt.Errorf("%w: pre-sweep: %v", ErrInteractionUnsettled, err)
+	}
+	return settled, nil
+}
+
+// waitSettledSessionIdle waits for an execution that the pre-sweep just
+// resumed. Without this, agent/model switches would race a busy session.
+func (c *Client) waitSettledSessionIdle(ctx context.Context, sessionID string) error {
+	idleCtx, cancel := context.WithTimeout(ctx, preTurnIdleTimeout)
+	defer cancel()
+	err := c.Wait(idleCtx, sessionID)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) && context.Cause(ctx) == nil {
+		return fmt.Errorf("%w: session did not go idle after pre-sweep", ErrInteractionUnsettled)
+	}
+	return turnCause(ctx, err)
+}
+
+// turnCause surfaces a settler cancellation instead of the bare
+// context.Canceled that net/http wraps around it.
+func turnCause(ctx context.Context, err error) error {
+	cause := context.Cause(ctx)
+	if cause == nil || errors.Is(err, cause) {
+		return err
+	}
+	return errors.Join(cause, err)
 }
 
 // permissionRestoreTimeout bounds the restore call after a turn; it must not
@@ -414,11 +562,11 @@ func (c *Client) startEventObserver(ctx context.Context, sessionID string, handl
 func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*TurnResult, error) {
 	for {
 		if err := c.Wait(ctx, sessionID); err != nil {
-			return nil, err
+			return nil, turnCause(ctx, err)
 		}
 		msgs, delivered, truncated, err := c.messagesAfter(ctx, sessionID, markerID)
 		if err != nil {
-			return nil, err
+			return nil, turnCause(ctx, err)
 		}
 		if delivered {
 			return newTurnResult(sessionID, markerID, msgs), nil
@@ -429,7 +577,7 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 			// huge turn (its reply cannot be bounded, fail fast).
 			pending, err := c.InboxPending(ctx, sessionID, markerID)
 			if err != nil {
-				return nil, err
+				return nil, turnCause(ctx, err)
 			}
 			if !pending {
 				return nil, ErrTurnTruncated
@@ -437,7 +585,7 @@ func (c *Client) collectTurn(ctx context.Context, sessionID, markerID string) (*
 		}
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("opencode: timed out waiting for turn %s: %w", markerID, ctx.Err())
+			return nil, turnCause(ctx, fmt.Errorf("opencode: timed out waiting for turn %s: %w", markerID, ctx.Err()))
 		case <-time.After(syntheticRecheckGap):
 		}
 	}

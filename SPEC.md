@@ -149,7 +149,9 @@ No engine interface/adapter. Acolyte builds directly on OpenCode V2 primitives
 
 **How a turn runs:** the Orchestrator drives one turn through the **OpenCode V2 API**, supplying an
 inbound prompt and reading output + tool activity. Acolyte does not reimplement the reasoning/tool
-loop.
+loop. **Every acolyte turn is headless:** it never presents an interactive prompt to a human. Pending
+forms and permission requests are settled automatically, and a turn that cannot settle one fails
+instead of waiting forever.
 
 ### 5.1 Integration transport — the V2 API, not the CLI **[DECISION]**
 
@@ -178,13 +180,27 @@ debugging.
   `acolyte run --json` prints it as `tool_activity` when non-empty. This is not streaming.
   Telegram partial-text streaming remains deferred (it needs message editing, rate limiting, and a
   consumer design); the typing indicator and per-message acknowledgment reaction are implemented.
+- **Every turn is headless.** Before a prompt or synthetic input is admitted, the thin client
+  pre-sweeps the session and its descendants for pending forms/permissions
+  (`GET /api/session/{id}/form`, `GET /api/session/{id}/permission`,
+  `GET /api/session?parentID={id}`). Question forms are cancelled with the non-interactive question
+  message, other forms get a generic headless message, and permission requests are rejected with the
+  non-interactive permission message. A 1s poller repeats the sweep while the turn runs, and a final
+  sweep runs after collection. This is independent of the best-effort `OnEvent` stream: a missed
+  event, a stale interaction from a crashed turn, or a dropped stream cannot leave the turn waiting.
+  Persistent settlement failure aborts the turn with `ErrInteractionUnsettled`. Background subagents
+  that outlive root idle are settled by the next turn's pre-sweep. `acolyte attach` is debug-only and
+  must not run concurrently with an acolyte turn.
 - **Long-running daemon ↔ long-running service** (matches autostart). No spawn-per-turn overhead or
   5-minute timeout.
 
-**Key endpoints (pinned OpenCode 2.2.7):** `POST /api/session`, `GET /api/session`,
-`GET|PATCH /api/session/{id}`, `POST /api/session/{id}/prompt` (real user turns),
-`POST /api/session/{id}/synthetic` (external events), `GET /api/session/{id}/inbox`,
-`GET /api/session/{id}/message`, `GET /api/session/{id}/context`, `POST /api/session/{id}/agent`,
+**Key endpoints (pinned OpenCode 2.2.7):** `POST /api/session`, `GET /api/session` (including
+`parentID` for descendant discovery), `GET|PATCH /api/session/{id}`,
+`POST /api/session/{id}/prompt` (real user turns), `POST /api/session/{id}/synthetic` (external
+events), `GET /api/session/{id}/inbox`, `GET /api/session/{id}/message`,
+`GET /api/session/{id}/context`, `GET /api/session/{id}/form`,
+`DELETE /api/session/{id}/form/{formID}`, `GET /api/session/{id}/permission`,
+`POST /api/session/{id}/permission/{requestID}/reply`, `POST /api/session/{id}/agent`,
 `POST /api/session/{id}/model`, `POST /api/experimental/session/{id}/wait`,
 `GET /api/experimental/session/{id}/export`, `POST /api/experimental/session/import`,
 `GET /api/experimental/session/stats`, `GET /api/agent`, and `GET /api/event` (SSE).
@@ -200,6 +216,12 @@ debugging.
   transport hygiene.)
 - The thin client uses the V2 `/api/...` paths with `synthetic` for external events and `prompt`
   for real user turns; the old CLI `runner.go` turn path is retired.
+- `question` is **not** denied at the ruleset level. `Permission.Rule` has no message field, so a
+  deny rule would produce only `Permission denied: question` and could not tell the model the run is
+  headless. The contract instead lets the form appear and cancels it with the non-interactive
+  explanation — the same behavior as `opencode run`. A turn whose settlement path is unavailable
+  fails with `ErrInteractionUnsettled` rather than blocking. The background-subagent boundary is
+  documented in [`docs/opencode/v2-contract.md`](docs/opencode/v2-contract.md#headless-turn-invariant).
 
 ### 5.2 Spike validation — `synthetic`/`inbox` reach the model ✅ (2026-11-05)
 

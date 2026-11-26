@@ -100,3 +100,56 @@ func TestLiveSmoke(t *testing.T) {
 		t.Logf("model switch ok: %+v", got.Model)
 	}
 }
+
+// TestLiveHeadlessQuestion exercises the headless settlement path against a
+// real OpenCode service. It is opt-in because it needs a live model:
+//
+//	ACOLYTE_LIVE_HEADLESS=1 go test ./internal/opencode/ -run LiveHeadlessQuestion -v
+//
+// A model that declines to call the question tool is a skip, not a failure: the
+// point is to prove that a question form, when it appears, is cancelled and the
+// turn still completes.
+func TestLiveHeadlessQuestion(t *testing.T) {
+	if os.Getenv("ACOLYTE_LIVE_HEADLESS") == "" {
+		t.Skip("set ACOLYTE_LIVE_HEADLESS=1 to run against the real OpenCode service")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	client, err := Ensure(ctx)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	var settlements []InteractionSettlement
+	result, err := client.RunUserTurn(ctx, "", "Use the question tool to ask me one short question about my favorite color. If the tool is unavailable, reply exactly DONE.", TurnConfig{
+		Workspace: t.TempDir(),
+		OnInteraction: func(settlement InteractionSettlement) {
+			settlements = append(settlements, settlement)
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunUserTurn: %v", err)
+	}
+	if result.SessionID == "" || strings.TrimSpace(result.ResponseText) == "" {
+		t.Fatalf("result = %+v, want a session and a reply", result)
+	}
+
+	sawQuestion := false
+	for _, settlement := range settlements {
+		if settlement.Kind != "form" {
+			continue
+		}
+		sawQuestion = true
+		if settlement.Action != "cancelled" {
+			t.Errorf("form settlement = %+v, want cancelled", settlement)
+		}
+		if settlement.Message != headlessQuestionMessage {
+			t.Errorf("form message = %q, want question message", settlement.Message)
+		}
+	}
+	if !sawQuestion {
+		t.Skip("model did not call the question tool; nothing to settle")
+	}
+}

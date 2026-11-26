@@ -6,20 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
-
-// newTestClient returns a client wired to a scripted test server.
-func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
-	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	return NewClient(srv.URL, "pw")
-}
 
 func decodeBody(t *testing.T, r *http.Request) map[string]any {
 	t.Helper()

@@ -7,6 +7,14 @@ const (
 	PermissionDeny  = "deny"
 )
 
+// Permission decisions accepted by the session permission reply API
+// (OpenCode Permission.Reply).
+const (
+	PermissionDecisionOnce   = "once"
+	PermissionDecisionAlways = "always"
+	PermissionDecisionReject = "reject"
+)
+
 // PermissionRule is one session-scoped permission rule (OpenCode
 // Permission.Rule). Rules are evaluated after the agent's rules and the last
 // matching rule wins, so a per-turn ruleset can deny tools the agent would
