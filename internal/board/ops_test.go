@@ -766,6 +766,141 @@ func TestEnqueue(t *testing.T) {
 	}
 }
 
+func TestLeaveRevokesState(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "leave",
+		With: []string{"scribe"},
+	})
+	if err := st.Subscribe(ctx, scribe, post.ID, true); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+	if err := st.SetAutomation(ctx, scribe, post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	entry, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "ping"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if _, err := st.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("Enqueue() error: %v", err)
+	}
+	if _, err := st.CreateAlert(ctx, "scribe", post.ID, "alert"); err != nil {
+		t.Fatalf("CreateAlert() error: %v", err)
+	}
+
+	if err := st.Leave(ctx, scribe, post.ID); err != nil {
+		t.Fatalf("Leave() error: %v", err)
+	}
+	if inbox, err := st.Inbox(ctx, "scribe", true); err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	} else if len(inbox) != 0 {
+		t.Errorf("inbox after leave = %+v", inbox)
+	}
+	state, err := st.SubscriptionState(ctx, "scribe")
+	if err != nil {
+		t.Fatalf("SubscriptionState() error: %v", err)
+	}
+	if len(state.Posts) != 0 || len(state.Mutes) != 0 {
+		t.Errorf("subscriptions after leave = %+v", state)
+	}
+	automation, err := st.Automation(ctx, "scribe", post.ID)
+	if err != nil {
+		t.Fatalf("Automation() error: %v", err)
+	}
+	if automation != nil {
+		t.Errorf("automation after leave = %+v", automation)
+	}
+	if alerts, err := st.Alerts(ctx, "scribe"); err != nil {
+		t.Fatalf("Alerts() error: %v", err)
+	} else if len(alerts) != 0 {
+		t.Errorf("alerts after leave = %+v", alerts)
+	}
+
+	var count int
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM brd_inbox WHERE agent_id = 'scribe' AND post_id = ?`, post.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count inbox: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("inbox rows after leave = %d", count)
+	}
+}
+
+func TestInboxRequiresParticipation(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "participation",
+		With: []string{"scribe"},
+	})
+	if err := st.SetAutomation(ctx, scribe, post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	entry, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "ping"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if _, err := st.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("Enqueue() error: %v", err)
+	}
+	if _, err := st.DB().ExecContext(ctx,
+		`DELETE FROM brd_participants WHERE post_id = ? AND kind = 'agent' AND id = 'scribe'`, post.ID,
+	); err != nil {
+		t.Fatalf("delete participant: %v", err)
+	}
+	if inbox, err := st.Inbox(ctx, "scribe", true); err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	} else if len(inbox) != 0 {
+		t.Errorf("inbox for non-participant = %+v", inbox)
+	}
+	if entryID, _, err := st.ClaimPendingAutomated(ctx, "scribe", post.ID, "claim", time.Minute); err != nil {
+		t.Fatalf("ClaimPendingAutomated() error: %v", err)
+	} else if entryID != "" {
+		t.Errorf("claimed for non-participant: %q", entryID)
+	}
+	if pings, _, _, err := st.UnreadCount(ctx, "scribe"); err != nil {
+		t.Fatalf("UnreadCount() error: %v", err)
+	} else if pings != 0 {
+		t.Errorf("unread count for non-participant = %d", pings)
+	}
+}
+
+func TestRecordAutomationAdmissionDoesNotDoubleCount(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	post, _ := mustCreatePost(t, st, AgentActor("valet"), CreatePostInput{
+		Text: "reconcile",
+		With: []string{"scribe"},
+	})
+	if err := st.SetAutomation(ctx, AgentActor("scribe"), post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	ok, err := st.ReserveAutomationTurn(ctx, "scribe", post.ID, 2*time.Minute, 20)
+	if err != nil || !ok {
+		t.Fatalf("ReserveAutomationTurn() = %v, %v", ok, err)
+	}
+	if err := st.RecordAutomationAdmission(ctx, "scribe", post.ID, "ses_x"); err != nil {
+		t.Fatalf("RecordAutomationAdmission() error: %v", err)
+	}
+	automation, err := st.Automation(ctx, "scribe", post.ID)
+	if err != nil {
+		t.Fatalf("Automation() error: %v", err)
+	}
+	if automation.Turns != 1 {
+		t.Errorf("turns = %d, want 1 (reservation already counted)", automation.Turns)
+	}
+	if automation.SessionID != "ses_x" {
+		t.Errorf("session = %q, want ses_x", automation.SessionID)
+	}
+}
+
 func TestReserveAutomationTurn(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

@@ -113,7 +113,7 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 
 	sessionID := automation.SessionID
 	if stale && sessionID != "" {
-		admitted, messageID, scanErr := e.wasAdmitted(ctx, sessionID, entry.ID)
+		admitted, messageID, truncated, scanErr := e.wasAdmitted(ctx, sessionID, entry.ID)
 		if scanErr != nil {
 			if isBoardSessionNotFound(scanErr) {
 				sessionID = ""
@@ -131,6 +131,11 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 			}
 			return true, nil
 		}
+		if truncated {
+			// The marker may be outside the scanned window. Do not re-admit
+			// without proof; retain the claim for a later reconciliation.
+			return false, fmt.Errorf("board: automation session %s history is truncated; cannot reconcile entry %s", sessionID, entry.ID)
+		}
 	}
 
 	if err := workspace.EnsureBoardTools(agent.Workspace); err != nil {
@@ -138,11 +143,11 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		return false, err
 	}
 
-	result, admitErr := e.admit(ctx, sessionID, agent, post.Title, entry)
+	result, admitErr := e.admit(ctx, sessionID, agent, agentID, postID, post.Title, entry)
 	if admitErr != nil && sessionID != "" && isBoardSessionNotFound(admitErr) {
 		// The dedicated session was deleted; start a fresh one.
 		sessionID = ""
-		result, admitErr = e.admit(ctx, "", agent, post.Title, entry)
+		result, admitErr = e.admit(ctx, "", agent, agentID, postID, post.Title, entry)
 	}
 	if admitErr != nil {
 		if opencode.PromptOutcomeUnknown(admitErr) {
@@ -179,21 +184,21 @@ func (e *boardAutomationEngine) fail(ctx context.Context, agentID, postID, entry
 	}
 }
 
-func (e *boardAutomationEngine) wasAdmitted(ctx context.Context, sessionID, entryID string) (bool, string, error) {
-	messages, _, err := e.Turn.SessionMessages(ctx, sessionID, 5)
+func (e *boardAutomationEngine) wasAdmitted(ctx context.Context, sessionID, entryID string) (bool, string, bool, error) {
+	messages, truncated, err := e.Turn.SessionMessages(ctx, sessionID, 100)
 	if err != nil {
-		return false, "", err
+		return false, "", false, err
 	}
 	marker := boardEntryMarker(entryID)
 	for _, message := range messages {
 		if strings.Contains(message.Text, marker) {
-			return true, message.ID, nil
+			return true, message.ID, truncated, nil
 		}
 	}
-	return false, "", nil
+	return false, "", truncated, nil
 }
 
-func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, agent registry.Agent, title string, entry board.Entry) (*opencode.TurnResult, error) {
+func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, agent registry.Agent, agentID, postID, title string, entry board.Entry) (*opencode.TurnResult, error) {
 	return e.Turn.AdmitSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        boardAutomationPrompt(title, entry),
 		Description: "Board automation",
@@ -209,6 +214,9 @@ func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, age
 	}, opencode.TurnConfig{
 		Workspace:   agent.Workspace,
 		Permissions: boardAutomationPermissions(),
+		OnSession: func(sessionID string) error {
+			return e.Board.RecordAutomationSession(ctx, agentID, postID, sessionID)
+		},
 	})
 }
 

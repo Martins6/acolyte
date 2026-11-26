@@ -98,6 +98,11 @@ type TurnConfig struct {
 	// held and before the input is admitted. Callers use it to fence a stale
 	// owner (for example an expired route claim) before OpenCode accepts work.
 	OnLockAcquired func() error
+	// OnSession, when non-nil, is called by AdmitSyntheticTurn after the
+	// session is created or resolved and before the synthetic event is
+	// admitted. Fire-and-forget callers persist the session ID here so a
+	// stale retry can reconcile the session's history.
+	OnSession func(sessionID string) error
 }
 
 // SyntheticEvent is an external/background event admitted to a session
@@ -426,6 +431,11 @@ func (c *Client) AdmitSyntheticTurn(ctx context.Context, sessionID string, ev Sy
 	if cfg.Permissions != nil {
 		if err := c.SetSessionPermissions(ctx, info.ID, cfg.Permissions); err != nil {
 			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: apply session permissions: %w", err)
+		}
+	}
+	if cfg.OnSession != nil {
+		if err := cfg.OnSession(info.ID); err != nil {
+			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: record session: %w", err)
 		}
 	}
 	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)

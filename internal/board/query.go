@@ -455,6 +455,7 @@ func (s *Store) Inbox(ctx context.Context, agentID string, all bool) ([]InboxVie
 	         FROM brd_inbox i
 	         JOIN brd_posts p ON p.id = i.post_id
 	         JOIN brd_entries e ON e.id = i.entry_id
+	         JOIN brd_participants p2 ON p2.post_id = i.post_id AND p2.kind = 'agent' AND p2.id = i.agent_id
 	         WHERE i.agent_id = ?`
 	if !all {
 		query += ` AND i.read_at IS NULL`
@@ -507,14 +508,21 @@ func (s *Store) UnreadCount(ctx context.Context, agentID string) (pings, posts, 
 		return 0, 0, 0, fmt.Errorf("%w: agent id is required", ErrInvalid)
 	}
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*), COUNT(DISTINCT post_id)
-		 FROM brd_inbox
-		 WHERE agent_id = ? AND read_at IS NULL AND aware = 1 AND mode = 'manual'`, agentID,
+		`SELECT COUNT(*), COUNT(DISTINCT i.post_id)
+		 FROM brd_inbox i
+		 WHERE i.agent_id = ? AND i.read_at IS NULL AND i.aware = 1 AND i.mode = 'manual'
+		   AND EXISTS (SELECT 1 FROM brd_participants p
+		               WHERE p.post_id = i.post_id AND p.kind = 'agent' AND p.id = i.agent_id)`,
+		agentID,
 	).Scan(&pings, &posts); err != nil {
 		return 0, 0, 0, fmt.Errorf("board: count inbox: %w", err)
 	}
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM brd_alerts WHERE agent_id = ? AND notified_at IS NULL`, agentID,
+		`SELECT COUNT(*) FROM brd_alerts a
+		 WHERE a.agent_id = ? AND a.notified_at IS NULL
+		   AND EXISTS (SELECT 1 FROM brd_participants p
+		               WHERE p.post_id = a.post_id AND p.kind = 'agent' AND p.id = a.agent_id)`,
+		agentID,
 	).Scan(&alerts); err != nil {
 		return 0, 0, 0, fmt.Errorf("board: count alerts: %w", err)
 	}
@@ -524,9 +532,12 @@ func (s *Store) UnreadCount(ctx context.Context, agentID string) (pings, posts, 
 // Alerts returns unread automation alerts for an agent.
 func (s *Store) Alerts(ctx context.Context, agentID string) ([]Alert, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, agent_id, post_id, message, created_at, notified_at
-		 FROM brd_alerts WHERE agent_id = ? AND notified_at IS NULL
-		 ORDER BY created_at`, strings.TrimSpace(agentID))
+		`SELECT a.id, a.agent_id, a.post_id, a.message, a.created_at, a.notified_at
+		 FROM brd_alerts a
+		 WHERE a.agent_id = ? AND a.notified_at IS NULL
+		   AND EXISTS (SELECT 1 FROM brd_participants p
+		               WHERE p.post_id = a.post_id AND p.kind = 'agent' AND p.id = a.agent_id)
+		 ORDER BY a.created_at`, strings.TrimSpace(agentID))
 	if err != nil {
 		return nil, fmt.Errorf("board: list alerts: %w", err)
 	}

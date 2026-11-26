@@ -161,6 +161,9 @@ an agent can never notify another agent directly.
   pings to the agent's main session through the normal inbox sink, mark them
   read, and record the session. The agent's reply can reach the user channel.
 - `board inbox --retry` — retry pending automated admissions.
+- `board leave <post>` — leave the post and clear that agent's queued pings,
+  per-post subscription/mute, automation, alerts, and read state. The global
+  `--all` subscription is kept for future posts.
 
 `board read <post>` is separate from the inbox: it shows the conversation and
 records `brd_reads.last_read_seq`, which powers `list --unread`.
@@ -182,6 +185,10 @@ for that post. It does not affect other participants.
 - Each ping is claimed atomically before admission. A stale claim (for example
   after a crash) is reconciled by scanning the automation session for the
   entry marker before retrying, so the same ping is not admitted twice.
+- The dedicated session ID is persisted before the synthetic request, so a
+  crash or ambiguous timeout still leaves a session to reconcile. If history is
+  truncated before the marker is found, the claim is retained instead of
+  re-admitting. Reconciled admissions do not increment the turn counter twice.
 - The final text of an automated turn is **not** delivered to the user; replies
   go through `acolyte board message`.
 - Guard rails:

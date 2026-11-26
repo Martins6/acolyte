@@ -280,6 +280,9 @@ func TestBoardAutomationAmbiguousAdmissionKeepsClaim(t *testing.T) {
 	if automation == nil || automation.Turns != 1 {
 		t.Fatalf("automation = %+v, want one reserved turn", automation)
 	}
+	if automation.SessionID == "" {
+		t.Errorf("session was not persisted before admission: %+v", automation)
+	}
 	inbox, err := st.Inbox(context.Background(), "scribe", true)
 	if err != nil {
 		t.Fatalf("Inbox() error: %v", err)
@@ -298,6 +301,71 @@ func TestBoardAutomationAmbiguousAdmissionKeepsClaim(t *testing.T) {
 	}
 	if fake.synthCalls != 1 {
 		t.Errorf("ambiguous retry admitted again: %d calls", fake.synthCalls)
+	}
+}
+
+func TestBoardAutomationTruncatedHistoryKeepsClaim(t *testing.T) {
+	setupBoardCLI(t)
+	fake := &fakeCLITurn{messageTruncated: true}
+	withFakeTurn(t, fake)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+	ctx := context.Background()
+
+	result, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "truncated",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	if err := runBoardAutomate(ctx, &bytes.Buffer{}, boardAutomateOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+	}); err != nil {
+		t.Fatalf("runBoardAutomate() error: %v", err)
+	}
+
+	st := openBoardTestStore(t)
+	entry, err := st.AppendMessage(ctx, board.AgentActor("valet"), result.Post.ID, board.AppendMessageInput{
+		Text: "pending",
+	})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if _, err := st.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("Enqueue() error: %v", err)
+	}
+	if _, _, err := st.ClaimPendingAutomated(ctx, "scribe", result.Post.ID, "claim-1", time.Minute); err != nil {
+		t.Fatalf("ClaimPendingAutomated() error: %v", err)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE brd_automations SET session_id = 'ses_cli' WHERE agent_id = 'scribe' AND post_id = ?`,
+		result.Post.ID,
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE brd_inbox SET claimed_at = ? WHERE agent_id = 'scribe' AND entry_id = ?`,
+		time.Now().Add(-time.Hour).UTC(), entry.ID,
+	); err != nil {
+		t.Fatalf("age claim: %v", err)
+	}
+
+	if err := runBoardInbox(ctx, &bytes.Buffer{}, boardInboxOptions{
+		Target: scribe,
+		Retry:  true,
+	}); err != nil {
+		t.Fatalf("runBoardInbox(retry) error: %v", err)
+	}
+	if fake.synthCalls != 0 {
+		t.Errorf("truncated history admitted again: %d calls", fake.synthCalls)
+	}
+	inbox, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ClaimedAt == nil || inbox[0].ProcessedAt != nil {
+		t.Fatalf("truncated ping = %+v, want a retained claim", inbox)
 	}
 }
 
@@ -363,6 +431,13 @@ func TestBoardAutomationReconcilesStaleClaim(t *testing.T) {
 	}
 	if fake.synthCalls != 0 {
 		t.Errorf("stale claim admitted again: %d calls", fake.synthCalls)
+	}
+	automation, err := st.Automation(context.Background(), "scribe", result.Post.ID)
+	if err != nil {
+		t.Fatalf("Automation() error: %v", err)
+	}
+	if automation == nil || automation.Turns != 1 {
+		t.Errorf("reconciled turns = %+v, want exactly 1 (reservation counted once)", automation)
 	}
 	inbox, err := st.Inbox(ctx, "scribe", true)
 	if err != nil {

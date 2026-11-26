@@ -18,14 +18,15 @@ import (
 )
 
 type fakeCLITurn struct {
-	userCalls  int
-	synthCalls int
-	result     *opencode.TurnResult
-	messages   []opencode.Message
-	messageErr error
-	sessions   []opencode.SessionInfo
-	bySession  map[string][]opencode.Message
-	exports    map[string]json.RawMessage
+	userCalls        int
+	synthCalls       int
+	result           *opencode.TurnResult
+	messages         []opencode.Message
+	messageErr       error
+	sessions         []opencode.SessionInfo
+	bySession        map[string][]opencode.Message
+	exports          map[string]json.RawMessage
+	messageTruncated bool
 
 	userSessionID string
 	userText      string
@@ -61,6 +62,15 @@ func (f *fakeCLITurn) AdmitSyntheticTurn(_ context.Context, sessionID string, ev
 	f.admitSessions = append(f.admitSessions, sessionID)
 	f.admitEvents = append(f.admitEvents, ev)
 	f.admitConfigs = append(f.admitConfigs, cfg)
+	effectiveSession := sessionID
+	if effectiveSession == "" {
+		effectiveSession = "ses_cli"
+	}
+	if cfg.OnSession != nil {
+		if err := cfg.OnSession(effectiveSession); err != nil {
+			return nil, err
+		}
+	}
 	if f.admitErr != nil && sessionID == f.admitErrOn {
 		return nil, f.admitErr
 	}
@@ -73,9 +83,9 @@ func (f *fakeCLITurn) AdmitSyntheticTurn(_ context.Context, sessionID string, ev
 
 func (f *fakeCLITurn) SessionMessages(_ context.Context, sessionID string, _ int) ([]opencode.Message, bool, error) {
 	if f.bySession != nil {
-		return f.bySession[sessionID], false, f.messageErr
+		return f.bySession[sessionID], f.messageTruncated, f.messageErr
 	}
-	return f.messages, false, f.messageErr
+	return f.messages, f.messageTruncated, f.messageErr
 }
 
 func (f *fakeCLITurn) ListSessions(context.Context) ([]opencode.SessionInfo, error) {

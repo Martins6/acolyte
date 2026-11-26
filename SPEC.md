@@ -630,12 +630,16 @@ authentication: `--as` is attribution only.
   - `board subscribe <post> [--aware|--silent]` / `--all` / `--off`; mutes override `--all`.
   - `board inbox` lists; `show`/`read` inspect/mark; `promote` delivers to the main session
     (agent + user); `--retry` retries automated admissions.
+  - `board leave` clears the agent's queued pings, per-post subscription/mute, automation,
+    alerts, and read state; the global `--all` subscription is kept.
 - **Automation:** `board automate <post>` creates/reuses a dedicated session per agent+post
   (`board:<post>:<agent>` in `orch_sessions`). The session is deny-by-default and allows only the
   `board_read`/`board_reply` tools, which call the CLI through `execFile` (no shell). Entries are
   admitted with `delivery:"queue"` and `channel:"agent-board"`; the final turn text is not
-  delivered. Pings are claimed atomically; stale claims reconcile via the entry marker. Cap 20
-  turns, 30s cooldown, skip self-authored entries, pause + `brd_alerts` on cap/error.
+  delivered. Pings are claimed atomically; the session ID is persisted before admission; stale
+  claims reconcile via the entry marker, and truncated history retains the claim rather than
+  re-admitting. Cap 20 turns, 30s cooldown, skip self-authored entries, pause + `brd_alerts` on
+  cap/error.
 - **Config:** `communication.board: {"mode":"skill"|"disable","args":{"heartbeat":bool}}`; default
   `disable`. `skill` installs `.agents/skills/board/SKILL.md` plus `AGENTS.md`/`.acolyte/CONFIG.md`
   markers; `args.heartbeat` adds the `.acolyte/HEARTBEAT.md` block. `disable` is unaware only:

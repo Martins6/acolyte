@@ -391,6 +391,23 @@ func (s *Store) Leave(ctx context.Context, actor Actor, postRef string) error {
 	if err := s.requireParticipant(ctx, tx, post.ID, actor); err != nil {
 		return err
 	}
+	for _, statement := range []string{
+		`DELETE FROM brd_inbox WHERE agent_id = ? AND post_id = ?`,
+		`DELETE FROM brd_subscriptions WHERE agent_id = ? AND post_id = ?`,
+		`DELETE FROM brd_mutes WHERE agent_id = ? AND post_id = ?`,
+		`DELETE FROM brd_automations WHERE agent_id = ? AND post_id = ?`,
+		`DELETE FROM brd_alerts WHERE agent_id = ? AND post_id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement, actor.ID, post.ID); err != nil {
+			return fmt.Errorf("board: clear participant state: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM brd_reads WHERE post_id = ? AND kind = 'agent' AND id = ?`,
+		post.ID, actor.ID,
+	); err != nil {
+		return fmt.Errorf("board: clear read state: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM brd_participants WHERE post_id = ? AND kind = 'agent' AND id = ?`,
 		post.ID, actor.ID,
@@ -958,9 +975,11 @@ func (s *Store) PendingAutomated(ctx context.Context, agentID, postID string, li
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT entry_id FROM brd_inbox
-		 WHERE agent_id = ? AND post_id = ? AND mode = 'automated' AND processed_at IS NULL
-		 ORDER BY created_at, entry_id LIMIT ?`, agentID, postID, limit)
+		`SELECT i.entry_id FROM brd_inbox i
+		 WHERE i.agent_id = ? AND i.post_id = ? AND i.mode = 'automated' AND i.processed_at IS NULL
+		   AND EXISTS (SELECT 1 FROM brd_participants p
+		               WHERE p.post_id = i.post_id AND p.kind = 'agent' AND p.id = i.agent_id)
+		 ORDER BY i.created_at, i.entry_id LIMIT ?`, agentID, postID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("board: pending automation: %w", err)
 	}
@@ -998,10 +1017,12 @@ func (s *Store) ClaimPendingAutomated(ctx context.Context, agentID, postID, clai
 
 	var claimedAt sql.NullTime
 	err = tx.QueryRowContext(ctx,
-		`SELECT entry_id, claimed_at FROM brd_inbox
-		 WHERE agent_id = ? AND post_id = ? AND mode = 'automated' AND processed_at IS NULL
-		   AND (claimed_at IS NULL OR claimed_at < ?)
-		 ORDER BY created_at, entry_id LIMIT 1`,
+		`SELECT i.entry_id, i.claimed_at FROM brd_inbox i
+		 WHERE i.agent_id = ? AND i.post_id = ? AND i.mode = 'automated' AND i.processed_at IS NULL
+		   AND (i.claimed_at IS NULL OR i.claimed_at < ?)
+		   AND EXISTS (SELECT 1 FROM brd_participants p
+		               WHERE p.post_id = i.post_id AND p.kind = 'agent' AND p.id = i.agent_id)
+		 ORDER BY i.created_at, i.entry_id LIMIT 1`,
 		agentID, postID, cutoff,
 	).Scan(&entryID, &claimedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1015,7 +1036,10 @@ func (s *Store) ClaimPendingAutomated(ctx context.Context, agentID, postID, clai
 		`UPDATE brd_inbox
 		 SET claimed_at = ?, claim_token = ?
 		 WHERE agent_id = ? AND entry_id = ? AND processed_at IS NULL
-		   AND (claimed_at IS NULL OR claimed_at < ?)`,
+		   AND (claimed_at IS NULL OR claimed_at < ?)
+		   AND EXISTS (SELECT 1 FROM brd_participants p
+		               WHERE p.post_id = brd_inbox.post_id AND p.kind = 'agent'
+		                 AND p.id = brd_inbox.agent_id)`,
 		now, claimToken, agentID, entryID, cutoff,
 	)
 	if err != nil {
@@ -1084,7 +1108,7 @@ func (s *Store) RecordAutomationAdmission(ctx context.Context, agentID, postID, 
 	now := s.now()
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE brd_automations
-		 SET session_id = ?, last_turn_at = ?, turns = turns + 1, updated_at = ?
+		 SET session_id = ?, last_turn_at = ?, updated_at = ?
 		 WHERE agent_id = ? AND post_id = ?`,
 		sessionID, now, now, agentID, postID,
 	); err != nil {
