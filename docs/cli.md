@@ -14,7 +14,7 @@ installed version.
 | `acolyte delete <name\|workspace>` | Remove an agent from the registry; the workspace folder is kept. |
 | `acolyte attach [--agent-name <n>] [--session-id <id>]` | Attach the OpenCode TUI to the agent session ([`orchestrator/daemon.md`](orchestrator/daemon.md)). |
 | `acolyte inspect --session-id <id>` | Merge OpenCode history with communication routing events (`--no-opencode`, `--no-comm`, `--ndjson`, `--limit`). |
-| `acolyte run "<message>"` | Run one headless agent turn and print the reply (`--continue`, `--session-id`, `--json`, `--timeout`, `--verbose`). |
+| `acolyte run "<message>"` | Run one headless agent turn and print the reply (`--continue`, `--session-id`, `--json`, `--timeout`, `--verbose`). It never presents an interactive prompt: pending forms/permissions are settled automatically, and the command fails with `ErrInteractionUnsettled` if one cannot be settled. |
 
 ## Scheduling and messaging
 

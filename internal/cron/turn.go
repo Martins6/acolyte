@@ -40,7 +40,8 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 		Description: "Scheduled prompt: " + job.Title,
 		Metadata:    map[string]any{"cron_job": job.Title},
 	}, opencode.TurnConfig{
-		Workspace: agent.Workspace,
+		Workspace:     agent.Workspace,
+		OnInteraction: cronInteractionLogger(agent.Name, st),
 		OnAdmitted: func(admittedTurn opencode.Admitted) error {
 			// The callback means OpenCode accepted the input even if the marker
 			// write below fails, so the run is never misclassified as
@@ -108,4 +109,21 @@ func (s *Service) runPrompt(ctx context.Context, agent registry.Agent, st *store
 
 func cronThread(job orch.CronJob) string {
 	return "cron:" + job.ID
+}
+
+// cronInteractionLogger persists headless settlement outcomes as IDs-only
+// orchestrator audit rows. A logging failure never changes the turn.
+func cronInteractionLogger(agent string, st *store.Store) func(opencode.InteractionSettlement) {
+	return func(settlement opencode.InteractionSettlement) {
+		if st == nil {
+			return
+		}
+		level := "info"
+		if settlement.Err != nil {
+			level = "warn"
+		}
+		_ = st.Orch().AppendLog(level, "opencode:"+agent,
+			"headless "+settlement.Kind+" "+settlement.Action,
+			opencode.SettlementAuditMeta(settlement), settlement.Time)
+	}
 }

@@ -168,7 +168,9 @@ OpenCode, not these files: run `opencode auth login` to store them in OpenCode's
 
 **Routines** are named, headless behaviors the scheduler can run (`kind: routine`). Modules register
 them with an argument schema; `acolyte cron routine-list` dumps the catalog as JSON. Schedule one with
-`acolyte cron --title <t> --datetime <cron> --routine <name> [--routine-args '<json>'] …`.
+`acolyte cron --title <t> --datetime <cron> --routine <name> [--routine-args '<json>'] …`. Every
+routine turn is headless by construction: its pending forms/permissions are pre-swept and polled by
+the OpenCode client, and an interaction that cannot be settled fails the run instead of blocking.
 
 > Dream and heartbeat are implemented as prompt-guided routines. Dream writes conservatively by
 > default and supports `acolyte cron --dry-run`; heartbeat replies `NOTIFY: <message>` only when

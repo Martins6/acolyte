@@ -2,6 +2,7 @@ package comm
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/martins6/acolyte/internal/opencode"
+	"github.com/martins6/acolyte/internal/registry"
 	"github.com/martins6/acolyte/internal/store"
 	"github.com/martins6/acolyte/internal/storepool"
 )
@@ -164,5 +166,46 @@ func TestActivityRecorderNeverReturnsError(t *testing.T) {
 	}
 	if err := (ActivityRecorder{Agent: "valet"}).Handler(st)(event); err != nil {
 		t.Fatalf("Handler(closed store) error: %v", err)
+	}
+}
+
+func TestInteractionRecorderPersistsIDsOnly(t *testing.T) {
+	st := newActivityStore(t)
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	recorder := InteractionRecorder(registry.Agent{Name: "valet"}, st)
+
+	recorder(opencode.InteractionSettlement{
+		Time: now, SessionID: "ses_1", Kind: "form", ID: "frm_1",
+		Action: "cancelled", Message: "secret form title",
+	})
+	recorder(opencode.InteractionSettlement{
+		Time: now, SessionID: "ses_1", Kind: "permission", ID: "per_1",
+		Action: "sweep-failed", Err: errors.New("secret settlement error"),
+	})
+
+	logs, err := st.Orch().ListLogs(0)
+	if err != nil {
+		t.Fatalf("ListLogs() error: %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("logs = %+v, want 2 rows", logs)
+	}
+	if logs[0].Level != "info" || logs[1].Level != "warn" {
+		t.Errorf("levels = %q/%q, want info/warn", logs[0].Level, logs[1].Level)
+	}
+	if logs[0].Source != "opencode:valet" {
+		t.Errorf("source = %q", logs[0].Source)
+	}
+	for index, entry := range logs {
+		if strings.Contains(entry.Meta, "secret") {
+			t.Errorf("log %d leaked content: %q", index, entry.Meta)
+		}
+		var meta map[string]string
+		if err := json.Unmarshal([]byte(entry.Meta), &meta); err != nil {
+			t.Fatalf("log %d meta %q: %v", index, entry.Meta, err)
+		}
+		if len(meta) != 4 {
+			t.Errorf("log %d meta keys = %v, want IDs only", index, meta)
+		}
 	}
 }

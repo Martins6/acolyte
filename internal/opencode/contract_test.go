@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -59,6 +60,14 @@ func TestPinnedOpenAPIContract(t *testing.T) {
 	requirePathOps(t, spec,
 		"/api/session/{sessionID}/inbox", "get")
 	requirePathOps(t, spec,
+		"/api/session/{sessionID}/form", "get")
+	requirePathOps(t, spec,
+		"/api/session/{sessionID}/form/{formID}", "delete")
+	requirePathOps(t, spec,
+		"/api/session/{sessionID}/permission", "get")
+	requirePathOps(t, spec,
+		"/api/session/{sessionID}/permission/{requestID}/reply", "post")
+	requirePathOps(t, spec,
 		"/api/session/{sessionID}/context", "get")
 	requirePathOps(t, spec,
 		"/api/session/{sessionID}/message", "get")
@@ -84,13 +93,17 @@ func TestPinnedOpenAPIContract(t *testing.T) {
 	requireRequestBodyProperties(t, spec,
 		"/api/session/{sessionID}/model", "post", "model")
 	requireRequestBodyProperties(t, spec,
+		"/api/session/{sessionID}/permission/{requestID}/reply", "post", "decision", "message")
+	requireRequestBodyProperties(t, spec,
 		"/api/experimental/session/import", "post", "info", "messages", "location")
 
 	// Query parameters the thin client uses (or may use) on list/stream reads.
 	requireQueryParameters(t, spec,
-		"/api/session", "get", "limit", "order", "cursor")
+		"/api/session", "get", "limit", "order", "cursor", "parentID")
 	requireQueryParameters(t, spec,
 		"/api/session/{sessionID}/message", "get", "limit", "order", "cursor")
+	requireQueryParameters(t, spec,
+		"/api/session/{sessionID}/form/{formID}", "delete", "message")
 	requireQueryParameters(t, spec,
 		"/api/event", "get", "types")
 
@@ -118,6 +131,17 @@ func TestPinnedOpenAPIContract(t *testing.T) {
 	requireSchema(t, spec, "SessionMessagesResponse")
 	requireSchema(t, spec, "SessionTransfer.Data")
 	requireSchemaProperties(t, spec, "SessionTransfer.Data", "info", "messages")
+	requireSchema(t, spec, "Form.Info")
+	requireSchemaProperties(t, spec, "Form.Info", "id", "sessionID", "title", "metadata")
+	requireSchema(t, spec, "Form.Info_1")
+	requireSchemaProperties(t, spec, "Form.Info_1", "id", "sessionID", "title", "metadata")
+	requireSchema(t, spec, "Permission.Request")
+	requireSchemaProperties(t, spec, "Permission.Request", "id", "sessionID", "action", "resources", "message")
+	requireSchema(t, spec, "Permission.Reply")
+	requireSchema(t, spec, "form.created")
+	requireSchemaPathProperties(t, spec, "form.created", []string{"data", "form"}, "id", "sessionID")
+	requireSchema(t, spec, "permission.asked")
+	requireSchemaPathProperties(t, spec, "permission.asked", []string{"data"}, "id", "sessionID")
 	requireSchema(t, spec, "V2EventEncoded")
 	requireSchema(t, spec, "V2Event")
 	requireSchema(t, spec, "session.idle")
@@ -213,19 +237,62 @@ func requireQueryParameters(t *testing.T, spec openAPISpec, path, method string,
 
 func requireSchemaProperties(t *testing.T, spec openAPISpec, name string, properties ...string) {
 	t.Helper()
+	shape := requireSchemaShape(t, spec, name)
+	for _, property := range properties {
+		if _, ok := shape.Properties[property]; !ok {
+			t.Errorf("schema %s is missing property %s", name, property)
+		}
+	}
+}
+
+// openAPISchemaShape is the subset of a schema node the contract test walks.
+// A property may be an inline object or a $ref to another component schema.
+type openAPISchemaShape struct {
+	Ref        string                     `json:"$ref"`
+	Properties map[string]json.RawMessage `json:"properties"`
+}
+
+// requireSchemaPathProperties walks a property path from a component schema,
+// resolving $ref nodes, and asserts the named properties exist on the final
+// node. It guards nested event payloads that a top-level check cannot see.
+func requireSchemaPathProperties(t *testing.T, spec openAPISpec, name string, path []string, properties ...string) {
+	t.Helper()
+	shape := requireSchemaShape(t, spec, name)
+	for _, step := range path {
+		raw, ok := shape.Properties[step]
+		if !ok {
+			t.Fatalf("schema %s is missing property %s", name, step)
+		}
+		shape = decodeSchemaShape(t, name+"."+step, raw)
+		if shape.Ref != "" {
+			refName := strings.TrimPrefix(shape.Ref, "#/components/schemas/")
+			if refName == shape.Ref {
+				t.Fatalf("schema %s.%s has unsupported $ref %q", name, step, shape.Ref)
+			}
+			shape = requireSchemaShape(t, spec, refName)
+		}
+	}
+	for _, property := range properties {
+		if _, ok := shape.Properties[property]; !ok {
+			t.Errorf("schema %s path %s is missing property %s", name, strings.Join(path, "."), property)
+		}
+	}
+}
+
+func requireSchemaShape(t *testing.T, spec openAPISpec, name string) openAPISchemaShape {
+	t.Helper()
 	raw, ok := spec.Components.Schemas[name]
 	if !ok {
 		t.Fatalf("pinned OpenAPI spec is missing schema %s", name)
 	}
-	var schema struct {
-		Properties map[string]json.RawMessage `json:"properties"`
-	}
-	if err := json.Unmarshal(raw, &schema); err != nil {
+	return decodeSchemaShape(t, name, raw)
+}
+
+func decodeSchemaShape(t *testing.T, name string, raw json.RawMessage) openAPISchemaShape {
+	t.Helper()
+	var shape openAPISchemaShape
+	if err := json.Unmarshal(raw, &shape); err != nil {
 		t.Fatalf("decode schema %s: %v", name, err)
 	}
-	for _, property := range properties {
-		if _, ok := schema.Properties[property]; !ok {
-			t.Errorf("schema %s is missing property %s", name, property)
-		}
-	}
+	return shape
 }

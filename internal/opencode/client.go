@@ -316,8 +316,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		if !retry || !time.Now().Add(wait).Before(deadline) {
 			// The call cannot be replayed (or its retry hint is outside the
 			// window), but the endpoint may still have moved. Recover it so
-			// later calls work.
-			if c.needsRecover(err) {
+			// later calls work. A headless settlement failure must return
+			// promptly instead of paying a recovery delay.
+			if c.needsRecover(err) && !failFastInteraction(ctx) {
 				c.recoverEndpoint(ctx, time.Now().Add(c.retryTimeout))
 			}
 			return err
@@ -327,7 +328,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 			// The caller is gone, but a stopping service still needs to be
 			// rediscovered for later calls. Recover on a context that the
 			// cancellation cannot abort, bounded by a fresh retry window.
-			if c.needsRecover(err) {
+			if c.needsRecover(err) && !failFastInteraction(ctx) {
 				c.recoverEndpoint(context.WithoutCancel(ctx), time.Now().Add(c.retryTimeout))
 			}
 			return err
@@ -864,4 +865,120 @@ func (c *Client) InboxPending(ctx context.Context, sessionID, itemID string) (bo
 		}
 	}
 	return false, nil
+}
+
+// FormInfo is a pending form owned by a session (OpenCode Form.Info). The
+// metadata carries the form kind; question forms use kind "question".
+type FormInfo struct {
+	ID        string         `json:"id"`
+	SessionID string         `json:"sessionID"`
+	Title     string         `json:"title"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+// PermissionRequest is one pending permission request owned by a session
+// (OpenCode Permission.Request).
+type PermissionRequest struct {
+	ID        string   `json:"id"`
+	SessionID string   `json:"sessionID"`
+	Action    string   `json:"action"`
+	Resources []string `json:"resources"`
+	Message   string   `json:"message,omitempty"`
+}
+
+// ListForms returns the pending forms for a session.
+func (c *Client) ListForms(ctx context.Context, sessionID string) ([]FormInfo, error) {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/form"
+	var resp struct {
+		Data []FormInfo `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// CancelForm cancels a pending form, optionally telling the asker why it was
+// not answered.
+func (c *Client) CancelForm(ctx context.Context, sessionID, formID, message string) error {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/form/" + url.PathEscape(formID)
+	if message != "" {
+		path += "?" + url.Values{"message": []string{message}}.Encode()
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// ListPermissions returns the pending permission requests for a session.
+func (c *Client) ListPermissions(ctx context.Context, sessionID string) ([]PermissionRequest, error) {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/permission"
+	var resp struct {
+		Data []PermissionRequest `json:"data"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// ReplyPermission answers one pending permission request. decision is one of
+// the PermissionDecision* constants.
+func (c *Client) ReplyPermission(ctx context.Context, sessionID, requestID, decision, message string) error {
+	path := "/api/session/" + url.PathEscape(sessionID) + "/permission/" +
+		url.PathEscape(requestID) + "/reply"
+	body := map[string]any{"decision": decision}
+	if message != "" {
+		body["message"] = message
+	}
+	return c.do(ctx, http.MethodPost, path, body, nil)
+}
+
+// Child session pagination bounds, vars so tests can shrink them.
+var (
+	childSessionPageSize = 100
+	childSessionMaxPages = 20
+)
+
+// ListChildSessions returns every session whose parent is parentID. The
+// session list is cursor-paginated; the walk is bounded so a malformed cursor
+// cannot loop forever.
+func (c *Client) ListChildSessions(ctx context.Context, parentID string) ([]SessionInfo, error) {
+	var children []SessionInfo
+	cursor := ""
+	for page := 0; page < childSessionMaxPages; page++ {
+		values := url.Values{}
+		values.Set("parentID", parentID)
+		values.Set("limit", strconv.Itoa(childSessionPageSize))
+		if cursor != "" {
+			values.Set("cursor", cursor)
+		}
+		var resp struct {
+			Data   []SessionInfo `json:"data"`
+			Cursor struct {
+				Previous string `json:"previous"`
+				Next     string `json:"next"`
+			} `json:"cursor"`
+		}
+		if err := c.do(ctx, http.MethodGet, "/api/session?"+values.Encode(), nil, &resp); err != nil {
+			return nil, err
+		}
+		children = append(children, resp.Data...)
+		if resp.Cursor.Next == "" {
+			return children, nil
+		}
+		cursor = resp.Cursor.Next
+		if page == childSessionMaxPages-1 {
+			return nil, fmt.Errorf("opencode: child session list exceeded %d pages", childSessionMaxPages)
+		}
+	}
+	return children, nil
+}
+
+// IsInteractionAlreadySettled reports whether err is the service's normal
+// "already answered/cancelled" response for a form or permission request.
+func IsInteractionAlreadySettled(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusConflict
 }

@@ -217,6 +217,7 @@ func (r *Router) HandleInbound(ctx context.Context, agent registry.Agent, env en
 	}
 
 	cfg := opencode.TurnConfig{Workspace: agent.Workspace, Timeout: liveTurnTimeout}
+	cfg.OnInteraction = InteractionRecorder(agent, st)
 	if r.events != nil {
 		cfg.OnEvent = r.events(agent, st)
 	}

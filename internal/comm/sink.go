@@ -149,6 +149,7 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 		}
 	}
 	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
+	cfg.OnInteraction = InteractionRecorder(agent, st)
 	if s.Activity != nil {
 		recorder := *s.Activity
 		if strings.TrimSpace(recorder.Agent) == "" {

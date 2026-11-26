@@ -19,7 +19,7 @@ import (
 
 func routineTestClient(t *testing.T, handler http.HandlerFunc) *opencode.Client {
 	t.Helper()
-	server := httptest.NewServer(handler)
+	server := httptest.NewServer(routineSettlementStub(handler))
 	t.Cleanup(server.Close)
 	return opencode.NewClient(server.URL, "pw")
 }
