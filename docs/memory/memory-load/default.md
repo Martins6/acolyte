@@ -8,7 +8,7 @@ native instruction/skill assembly — no custom plumbing.
 
 ## How it works
 - **`AGENTS.md`** is the hub/index: it names the persona files and how to use them.
-- **Persona files** (`.acolyte/*.md` — `CONFIG`, `SOUL`, `TOOLS`, `USER`, `HEARTBEAT`) are loaded via
+- **Persona files** (`.acolyte/*.md` — `CONFIG`, `SOUL`, `TOOLS`, `USER`, `WORKSPACE`, `HEARTBEAT`) are loaded via
   the OpenCode `instructions` array, so they are **always-in-context**.
 - **Skills** (`.agents/skills/`) are auto-discovered by OpenCode and advertised with their
   `description`; the model loads bodies on demand via the `skill` tool.
