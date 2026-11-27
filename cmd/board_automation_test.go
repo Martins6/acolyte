@@ -672,11 +672,14 @@ func TestBoardInboxPromoteSkipsAutomationSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open() error: %v", err)
 	}
-	defer perAgent.Close()
 	if _, err := perAgent.Orch().UpsertSession(
 		"board:"+result.Post.ID+":scribe", "ses_board", time.Now().UTC(),
 	); err != nil {
+		perAgent.Close()
 		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if err := perAgent.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
 	}
 
 	if err := runBoardInboxPromote(ctx, &bytes.Buffer{}, boardInboxPromoteOptions{
@@ -728,11 +731,14 @@ func TestBoardInboxPromoteRejectsAutomationSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Open() error: %v", err)
 	}
-	defer perAgent.Close()
 	if _, err := perAgent.Orch().UpsertSession(
 		"board:"+result.Post.ID+":scribe", "ses_board", time.Now().UTC(),
 	); err != nil {
+		perAgent.Close()
 		t.Fatalf("UpsertSession() error: %v", err)
+	}
+	if err := perAgent.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
 	}
 
 	err = runBoardInboxPromote(ctx, &bytes.Buffer{}, boardInboxPromoteOptions{
