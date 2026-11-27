@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -656,7 +657,19 @@ func (r *SetResult) apply(st *store.Store, a registry.Agent) error {
 // applyMutations applies the planned job, setting, and registry writes after
 // the opencode.jsonc edit has been staged. The caller rolls that edit back if
 // any of these fail.
-func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) error {
+func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) (err error) {
+	if len(r.Files) > 0 {
+		if err := workspace.ApplyArtifactChanges(a.Workspace, r.Files); err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				if revertErr := workspace.RevertArtifactChanges(a.Workspace, r.Files); revertErr != nil {
+					err = errors.Join(err, fmt.Errorf("config: rollback board artifacts: %w", revertErr))
+				}
+			}
+		}()
+	}
 	// Job mutations run before settings and identity writes: if a user job
 	// grabbed the capability title between plan and apply, the conditional
 	// mutation refuses before any setting changes, and the caller restores
@@ -704,16 +717,6 @@ func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) error {
 			return fmt.Errorf("config: unknown job action %q", change.Action)
 		}
 	}
-	for _, change := range r.Settings {
-		if err := applySetting(st, change); err != nil {
-			return err
-		}
-	}
-	if len(r.Files) > 0 {
-		if err := workspace.ApplyArtifactChanges(a.Workspace, r.Files); err != nil {
-			return err
-		}
-	}
 	if r.Description != nil {
 		reg, err := registry.OpenDefault()
 		if err != nil {
@@ -723,6 +726,13 @@ func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) error {
 		updated := a
 		updated.Description = *r.Description
 		if err := reg.Update(updated); err != nil {
+			return err
+		}
+	}
+	// Settings are the last durable write. If one fails, the deferred file
+	// rollback restores the artifact state.
+	for _, change := range r.Settings {
+		if err := applySetting(st, change); err != nil {
 			return err
 		}
 	}

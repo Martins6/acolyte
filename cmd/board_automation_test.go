@@ -409,9 +409,9 @@ func TestBoardAutomationReconcilesStaleClaim(t *testing.T) {
 	if claimed != entry.ID || stale {
 		t.Fatalf("claim = %q stale=%v, want %q", claimed, stale, entry.ID)
 	}
-	ok, err := st.ReserveAutomationTurn(ctx, "scribe", result.Post.ID, 2*time.Minute, 20)
+	ok, err := st.ReserveAutomationTurnForEntry(ctx, "scribe", result.Post.ID, entry.ID, 2*time.Minute, 20)
 	if err != nil || !ok {
-		t.Fatalf("ReserveAutomationTurn() = %v, %v", ok, err)
+		t.Fatalf("ReserveAutomationTurnForEntry() = %v, %v", ok, err)
 	}
 	if _, err := st.DB().Exec(
 		`UPDATE brd_automations SET session_id = 'ses_cli', last_turn_at = ?
@@ -698,6 +698,18 @@ func TestBoardInboxPromoteSkipsAutomationSession(t *testing.T) {
 	}
 	if len(all) != 1 || all[0].PromotionSessionID != "ses_cli" {
 		t.Fatalf("promotion session = %+v, want a fresh main session", all)
+	}
+	perAgent, err = store.Open(scribeWS)
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+	defer perAgent.Close()
+	session, ok, err := perAgent.Orch().GetSessionByThread("promote:scribe")
+	if err != nil {
+		t.Fatalf("GetSessionByThread() error: %v", err)
+	}
+	if !ok || session.OpenCodeSessionID != "ses_cli" {
+		t.Errorf("promote mapping = %+v, ok=%v", session, ok)
 	}
 }
 

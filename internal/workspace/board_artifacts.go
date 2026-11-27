@@ -309,20 +309,52 @@ func checkArtifactParent(workspace, path, relative string) error {
 
 // ApplyArtifactChanges writes or deletes the planned files atomically. Parent
 // directories are created with openat/mkdirat and O_NOFOLLOW so a symlinked
-// artifact directory cannot redirect writes outside the workspace.
+// artifact directory cannot redirect writes outside the workspace. If a later
+// change fails, earlier changes are reverted.
 func ApplyArtifactChanges(workspacePath string, changes []ArtifactChange) error {
+	applied := make([]ArtifactChange, 0, len(changes))
 	for _, change := range changes {
+		if err := applyArtifactChange(workspacePath, change); err != nil {
+			if revertErr := RevertArtifactChanges(workspacePath, applied); revertErr != nil {
+				return errors.Join(err, fmt.Errorf("workspace: rollback artifacts: %w", revertErr))
+			}
+			return err
+		}
+		applied = append(applied, change)
+	}
+	return nil
+}
+
+func applyArtifactChange(workspacePath string, change ArtifactChange) error {
+	if change.Delete {
+		return deleteArtifactNoFollow(workspacePath, change.Path)
+	}
+	return writeArtifactNoFollow(workspacePath, change.Path, change.After)
+}
+
+// RevertArtifactChanges restores the previous state of already-applied
+// artifact changes in reverse order.
+func RevertArtifactChanges(workspacePath string, changes []ArtifactChange) error {
+	var errs []error
+	for i := len(changes) - 1; i >= 0; i-- {
+		change := changes[i]
 		if change.Delete {
-			if err := deleteArtifactNoFollow(workspacePath, change.Path); err != nil {
-				return err
+			if err := writeArtifactNoFollow(workspacePath, change.Path, change.Before); err != nil {
+				errs = append(errs, err)
 			}
 			continue
 		}
-		if err := writeArtifactNoFollow(workspacePath, change.Path, change.After); err != nil {
-			return err
+		if change.Action == "create" && change.Before == "" {
+			if err := deleteArtifactNoFollow(workspacePath, change.Path); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if err := writeArtifactNoFollow(workspacePath, change.Path, change.Before); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func writeArtifactNoFollow(workspace, relative, content string) error {

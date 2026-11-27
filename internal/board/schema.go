@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS brd_inbox (
   promotion_token      TEXT NOT NULL DEFAULT '',
   promotion_marker     TEXT NOT NULL DEFAULT '',
   promotion_session_id TEXT NOT NULL DEFAULT '',
+  turn_reserved_at     DATETIME,
   PRIMARY KEY (agent_id, entry_id)
 );
 CREATE INDEX IF NOT EXISTS brd_inbox_agent ON brd_inbox(agent_id, read_at);

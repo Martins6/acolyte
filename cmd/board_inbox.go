@@ -377,7 +377,18 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 		Stores: pool,
 		Turn:   client,
 		OnSession: func(sessionID string) error {
-			return st.MarkPromotionSession(ctx, actor.ID, token, sessionID)
+			if err := st.MarkPromotionSession(ctx, actor.ID, token, sessionID); err != nil {
+				return err
+			}
+			perAgent, release, err := pool.Acquire(agent.Workspace)
+			if err != nil {
+				return err
+			}
+			defer release()
+			_, err = perAgent.Orch().UpsertSession(
+				"promote:"+agent.Name, sessionID, time.Now().UTC(),
+			)
+			return err
 		},
 	}
 	reply, sessionID, err := sink.Inbox(ctx, agent, opts.SessionID, boardPromoteText(view, filtered, marker), map[string]any{

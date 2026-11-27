@@ -1271,19 +1271,40 @@ func (s *Store) ClaimPendingAutomated(ctx context.Context, agentID, postID, clai
 	return entryID, claimedAt.Valid, nil
 }
 
-// ReserveAutomationTurn atomically reserves the cooldown and one turn of the
-// per-post budget before an admission. It returns false when the post is
-// paused, cooling down, or at the cap.
-func (s *Store) ReserveAutomationTurn(ctx context.Context, agentID, postID string, cooldown time.Duration, maxTurns int) (bool, error) {
+// ReserveAutomationTurnForEntry atomically reserves the cooldown and one turn
+// of the per-post budget for a specific inbox entry. If the entry already has
+// a reservation, it is reused instead of incrementing the counter again.
+func (s *Store) ReserveAutomationTurnForEntry(ctx context.Context, agentID, postID, entryID string, cooldown time.Duration, maxTurns int) (bool, error) {
 	if maxTurns <= 0 {
 		return false, fmt.Errorf("%w: max turns must be > 0", ErrInvalid)
 	}
 	if cooldown < 0 {
 		cooldown = 0
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("board: begin reserve automation turn: %w", err)
+	}
+	defer tx.Rollback()
+
+	var reserved sql.NullTime
+	err = tx.QueryRowContext(ctx,
+		`SELECT turn_reserved_at FROM brd_inbox WHERE agent_id = ? AND entry_id = ?`,
+		agentID, entryID,
+	).Scan(&reserved)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("%w: inbox entry %q", ErrNotFound, entryID)
+	}
+	if err != nil {
+		return false, fmt.Errorf("board: read automation reservation: %w", err)
+	}
+	if reserved.Valid {
+		return true, nil
+	}
+
 	now := s.now()
 	cutoff := now.Add(-cooldown)
-	result, err := s.db.ExecContext(ctx,
+	result, err := tx.ExecContext(ctx,
 		`UPDATE brd_automations
 		 SET last_turn_at = ?, turns = turns + 1, updated_at = ?
 		 WHERE agent_id = ? AND post_id = ? AND paused_at IS NULL
@@ -1297,7 +1318,20 @@ func (s *Store) ReserveAutomationTurn(ctx context.Context, agentID, postID strin
 	if err != nil {
 		return false, fmt.Errorf("board: reserve automation turn: %w", err)
 	}
-	return rows > 0, nil
+	if rows == 0 {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE brd_inbox SET turn_reserved_at = ?
+		 WHERE agent_id = ? AND entry_id = ?`,
+		now, agentID, entryID,
+	); err != nil {
+		return false, fmt.Errorf("board: record automation reservation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("board: commit automation reservation: %w", err)
+	}
+	return true, nil
 }
 
 // RecordAutomationSession stores the dedicated session after an admission

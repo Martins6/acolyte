@@ -637,6 +637,35 @@ func TestSetCommunicationBoard(t *testing.T) {
 	}
 }
 
+func TestSetCommunicationBoardDoesNotPersistOnArtifactFailure(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(ws, ".agents", "skills", "board")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err := SetConfig(st, target, SetOptions{
+		Key: "communication.board", Value: `{"mode":"skill"}`,
+	})
+	if err == nil {
+		t.Fatal("SetConfig() succeeded with a symlinked artifact parent")
+	}
+	if _, ok, err := st.Orch().GetSetting("communication.board"); err != nil {
+		t.Fatalf("GetSetting() error: %v", err)
+	} else if ok {
+		t.Fatal("communication.board setting was persisted despite artifact failure")
+	}
+	agents, err := os.ReadFile(filepath.Join(ws, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if strings.Contains(string(agents), "acolyte:board") {
+		t.Errorf("AGENTS.md marker was applied despite failure:\n%s", agents)
+	}
+}
+
 func TestSetDryRunLeavesStateUnchanged(t *testing.T) {
 	ws := createRuntimeAgent(t, `{"schedule": {"timezone": "UTC"}}`)
 	path := filepath.Join(ws, "opencode.jsonc")

@@ -121,6 +121,32 @@ func TestApplyArtifactChangesRejectsSymlinkParent(t *testing.T) {
 	}
 }
 
+func TestApplyArtifactChangesRollsBack(t *testing.T) {
+	ws := t.TempDir()
+	writeArtifact(t, filepath.Join(ws, "AGENTS.md"), "old")
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(ws, ".acolyte")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	err := ApplyArtifactChanges(ws, []ArtifactChange{
+		{Path: "AGENTS.md", Before: "old", After: "new", Action: "update"},
+		{Path: ".acolyte/CONFIG.md", After: "x", Action: "create"},
+	})
+	if err == nil {
+		t.Fatal("ApplyArtifactChanges() succeeded through a symlinked parent")
+	}
+	raw, readErr := os.ReadFile(filepath.Join(ws, "AGENTS.md"))
+	if readErr != nil {
+		t.Fatalf("read AGENTS.md: %v", readErr)
+	}
+	if string(raw) != "old" {
+		t.Errorf("AGENTS.md = %q, want the previous content", raw)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "CONFIG.md")); !os.IsNotExist(statErr) {
+		t.Errorf("external file created: %v", statErr)
+	}
+}
+
 func TestPlanBoardArtifactsRejectsSymlink(t *testing.T) {
 	ws := t.TempDir()
 	target := filepath.Join(t.TempDir(), "outside.md")

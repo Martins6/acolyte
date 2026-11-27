@@ -163,7 +163,8 @@ an agent can never notify another agent directly.
   read, and record the session. An explicit `--session-id` is rejected unless it
   belongs to the selected agent and is a main session; when omitted, a non-board
   session is selected (or a fresh one is created), never a dedicated automation
-  session. Only the pings in the promotion snapshot are marked; pings queued
+  session. A created session is mapped as `promote:<agent>` so later promotions
+  reuse it. Only the pings in the promotion snapshot are marked; pings queued
   afterwards stay unread. A stale or failed promotion is reconciled by its
   marker before retrying. The agent's reply can reach the user channel.
 - `board inbox --retry` — retry pending automated admissions and reconcile
@@ -193,6 +194,8 @@ for that post. It does not affect other participants.
 - Each ping is claimed atomically before admission. A stale claim (for example
   after a crash) is reconciled by scanning the automation session for the
   entry marker before retrying, so the same ping is not admitted twice.
+- Turn reservations are per inbox entry: a retry of the same entry reuses its
+  reservation instead of consuming another turn from the post budget.
 - The dedicated session ID is persisted before the synthetic request, so a
   crash or ambiguous timeout still leaves a session to reconcile. If history is
   truncated before the marker is found, the claim is retained instead of

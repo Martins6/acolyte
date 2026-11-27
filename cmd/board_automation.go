@@ -117,7 +117,7 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		}
 	}
 
-	reserved, err := e.Board.ReserveAutomationTurn(ctx, agentID, postID, boardAutomationCooldown, boardAutomationMaxTurns)
+	reserved, err := e.Board.ReserveAutomationTurnForEntry(ctx, agentID, postID, entryID, boardAutomationCooldown, boardAutomationMaxTurns)
 	if err != nil {
 		_ = e.Board.ReleaseInboxClaim(ctx, agentID, entryID)
 		return false, err
