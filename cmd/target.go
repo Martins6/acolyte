@@ -63,3 +63,25 @@ func verifySessionMapping(st *store.Store, sessionID string) error {
 	}
 	return nil
 }
+
+// verifyPromotionSession is verifySessionMapping plus a main-session check:
+// promotion must not run in a dedicated board automation or routine session.
+func verifyPromotionSession(st *store.Store, sessionID string) error {
+	if err := verifySessionMapping(st, sessionID); err != nil {
+		return err
+	}
+	session, ok, err := st.Orch().GetSessionByOpenCodeID(sessionID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("session %q is not mapped to this agent", sessionID)
+	}
+	switch {
+	case strings.HasPrefix(session.Thread, "board:"):
+		return fmt.Errorf("session %q is a board automation session; promotion needs a main session", sessionID)
+	case strings.HasPrefix(session.Thread, "cron:"), strings.HasPrefix(session.Thread, "heartbeat:"):
+		return fmt.Errorf("session %q is a routine session; promotion needs a main session", sessionID)
+	}
+	return nil
+}

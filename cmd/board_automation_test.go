@@ -12,6 +12,7 @@ import (
 
 	"github.com/martins6/acolyte/internal/board"
 	"github.com/martins6/acolyte/internal/opencode"
+	"github.com/martins6/acolyte/internal/store"
 )
 
 func openBoardTestStore(t *testing.T) *board.Store {
@@ -636,6 +637,111 @@ func TestBoardInboxPromote(t *testing.T) {
 	}
 	if len(all) != 1 || all[0].PromotionSessionID != "ses_cli" || all[0].ReadAt == nil {
 		t.Errorf("promoted inbox row = %+v", all)
+	}
+}
+
+func TestBoardInboxPromoteSkipsAutomationSession(t *testing.T) {
+	_, scribeWS := setupBoardCLI(t)
+	fake := &fakeCLITurn{}
+	withFakeTurn(t, fake)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+	ctx := context.Background()
+
+	result, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "main session",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	if err := runBoardSubscribe(ctx, &bytes.Buffer{}, boardSubscribeOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+		Aware:  true,
+	}); err != nil {
+		t.Fatalf("runBoardSubscribe() error: %v", err)
+	}
+	if err := runBoardMessage(ctx, &bytes.Buffer{}, boardMessageOptions{
+		Target: valet,
+		Post:   result.Post.ID,
+		Text:   "ping",
+	}); err != nil {
+		t.Fatalf("runBoardMessage() error: %v", err)
+	}
+	perAgent, err := store.Open(scribeWS)
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+	defer perAgent.Close()
+	if _, err := perAgent.Orch().UpsertSession(
+		"board:"+result.Post.ID+":scribe", "ses_board", time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+
+	if err := runBoardInboxPromote(ctx, &bytes.Buffer{}, boardInboxPromoteOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+	}); err != nil {
+		t.Fatalf("runBoardInboxPromote() error: %v", err)
+	}
+	if fake.synthCalls != 1 {
+		t.Fatalf("promotion turns = %d, want 1", fake.synthCalls)
+	}
+	st := openBoardTestStore(t)
+	all, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(all) != 1 || all[0].PromotionSessionID != "ses_cli" {
+		t.Fatalf("promotion session = %+v, want a fresh main session", all)
+	}
+}
+
+func TestBoardInboxPromoteRejectsAutomationSession(t *testing.T) {
+	_, scribeWS := setupBoardCLI(t)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+	ctx := context.Background()
+
+	result, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "reject board session",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	if err := runBoardSubscribe(ctx, &bytes.Buffer{}, boardSubscribeOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+		Aware:  true,
+	}); err != nil {
+		t.Fatalf("runBoardSubscribe() error: %v", err)
+	}
+	if err := runBoardMessage(ctx, &bytes.Buffer{}, boardMessageOptions{
+		Target: valet,
+		Post:   result.Post.ID,
+		Text:   "ping",
+	}); err != nil {
+		t.Fatalf("runBoardMessage() error: %v", err)
+	}
+	perAgent, err := store.Open(scribeWS)
+	if err != nil {
+		t.Fatalf("store.Open() error: %v", err)
+	}
+	defer perAgent.Close()
+	if _, err := perAgent.Orch().UpsertSession(
+		"board:"+result.Post.ID+":scribe", "ses_board", time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("UpsertSession() error: %v", err)
+	}
+
+	err = runBoardInboxPromote(ctx, &bytes.Buffer{}, boardInboxPromoteOptions{
+		Target:    scribe,
+		Post:      result.Post.ID,
+		SessionID: "ses_board",
+	})
+	if err == nil || !strings.Contains(err.Error(), "board automation session") {
+		t.Fatalf("runBoardInboxPromote(board session) error = %v", err)
 	}
 }
 

@@ -146,7 +146,7 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 	defer release()
 
 	if strings.TrimSpace(sessionID) == "" {
-		if session, ok, err := st.Orch().LatestSession(); err != nil {
+		if session, ok, err := st.Orch().LatestUserSession(); err != nil {
 			return "", "", err
 		} else if ok {
 			sessionID = session.OpenCodeSessionID

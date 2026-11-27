@@ -123,11 +123,14 @@ func (s *Store) LatestSession() (Session, bool, error) {
 	return session, true, nil
 }
 
-// LatestUserSession returns the most recently active non-cron session.
+// LatestUserSession returns the most recently active non-cron, non-board
+// session. Automation sessions are deliberately excluded: they are dedicated
+// background workers, not the agent's main conversation.
 func (s *Store) LatestUserSession() (Session, bool, error) {
 	var session Session
 	err := s.db.QueryRow(`SELECT `+sessionColumns+` FROM orch_sessions
 		WHERE thread NOT LIKE 'cron:%' AND thread NOT LIKE 'heartbeat:%'
+		  AND thread NOT LIKE 'board:%'
 		ORDER BY last_active_at DESC LIMIT 1`).Scan(
 		&session.ID, &session.Thread, &session.OpenCodeSessionID, &session.CreatedAt, &session.LastActiveAt,
 	)

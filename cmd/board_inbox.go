@@ -306,7 +306,7 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 		if err != nil {
 			return fmt.Errorf("board: open agent store: %w", err)
 		}
-		verifyErr := verifySessionMapping(perAgent, opts.SessionID)
+		verifyErr := verifyPromotionSession(perAgent, opts.SessionID)
 		release()
 		if verifyErr != nil {
 			return verifyErr
