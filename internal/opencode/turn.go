@@ -374,6 +374,12 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 	stopEvents := c.startEventObserver(turnCtx, info.ID, cfg.OnEvent)
 	defer stopEvents()
 
+	if cfg.OnSession != nil {
+		if err := cfg.OnSession(info.ID); err != nil {
+			return &TurnResult{SessionID: info.ID}, turnCause(turnCtx, fmt.Errorf("opencode: record session: %w", err))
+		}
+	}
+
 	item, err := c.Synthetic(turnCtx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, &PromptError{

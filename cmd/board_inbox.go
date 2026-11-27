@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/martins6/acolyte/internal/board"
 	"github.com/martins6/acolyte/internal/comm"
@@ -274,13 +275,14 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 	if err != nil {
 		return err
 	}
-	filtered := make([]board.InboxView, 0, len(items))
+	hasPing := false
 	for _, item := range items {
 		if item.PostID == view.ID {
-			filtered = append(filtered, item)
+			hasPing = true
+			break
 		}
 	}
-	if len(filtered) == 0 {
+	if !hasPing {
 		if opts.JSON {
 			return printBoardJSON(w, map[string]any{"post": view.ID, "promoted": 0})
 		}
@@ -297,44 +299,132 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 	if err != nil {
 		return fmt.Errorf("board: agent %q is not registered", actor.ID)
 	}
+	pool := storepool.New()
+	defer pool.CloseAll()
+	if opts.SessionID != "" {
+		perAgent, release, err := pool.Acquire(agent.Workspace)
+		if err != nil {
+			return fmt.Errorf("board: open agent store: %w", err)
+		}
+		verifyErr := verifySessionMapping(perAgent, opts.SessionID)
+		release()
+		if verifyErr != nil {
+			return verifyErr
+		}
+	}
 	client, err := openCodeEnsure(ctx)
 	if err != nil {
 		return fmt.Errorf("opencode service unavailable: %w", err)
 	}
-	pool := storepool.New()
-	defer pool.CloseAll()
-	sink := comm.OutboxSink{Stores: pool, Turn: client}
-	reply, sessionID, err := sink.Inbox(ctx, agent, opts.SessionID, boardPromoteText(view, filtered), map[string]any{
+
+	// Reconcile a stale promotion before claiming it again.
+	stale, staleSession, staleMarker, err := st.StalePromotion(ctx, actor.ID, view.ID, 10*time.Minute)
+	if err != nil {
+		return err
+	}
+	if len(stale) > 0 {
+		if staleSession != "" && staleMarker != "" {
+			promoted, truncated, scanErr := boardPromotionAdmitted(ctx, client, staleSession, staleMarker)
+			if scanErr != nil {
+				return scanErr
+			}
+			if promoted {
+				if err := st.MarkInboxPromoted(ctx, actor.ID, stale, staleSession); err != nil {
+					return err
+				}
+			} else if truncated {
+				return fmt.Errorf("board: promotion session %s history is truncated; cannot reconcile", staleSession)
+			} else if err := st.ReclaimPromotion(ctx, actor.ID, stale); err != nil {
+				return err
+			}
+		} else if err := st.ReclaimPromotion(ctx, actor.ID, stale); err != nil {
+			return err
+		}
+	}
+
+	token := board.NewClaimToken()
+	marker := boardPromotionMarker(token)
+	entryIDs, err := st.ClaimPromotion(ctx, actor.ID, view.ID, token, marker)
+	if err != nil {
+		return err
+	}
+	if len(entryIDs) == 0 {
+		if opts.JSON {
+			return printBoardJSON(w, map[string]any{"post": view.ID, "promoted": 0})
+		}
+		fmt.Fprintln(w, "No unread pings to promote.")
+		return nil
+	}
+	claimed := make(map[string]struct{}, len(entryIDs))
+	for _, id := range entryIDs {
+		claimed[id] = struct{}{}
+	}
+	items, err = st.Inbox(ctx, actor.ID, false)
+	if err != nil {
+		return err
+	}
+	filtered := make([]board.InboxView, 0, len(entryIDs))
+	for _, item := range items {
+		if item.PostID != view.ID {
+			continue
+		}
+		if _, ok := claimed[item.EntryID]; ok {
+			filtered = append(filtered, item)
+		}
+	}
+
+	sink := comm.OutboxSink{
+		Stores: pool,
+		Turn:   client,
+		OnSession: func(sessionID string) error {
+			return st.MarkPromotionSession(ctx, actor.ID, token, sessionID)
+		},
+	}
+	reply, sessionID, err := sink.Inbox(ctx, agent, opts.SessionID, boardPromoteText(view, filtered, marker), map[string]any{
 		"channel":  "agent-board",
 		"post_id":  view.ID,
-		"promoted": len(filtered),
+		"promoted": len(entryIDs),
 	})
 	if err != nil {
 		return err
 	}
-	if err := st.MarkInboxRead(ctx, actor.ID, view.ID); err != nil {
+	if err := st.MarkInboxPromoted(ctx, actor.ID, entryIDs, sessionID); err != nil {
 		return err
-	}
-	if sessionID != "" {
-		_ = st.MarkInboxSession(ctx, actor.ID, view.ID, sessionID)
 	}
 	result := map[string]any{
 		"post":       view.ID,
 		"session_id": sessionID,
-		"promoted":   len(filtered),
+		"promoted":   len(entryIDs),
 		"reply":      reply,
 	}
 	if opts.JSON {
 		return printBoardJSON(w, result)
 	}
-	fmt.Fprintf(w, "Promoted %d pings to session %s.\n", len(filtered), orDash(sessionID))
+	fmt.Fprintf(w, "Promoted %d pings to session %s.\n", len(entryIDs), orDash(sessionID))
 	if strings.TrimSpace(reply) != "" {
 		fmt.Fprintf(w, "Reply:\n%s\n", reply)
 	}
 	return nil
 }
 
-func boardPromoteText(view board.PostView, items []board.InboxView) string {
+func boardPromotionAdmitted(ctx context.Context, client turnClient, sessionID, marker string) (bool, bool, error) {
+	messages, truncated, err := client.SessionMessages(ctx, sessionID, 100)
+	if err != nil {
+		return false, false, err
+	}
+	for _, message := range messages {
+		if strings.Contains(message.Text, marker) {
+			return true, truncated, nil
+		}
+	}
+	return false, truncated, nil
+}
+
+func boardPromotionMarker(token string) string {
+	return "[[acolyte-board-promote:" + token + "]]"
+}
+
+func boardPromoteText(view board.PostView, items []board.InboxView, marker string) string {
 	var b strings.Builder
 	b.WriteString("ACOLYTE BOARD PROMOTION\n")
 	fmt.Fprintf(&b, "Post: %q (%s)\n", view.Title, view.ID)
@@ -350,5 +440,6 @@ func boardPromoteText(view board.PostView, items []board.InboxView) string {
 	b.WriteString("</untrusted_board_entries>\n")
 	fmt.Fprintf(&b, "Read: acolyte board show %s\n", view.ID)
 	fmt.Fprintf(&b, "Reply: acolyte board message %s \"...\"\n", view.ID)
+	fmt.Fprintf(&b, "Promotion marker: %s\n", marker)
 	return b.String()
 }

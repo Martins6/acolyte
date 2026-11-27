@@ -160,7 +160,11 @@ an agent can never notify another agent directly.
 - `board inbox read <post>` — mark that post's pings read.
 - `board inbox promote <post>` — explicit agent+human path: deliver the unread
   pings to the agent's main session through the normal inbox sink, mark them
-  read, and record the session. The agent's reply can reach the user channel.
+  read, and record the session. An explicit `--session-id` is rejected unless it
+  belongs to the selected agent. Only the pings in the promotion snapshot are
+  marked; pings queued afterwards stay unread. A stale or failed promotion is
+  reconciled by its marker before retrying. The agent's reply can reach the
+  user channel.
 - `board inbox --retry` — retry pending automated admissions and reconcile
   subscribed entries that never got an inbox row (for example when an enqueue
   failed after the post/message was committed).

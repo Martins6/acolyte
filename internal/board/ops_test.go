@@ -910,6 +910,65 @@ func TestRecordAutomationAdmissionDoesNotDoubleCount(t *testing.T) {
 	}
 }
 
+func TestMarkInboxPromotedOnlyTargets(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "promote target",
+		With: []string{"scribe"},
+	})
+	if err := st.Subscribe(ctx, scribe, post.ID, true); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+	first, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "first"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	second, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "second"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	for _, entry := range []Entry{first, second} {
+		if _, err := st.Enqueue(ctx, entry); err != nil {
+			t.Fatalf("Enqueue() error: %v", err)
+		}
+	}
+	token := "promote-token"
+	if _, err := st.ClaimPromotion(ctx, "scribe", post.ID, token, boardPromotionMarkerForTest(token)); err != nil {
+		t.Fatalf("ClaimPromotion() error: %v", err)
+	}
+	if err := st.MarkInboxPromoted(ctx, "scribe", []string{first.ID}, "ses_x"); err != nil {
+		t.Fatalf("MarkInboxPromoted() error: %v", err)
+	}
+	unread, err := st.Inbox(ctx, "scribe", false)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(unread) != 1 || unread[0].EntryID != second.ID {
+		t.Fatalf("unread = %+v, want only the second entry", unread)
+	}
+	all, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox(all) error: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all inbox = %+v", all)
+	}
+	for _, item := range all {
+		if item.EntryID == first.ID {
+			if item.ReadAt == nil || item.PromotionSessionID != "ses_x" {
+				t.Errorf("promoted row = %+v", item)
+			}
+		}
+	}
+}
+
+func boardPromotionMarkerForTest(token string) string {
+	return "[[acolyte-board-promote:" + token + "]]"
+}
+
 func TestReconcileInbox(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

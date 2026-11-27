@@ -31,6 +31,10 @@ type OutboxSink struct {
 	// empty Agent is filled from the agent passed to Inbox, so one sink can
 	// serve every registered agent.
 	Activity *ActivityRecorder
+	// OnSession, when non-nil, runs after the turn session is resolved and
+	// before the synthetic input is admitted. Promotion uses it to persist the
+	// target session first.
+	OnSession func(sessionID string) error
 }
 
 // DeliveryError carries the final delivery payload when an outbox enqueue
@@ -149,6 +153,7 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 		}
 	}
 	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
+	cfg.OnSession = s.OnSession
 	cfg.OnInteraction = InteractionRecorder(agent, st)
 	if s.Activity != nil {
 		recorder := *s.Activity

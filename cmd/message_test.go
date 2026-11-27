@@ -38,6 +38,7 @@ type fakeCLITurn struct {
 	admitConfigs  []opencode.TurnConfig
 	admitErr      error
 	admitErrOn    string
+	synthErr      error
 }
 
 func (f *fakeCLITurn) RunUserTurn(_ context.Context, sessionID, text string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
@@ -52,9 +53,22 @@ func (f *fakeCLITurn) RunUserTurn(_ context.Context, sessionID, text string, cfg
 	return result, f.userErr
 }
 
-func (f *fakeCLITurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+func (f *fakeCLITurn) RunSyntheticTurn(_ context.Context, sessionID string, _ opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.synthCalls++
-	return f.turnResult(), nil
+	effective := sessionID
+	if effective == "" {
+		effective = "ses_cli"
+	}
+	if cfg.OnSession != nil {
+		if err := cfg.OnSession(effective); err != nil {
+			return nil, err
+		}
+	}
+	result := f.turnResult()
+	if sessionID != "" {
+		result.SessionID = sessionID
+	}
+	return result, f.synthErr
 }
 
 func (f *fakeCLITurn) AdmitSyntheticTurn(_ context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {

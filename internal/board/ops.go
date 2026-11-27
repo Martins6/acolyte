@@ -939,6 +939,194 @@ func (s *Store) Enqueue(ctx context.Context, entry Entry) ([]Delivery, error) {
 	return deliveries, nil
 }
 
+// StalePromotion returns the oldest stale promotion claim for an agent+post.
+func (s *Store) StalePromotion(ctx context.Context, agentID, postID string, staleAfter time.Duration) (entryIDs []string, sessionID, marker string, err error) {
+	if staleAfter <= 0 {
+		staleAfter = 10 * time.Minute
+	}
+	cutoff := s.now().Add(-staleAfter)
+	var token string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT promotion_token FROM brd_inbox
+		 WHERE agent_id = ? AND post_id = ? AND read_at IS NULL
+		   AND promotion_claimed_at IS NOT NULL AND promotion_claimed_at < ?
+		   AND promotion_token <> ''
+		 ORDER BY promotion_claimed_at LIMIT 1`,
+		agentID, postID, cutoff,
+	).Scan(&token)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", "", nil
+	}
+	if err != nil {
+		return nil, "", "", fmt.Errorf("board: stale promotion: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT entry_id, promotion_session_id, promotion_marker FROM brd_inbox
+		 WHERE agent_id = ? AND post_id = ? AND promotion_token = ? AND read_at IS NULL
+		 ORDER BY created_at, entry_id`,
+		agentID, postID, token)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("board: stale promotion: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entryID, rowSession, rowMarker string
+		if err := rows.Scan(&entryID, &rowSession, &rowMarker); err != nil {
+			return nil, "", "", fmt.Errorf("board: stale promotion: %w", err)
+		}
+		entryIDs = append(entryIDs, entryID)
+		if sessionID == "" {
+			sessionID = rowSession
+		}
+		if marker == "" {
+			marker = rowMarker
+		}
+	}
+	return entryIDs, sessionID, marker, rows.Err()
+}
+
+// ReclaimPromotion releases a promotion claim so the entries can be claimed
+// again (for example after an inconclusive earlier attempt).
+func (s *Store) ReclaimPromotion(ctx context.Context, agentID string, entryIDs []string) error {
+	if len(entryIDs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("board: begin promotion reclaim: %w", err)
+	}
+	defer tx.Rollback()
+	for _, entryID := range entryIDs {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE brd_inbox
+			 SET promotion_claimed_at = NULL, promotion_token = '', promotion_marker = '',
+			     promotion_session_id = ''
+			 WHERE agent_id = ? AND entry_id = ? AND read_at IS NULL`,
+			agentID, entryID,
+		); err != nil {
+			return fmt.Errorf("board: reclaim promotion: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("board: commit promotion reclaim: %w", err)
+	}
+	return nil
+}
+
+// ClaimPromotion atomically claims the unread pings for a post.
+func (s *Store) ClaimPromotion(ctx context.Context, agentID, postID, token, marker string) ([]string, error) {
+	token = strings.TrimSpace(token)
+	marker = strings.TrimSpace(marker)
+	if token == "" || marker == "" {
+		return nil, fmt.Errorf("%w: promotion token and marker are required", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("board: begin promotion claim: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx,
+		`SELECT i.entry_id FROM brd_inbox i
+		 WHERE i.agent_id = ? AND i.post_id = ? AND i.read_at IS NULL
+		   AND i.promotion_claimed_at IS NULL
+		   AND EXISTS (SELECT 1 FROM brd_participants p
+		               WHERE p.post_id = i.post_id AND p.kind = 'agent' AND p.id = i.agent_id)
+		 ORDER BY i.created_at, i.entry_id`,
+		agentID, postID)
+	if err != nil {
+		return nil, fmt.Errorf("board: claim promotion: %w", err)
+	}
+	var candidates []string
+	for rows.Next() {
+		var entryID string
+		if err := rows.Scan(&entryID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("board: claim promotion: %w", err)
+		}
+		candidates = append(candidates, entryID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	now := s.now()
+	var claimed []string
+	for _, entryID := range candidates {
+		result, err := tx.ExecContext(ctx,
+			`UPDATE brd_inbox
+			 SET promotion_claimed_at = ?, promotion_token = ?, promotion_marker = '',
+			     promotion_session_id = ''
+			 WHERE agent_id = ? AND entry_id = ? AND read_at IS NULL
+			   AND promotion_claimed_at IS NULL`,
+			now, token, agentID, entryID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("board: claim promotion: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err == nil && rows > 0 {
+			claimed = append(claimed, entryID)
+		}
+	}
+	if len(claimed) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE brd_inbox SET promotion_marker = ?
+		 WHERE agent_id = ? AND promotion_token = ? AND read_at IS NULL`,
+		marker, agentID, token,
+	); err != nil {
+		return nil, fmt.Errorf("board: set promotion marker: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("board: commit promotion claim: %w", err)
+	}
+	return claimed, nil
+}
+
+// MarkPromotionSession records the target session before the promoted turn is
+// admitted.
+func (s *Store) MarkPromotionSession(ctx context.Context, agentID, token, sessionID string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE brd_inbox SET promotion_session_id = ?
+		 WHERE agent_id = ? AND promotion_token = ? AND read_at IS NULL`,
+		sessionID, agentID, token,
+	); err != nil {
+		return fmt.Errorf("board: mark promotion session: %w", err)
+	}
+	return nil
+}
+
+// MarkInboxPromoted marks exactly the promoted entries read and records their
+// session; pings queued after the snapshot stay unread.
+func (s *Store) MarkInboxPromoted(ctx context.Context, agentID string, entryIDs []string, sessionID string) error {
+	if len(entryIDs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("board: begin promotion complete: %w", err)
+	}
+	defer tx.Rollback()
+	now := s.now()
+	for _, entryID := range entryIDs {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE brd_inbox
+			 SET read_at = ?, promotion_session_id = ?, promotion_claimed_at = NULL,
+			     promotion_token = '', error = ''
+			 WHERE agent_id = ? AND entry_id = ? AND read_at IS NULL`,
+			now, sessionID, agentID, entryID,
+		); err != nil {
+			return fmt.Errorf("board: mark promotion complete: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("board: commit promotion complete: %w", err)
+	}
+	return nil
+}
+
 // MarkInboxRead marks every ping for an agent+post as read.
 func (s *Store) MarkInboxRead(ctx context.Context, agentID, postID string) error {
 	if _, err := s.db.ExecContext(ctx,

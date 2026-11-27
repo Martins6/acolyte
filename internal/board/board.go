@@ -163,19 +163,20 @@ func (a *Automation) Paused() bool { return a != nil && !a.PausedAt.IsZero() }
 
 // InboxItem is one queued board ping for an agent.
 type InboxItem struct {
-	AgentID     string     `json:"agent_id"`
-	EntryID     string     `json:"entry_id"`
-	PostID      string     `json:"post_id"`
-	CreatedAt   time.Time  `json:"created_at"`
-	ReadAt      *time.Time `json:"read_at,omitempty"`
-	ProcessedAt *time.Time `json:"processed_at,omitempty"`
-	Mode        string     `json:"mode"` // manual | automated
-	Aware       bool       `json:"aware"`
-	SessionID   string     `json:"session_id,omitempty"`
-	MessageID   string     `json:"message_id,omitempty"`
-	Attempts    int        `json:"attempts"`
-	Error       string     `json:"error,omitempty"`
-	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
+	AgentID            string     `json:"agent_id"`
+	EntryID            string     `json:"entry_id"`
+	PostID             string     `json:"post_id"`
+	CreatedAt          time.Time  `json:"created_at"`
+	ReadAt             *time.Time `json:"read_at,omitempty"`
+	ProcessedAt        *time.Time `json:"processed_at,omitempty"`
+	Mode               string     `json:"mode"` // manual | automated
+	Aware              bool       `json:"aware"`
+	SessionID          string     `json:"session_id,omitempty"`
+	MessageID          string     `json:"message_id,omitempty"`
+	Attempts           int        `json:"attempts"`
+	Error              string     `json:"error,omitempty"`
+	ClaimedAt          *time.Time `json:"claimed_at,omitempty"`
+	PromotionSessionID string     `json:"promotion_session_id,omitempty"`
 }
 
 // InboxView adds display fields from the post and entry.
