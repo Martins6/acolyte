@@ -74,6 +74,9 @@ func TestBoardAutomationAdmissionAndCooldown(t *testing.T) {
 	if len(fake.admitConfigs) != 1 {
 		t.Fatalf("admit configs = %+v", fake.admitConfigs)
 	}
+	if got := fake.admitConfigs[0].Timeout; got != boardAutomationAdmissionBudget {
+		t.Errorf("admission timeout = %v, want %v (below the %v claim lease)", got, boardAutomationAdmissionBudget, boardAutomationClaimLease)
+	}
 	rules := fake.admitConfigs[0].Permissions
 	if len(rules) < 3 || rules[0].Action != "*" || rules[0].Effect != opencode.PermissionDeny {
 		t.Fatalf("automation permissions = %+v", rules)

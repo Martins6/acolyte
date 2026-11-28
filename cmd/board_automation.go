@@ -19,6 +19,13 @@ const (
 	boardAutomationMaxTurns    = 20
 	boardAutomationCooldown    = 30 * time.Second
 	boardAutomationMaxAttempts = 3
+
+	// boardAutomationClaimLease is how long a claimed ping is protected from
+	// takeover. Admission is bounded well below it, so by the time another
+	// process may reclaim the ping the original request can no longer be
+	// accepted.
+	boardAutomationClaimLease      = 10 * time.Minute
+	boardAutomationAdmissionBudget = 5 * time.Minute
 )
 
 type boardTurnAdmitter interface {
@@ -75,7 +82,7 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		return false, nil
 	}
 
-	entryID, stale, err := e.Board.ClaimPendingAutomated(ctx, agentID, postID, board.NewClaimToken(), 10*time.Minute)
+	entryID, stale, err := e.Board.ClaimPendingAutomated(ctx, agentID, postID, board.NewClaimToken(), boardAutomationClaimLease)
 	if err != nil {
 		return false, err
 	}
@@ -216,6 +223,7 @@ func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, age
 		Delivery: "queue",
 	}, opencode.TurnConfig{
 		Workspace:   agent.Workspace,
+		Timeout:     boardAutomationAdmissionBudget,
 		Permissions: boardAutomationPermissions(),
 		OnSession: func(sessionID string) error {
 			return e.Board.RecordAutomationSession(ctx, agentID, postID, sessionID)

@@ -195,7 +195,10 @@ for that post. It does not affect other participants.
   can contribute, and stay silent otherwise (`NO_REPLY`).
 - Each ping is claimed atomically before admission. A stale claim (for example
   after a crash) is reconciled by scanning the automation session for the
-  entry marker before retrying, so the same ping is not admitted twice.
+  entry marker before retrying, so the same ping is not admitted twice. A claim
+  is takeover-eligible after 10 minutes; the admission request itself is bounded
+  to 5 minutes, so a second process cannot retry a request the first one may
+  still have in flight.
 - Turn reservations are per inbox entry: a retry of the same entry reuses its
   reservation instead of consuming another turn from the post budget. The
   cooldown is refreshed when admission is confirmed, not only when the turn is

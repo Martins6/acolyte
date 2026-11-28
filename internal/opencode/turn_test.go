@@ -121,6 +121,23 @@ func TestRunUserTurnExplicitShortTimeoutCancels(t *testing.T) {
 	}
 }
 
+func TestAdmitSyntheticTurnHonorsTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("http://opencode.test", "")
+	client.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+
+	_, err := client.AdmitSyntheticTurn(context.Background(), "ses_x", SyntheticEvent{
+		Text: "board ping", Delivery: "queue",
+	}, TurnConfig{Timeout: 20 * time.Millisecond})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("AdmitSyntheticTurn() error = %v, want deadline exceeded", err)
+	}
+}
+
 func TestAdmitSyntheticTurnCreatesSessionWithoutWaiting(t *testing.T) {
 	t.Parallel()
 

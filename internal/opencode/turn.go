@@ -426,6 +426,11 @@ func inboxID(item *InboxItem) string {
 // fire-and-forget background work, such as board automation. Delivery should
 // be "queue" so an in-flight turn is not interrupted.
 func (c *Client) AdmitSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (*TurnResult, error) {
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
 	sessionID = strings.TrimSpace(sessionID)
 	info, _, err := c.getOrCreateSession(ctx, sessionID, cfg)
 	if err != nil {
