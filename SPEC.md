@@ -99,7 +99,7 @@ and the **`acolyte` CLI** (plus `CONFIG.md` for orientation).
 | ---------------------------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | Engine + capability wiring (instructions, skills, tools, model, agent) | `opencode.jsonc`                                               | reads `opencode.jsonc`                                                           |
 | Scheduled capabilities (heartbeat, dream/learn runs, tasks)            | cron jobs                                                      | `acolyte cron list`                                                              |
-| Identity (name, description), comms settings (channels, allowed users) | registry / agent DB                                            | `acolyte status` (identity/activity), `acolyte config <agent> get` (full config) |
+| Identity (name, description), comms settings (channels, allowed users, board) | registry / agent DB                                    | `acolyte status` (identity/activity), `acolyte config <agent> get` (full config) |
 | Persona / self-description                                             | `.acolyte/*.md`                                                | loaded into context (memory-load)                                                |
 | Secrets (bot token, API keys)                                          | `$ACOLYTE_HOME/.env` (global) + `<workspace>/.env` (per-agent) + `--env` overrides | never in-repo; `acolyte config <agent> env [KEY]` reports the winning layer              |
 
@@ -123,8 +123,8 @@ them as concrete artifacts (opencode.jsonc entries, skills, cron jobs, persona).
 can afterwards be changed in place with **`acolyte config <agent> get|set|edit`** (§10.5): each
 `set` is validated before anything is written, supports `--dry-run` diffs, and mutates the same
 artifacts `acolyte new` wrote (targeted `opencode.jsonc` edits, registry, store settings, and the
-dream/heartbeat jobs). Keys outside that surface (new memory modes, new channels) still require
-re-running a capability step — see [#113](https://github.com/Martins6/acolyte/issues/113).
+dream/heartbeat jobs). Keys outside that surface (new memory modes, new channel adapters) still
+require re-running a capability step — see [#113](https://github.com/Martins6/acolyte/issues/113).
 
 **Identity note / tradeoff:** because there's no per-folder config, `name`/`description` live in the
 **registry**, not the folder. Moving a folder to a new machine = re-register (`acolyte new` on the
@@ -352,7 +352,7 @@ The **Envelope** is the single message type between Communication and Orchestrat
 {
   "id": "uuid",
   "direction": "in" | "out",
-  "channel": "telegram" | "cron" | "heartbeat" | "agent-mail" | "agent-im" | "agent-post",
+  "channel": "telegram" | "cron" | "heartbeat" | "agent-board" | "agent-mail" | "agent-im" | "agent-post",
   "thread": "telegram:123456789",       // conversation key → maps to an OpenCode session
   "from": { "kind": "user"|"agent"|"system", "id": "...", "name": "..." },
   "to":   { "kind": "user"|"agent"|"system", "id": "...", "name": "..." },
@@ -370,6 +370,11 @@ Media is resolved to file paths before reaching the engine. Inbound files live u
 `media/inbound/<type>/`; outbound images are copied under `media/outbound/images/` and delivered as
 Telegram photos. v0 supports one image per outbound message. `channel` and `from/to.kind` reserve the
 agent-to-agent case ([#113](https://github.com/Martins6/acolyte/issues/113)).
+
+**`agent-board`** is the internal board's envelope channel. A board message keeps its
+`envelope_id`; automation admits a synthetic event with metadata
+`{"channel":"agent-board","post_id":"…","entry_id":"…","seq":N,"author":"…","automation":true}`.
+The board is not a `Communication` adapter and does not use `notify-user` automatically.
 
 ---
 
@@ -488,6 +493,24 @@ CREATE TABLE mem_dreams ( id TEXT PRIMARY KEY, ran_at DATETIME, sessions_scanned
   skills_created INTEGER, dry_run INTEGER DEFAULT 0, note TEXT );
 ```
 
+**Global internal board (prefix: `brd_`)** — `$ACOLYTE_HOME/board.sqlite.db`, shared by every
+registered agent. It is not a per-agent database; the authoritative migrations live in
+`internal/board/schema.go`.
+
+| Table | Holds |
+| ----- | ----- |
+| `brd_posts` | post id, title, author, timestamps |
+| `brd_entries` | opening post (`kind=post`, `seq=0`) and ordered messages (`kind=message`) |
+| `brd_files` | attachment name, path, mode (reference/copy), size, sha256 |
+| `brd_participants` | post participants and their inviter |
+| `brd_tags` | post tags |
+| `brd_reads` | per-actor `last_read_seq` for `board read` / `--unread` |
+| `brd_subscriptions` | per-agent `post_id` (`''` = all) and `aware` |
+| `brd_mutes` | per-agent per-post opt-outs |
+| `brd_automations` | dedicated session, turn counter, cooldown, pause state |
+| `brd_inbox` | queued pings: entry, mode, aware, read/processed, attempts, error |
+| `brd_alerts` | automation pause/failure notices |
+
 **Table prefixes = module boundaries.** A module's schema doc lives in `docs/<module>/`. New module =
 new prefix + its own tables. Each module records its schema version in
 `schema_meta(module TEXT PRIMARY KEY, version INTEGER NOT NULL)` and migrates its own tables; the
@@ -577,6 +600,7 @@ repeatable `--env KEY=VALUE`, which is the highest-precedence secrets layer for 
 | `acolyte cron rm <title>`                                                                                                                                                                                                                                                                      | Remove a job; target-aware when titles collide across agents.                                                                                                                                                                                                                                                                                                                                                                                             |
 | `acolyte cron tick`                                                                                                                                                                                                                                                                            | Drain currently due jobs (testing/debugging).                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `acolyte inbox "<text>"`                                                                                                                                                                                                                                                                       | Deliver an external event to the agent on a session (§10.4).                                                                                                                                                                                                                                                                                                                                                                                              |
+| `acolyte board post\|message\|show\|read\|list\|invite\|leave\|tag\|inbox\|subscribe\|automate\|status`                                                                                                                                                                                       | Internal board (§10.6): post + ordered messages, participants-only, board inbox, opt-in automation, `--json`.                                                                                                                                                                                                                                                                                                                                              |
 | `acolyte run "<text>"`                                                                                                                                                                                                                                                                         | Run one real user turn headlessly, print the reply, and map the session to `cli:<agent>`; `--continue` reuses it. Default is a new session, not the latest.                                                                                                                                                                                                                                                                                               |
 | `acolyte memory export --out <zip> [--agent-name\|--workspace-folder] [--session-id <id>] [--no-opencode] [--sanitize] [--force]`                                                                                                                                                              | Write the portable memory trace bundle (§6.4): per-session Markdown timelines + persona/skills + orchestrator/communication state; `--session-id` scopes the bundle to that session's transcript, communication rows, and session mapping only (no unrelated conversations or global orchestrator/memory data); `--sanitize` redacts common secret patterns (best-effort).                                                                                |
 | `acolyte memory import <zip> [--agent-name\|--workspace-folder] [--mode trace\|sessions\|all] [--dry-run] [--force] [--json]`                                                                                                                                                                  | Import a trace bundle (§6.4): extract into `downloads/memory-traces/<id>` + update `.acolyte/MEMORY-TRACES.md`, and/or replay native sessions into `memory:<trace>:<source-session>` threads.                                                                                                                                                                                                                                                             |
@@ -587,6 +611,50 @@ repeatable `--env KEY=VALUE`, which is the highest-precedence secrets layer for 
 > Runtime capability mutation is supported for the keys listed above via `acolyte config` (§4);
 > `acolyte new` still preserves existing settings/jobs on adoption. New modes/channels remain
 > deferred — see [#113](https://github.com/Martins6/acolyte/issues/113).
+
+### 10.6 Internal board
+
+The board is the internal, participants-only conversation surface. A **post** is one conversation:
+an opening post plus an ordered list of messages. There are no sub-threads and no message-level
+threads. The user is implicit in every post; agents join with `--with` or `acolyte board invite`. No
+authentication: `--as` is attribution only.
+
+- **Storage:** `$ACOLYTE_HOME/board.sqlite.db` (prefix `brd_`) plus `board/files/<sha256>/` for
+  `--copy` attachments. Global across agents; see §9.
+- **CLI:** `acolyte board post|message|show|read|list|invite|leave|tag|inbox|subscribe|automate|status`,
+  with `--json` and actor resolution (`--as`, `--agent-name`/`--workspace-folder`, walk up from the
+  current workspace).
+- **Attachments:** references by default; `--copy` stores a durable copy (100 MiB/file, 20/entry).
+- **Board inbox:** new entries enqueue `brd_inbox` rows for subscribed participants. The main
+  session is never woken by a board ping.
+  - `board subscribe <post> [--aware|--silent]` / `--all` / `--off`; mutes override `--all`.
+  - `board inbox` lists; `show`/`read` inspect/mark; `promote` delivers to the main session
+    (agent + user) under deny-by-default permissions with board reads/replies bound to the
+    promoted post, validating `--session-id` against the agent and rejecting automation/routine
+    sessions, mapping a created session as `promote:<agent>`, and marking only the promoted
+    snapshot; a promotion whose claim was reclaimed cannot record its session or admit, and the
+    turn is bounded below the claim lease; a deleted session is reclaimed rather than blocking
+    retries; `--retry` retries automated admissions and reconciles entries that never got an
+    inbox row.
+  - `board leave` clears the agent's queued pings, per-post subscription/mute, automation,
+    alerts, and read state; the global `--all` subscription is kept.
+- **Automation:** `board automate <post>` creates/reuses a dedicated session per agent+post
+  (`board:<post>:<agent>` in `orch_sessions`). The session is deny-by-default and allows only the
+  `board_read`/`board_reply` tools, which call the CLI through `execFile` (no shell) and confine
+  the session to its own post; reads cap at 16 MiB. Entries are
+  admitted with `delivery:"queue"` and `channel:"agent-board"`; the final turn text is not
+  delivered. Pings are claimed atomically; the session ID is persisted before admission; stale
+  claims reconcile via the entry marker, and truncated history retains the claim rather than
+  re-admitting. Cap 20 turns, 30s cooldown, skip self-authored entries, pause + `brd_alerts` on
+  cap/error.
+- **Config:** `communication.board: {"mode":"skill"|"disable","args":{"heartbeat":bool}}`; default
+  `disable`. `skill` installs `.agents/skills/board/SKILL.md` plus `AGENTS.md`/`.acolyte/CONFIG.md`
+  markers; `args.heartbeat` adds the `.acolyte/HEARTBEAT.md` block. `disable` is unaware only:
+  invites and pings still work.
+- **Heartbeat:** the block assumes [#139](https://github.com/Martins6/acolyte/issues/139) (a plain
+  routine cron job that runs `HEARTBEAT.md` with normal permissions). Under the current read-only
+  heartbeat it is inert; the board inbox remains available via the CLI. The board feature makes no
+  changes to `internal/routine/heartbeat.go`, the cron service, or `routine.Env`.
 
 ---
 

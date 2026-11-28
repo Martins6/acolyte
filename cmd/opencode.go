@@ -14,6 +14,7 @@ import (
 type turnClient interface {
 	RunUserTurn(ctx context.Context, sessionID, text string, cfg opencode.TurnConfig) (*opencode.TurnResult, error)
 	RunSyntheticTurn(ctx context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error)
+	AdmitSyntheticTurn(ctx context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error)
 	SessionMessages(ctx context.Context, sessionID string, maxPages int) ([]opencode.Message, bool, error)
 	ListSessions(ctx context.Context) ([]opencode.SessionInfo, error)
 }

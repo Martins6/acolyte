@@ -65,3 +65,11 @@ Envelope bus (in/out), the shared store pool, the cron service (for scheduled se
 | ------- | --- | ------ |
 | Telegram | [`telegram.md`](telegram.md) | v0 |
 | agent-mail / agent-im / agent-post | — | deferred ([#113](https://github.com/Martins6/acolyte/issues/113)) |
+
+## Internal board
+
+The board is the internal, durable counterpart to the channels: a post plus an
+ordered list of messages, visible only to participants. It is **not** a
+`Communication` adapter. Board pings go to a per-agent **board inbox queue**,
+automation uses a dedicated background session, and the user reads the board
+through the CLI. See [`board.md`](board.md).

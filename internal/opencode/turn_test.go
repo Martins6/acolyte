@@ -121,6 +121,107 @@ func TestRunUserTurnExplicitShortTimeoutCancels(t *testing.T) {
 	}
 }
 
+func TestAdmitSyntheticTurnHonorsTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("http://opencode.test", "")
+	client.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+
+	_, err := client.AdmitSyntheticTurn(context.Background(), "ses_x", SyntheticEvent{
+		Text: "board ping", Delivery: "queue",
+	}, TurnConfig{Timeout: 20 * time.Millisecond})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("AdmitSyntheticTurn() error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestAdmitSyntheticTurnCreatesSessionWithoutWaiting(t *testing.T) {
+	t.Parallel()
+
+	var syntheticBody map[string]any
+	calls := 0
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			fmt.Fprint(w, `{"data":{"id":"ses_new","agent":"build"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_new/synthetic":
+			syntheticBody = decodeBody(t, r)
+			fmt.Fprint(w, `{"data":{"id":"msg_in","sessionID":"ses_new","type":"synthetic"}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	result, err := client.AdmitSyntheticTurn(context.Background(), "", SyntheticEvent{
+		Text:        "board ping",
+		Description: "Board automation",
+		Metadata:    map[string]any{"channel": "agent-board"},
+		Delivery:    "queue",
+	}, TurnConfig{Workspace: "/ws"})
+	if err != nil {
+		t.Fatalf("AdmitSyntheticTurn() error: %v", err)
+	}
+	if result.SessionID != "ses_new" || result.InputID != "msg_in" {
+		t.Errorf("result = %+v", result)
+	}
+	if calls != 2 {
+		t.Errorf("requests = %d, want 2 (create + synthetic, no wait)", calls)
+	}
+	if syntheticBody["text"] != "board ping" || syntheticBody["delivery"] != "queue" {
+		t.Errorf("synthetic body = %+v", syntheticBody)
+	}
+	metadata, _ := syntheticBody["metadata"].(map[string]any)
+	if metadata["channel"] != "agent-board" {
+		t.Errorf("metadata = %+v", metadata)
+	}
+}
+
+func TestAdmitSyntheticTurnAppliesPermissions(t *testing.T) {
+	t.Parallel()
+
+	var patchBody map[string]any
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			fmt.Fprint(w, `{"data":{"id":"ses_new","agent":"build"}}`)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/session/ses_new":
+			patchBody = decodeBody(t, r)
+			fmt.Fprint(w, `{"data":{"id":"ses_new","agent":"build"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session/ses_new/synthetic":
+			fmt.Fprint(w, `{"data":{"id":"msg_in","sessionID":"ses_new","type":"synthetic"}}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	_, err := client.AdmitSyntheticTurn(context.Background(), "", SyntheticEvent{
+		Text: "board ping", Delivery: "queue",
+	}, TurnConfig{
+		Workspace: "/ws",
+		Permissions: []PermissionRule{
+			{Action: "*", Resource: "*", Effect: PermissionDeny},
+			{Action: "board_read", Resource: "*", Effect: PermissionAllow},
+		},
+	})
+	if err != nil {
+		t.Fatalf("AdmitSyntheticTurn() error: %v", err)
+	}
+	rules, ok := patchBody["permissions"].([]any)
+	if !ok || len(rules) != 2 {
+		t.Fatalf("permission patch = %+v", patchBody)
+	}
+	first, _ := rules[0].(map[string]any)
+	if first["action"] != "*" || first["effect"] != "deny" {
+		t.Errorf("first permission rule = %+v", first)
+	}
+}
+
 func TestCollectDeliveredReturnsCompletedTurn(t *testing.T) {
 	t.Parallel()
 

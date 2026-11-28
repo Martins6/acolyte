@@ -67,6 +67,7 @@ Supported set keys:
   engine.agent                         opencode.jsonc "default_agent" (build, plan, or a defined agent)
   communication.channels               JSON array (v0: telegram only; [] disables channels)
   communication.telegram.allowed_users JSON array or comma-separated list
+  communication.board                  {"mode":"skill"|"disable","args":{"heartbeat":bool}} (default disable)
   schedule.timezone                    IANA timezone (required while heartbeat/dream run)
   schedule.heartbeat_minutes           minutes; 0 removes the heartbeat job, >0 upserts it
   memory-learn                         {"mode":"simple-dreaming","args":{"days":N}} or null
@@ -371,6 +372,13 @@ func printConfigSet(w io.Writer, res *agent.SetResult, jsonOut bool) error {
 		} else {
 			fmt.Fprintf(w, "  upsert job     %s [%s]\n", change.Job.Title, change.Job.Spec)
 		}
+	}
+	for _, change := range res.Files {
+		action := change.Action
+		if action == "" {
+			action = "update"
+		}
+		fmt.Fprintf(w, "  %-14s %s\n", action+" file", change.Path)
 	}
 	if res.Description != nil {
 		fmt.Fprintf(w, "  set registry   description = %s\n", strconv.Quote(*res.Description))

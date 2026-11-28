@@ -18,19 +18,28 @@ import (
 )
 
 type fakeCLITurn struct {
-	userCalls  int
-	synthCalls int
-	result     *opencode.TurnResult
-	messages   []opencode.Message
-	messageErr error
-	sessions   []opencode.SessionInfo
-	bySession  map[string][]opencode.Message
-	exports    map[string]json.RawMessage
+	userCalls        int
+	synthCalls       int
+	result           *opencode.TurnResult
+	messages         []opencode.Message
+	messageErr       error
+	sessions         []opencode.SessionInfo
+	bySession        map[string][]opencode.Message
+	exports          map[string]json.RawMessage
+	messageTruncated bool
 
 	userSessionID string
 	userText      string
 	userConfig    opencode.TurnConfig
 	userErr       error
+
+	admitSessions []string
+	admitEvents   []opencode.SyntheticEvent
+	admitConfigs  []opencode.TurnConfig
+	runConfigs    []opencode.TurnConfig
+	admitErr      error
+	admitErrOn    string
+	synthErr      error
 }
 
 func (f *fakeCLITurn) RunUserTurn(_ context.Context, sessionID, text string, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
@@ -45,16 +54,54 @@ func (f *fakeCLITurn) RunUserTurn(_ context.Context, sessionID, text string, cfg
 	return result, f.userErr
 }
 
-func (f *fakeCLITurn) RunSyntheticTurn(context.Context, string, opencode.SyntheticEvent, opencode.TurnConfig) (*opencode.TurnResult, error) {
+func (f *fakeCLITurn) RunSyntheticTurn(_ context.Context, sessionID string, _ opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.synthCalls++
-	return f.turnResult(), nil
+	f.runConfigs = append(f.runConfigs, cfg)
+	effective := sessionID
+	if effective == "" {
+		effective = "ses_cli"
+	}
+	if cfg.OnSession != nil {
+		if err := cfg.OnSession(effective); err != nil {
+			return nil, err
+		}
+	}
+	result := f.turnResult()
+	if sessionID != "" {
+		result.SessionID = sessionID
+	}
+	return result, f.synthErr
+}
+
+func (f *fakeCLITurn) AdmitSyntheticTurn(_ context.Context, sessionID string, ev opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
+	f.synthCalls++
+	f.admitSessions = append(f.admitSessions, sessionID)
+	f.admitEvents = append(f.admitEvents, ev)
+	f.admitConfigs = append(f.admitConfigs, cfg)
+	effectiveSession := sessionID
+	if effectiveSession == "" {
+		effectiveSession = "ses_cli"
+	}
+	if cfg.OnSession != nil {
+		if err := cfg.OnSession(effectiveSession); err != nil {
+			return nil, err
+		}
+	}
+	if f.admitErr != nil && sessionID == f.admitErrOn {
+		return nil, f.admitErr
+	}
+	result := f.turnResult()
+	if sessionID != "" {
+		result.SessionID = sessionID
+	}
+	return result, nil
 }
 
 func (f *fakeCLITurn) SessionMessages(_ context.Context, sessionID string, _ int) ([]opencode.Message, bool, error) {
 	if f.bySession != nil {
-		return f.bySession[sessionID], false, f.messageErr
+		return f.bySession[sessionID], f.messageTruncated, f.messageErr
 	}
-	return f.messages, false, f.messageErr
+	return f.messages, f.messageTruncated, f.messageErr
 }
 
 func (f *fakeCLITurn) ListSessions(context.Context) ([]opencode.SessionInfo, error) {

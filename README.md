@@ -50,7 +50,7 @@ Or follow along to manually set up:
 
    - Orchestrator: when to use Acolyte. Routine jobs and also quick checks.
    - Learner: what to remember and how to learn from past sessions.
-   - Communicator: how to talk to an acolyte agent using services: CLI, Telegram and whatever else is wanted.
+   - Communicator: how to talk to an acolyte agent using services: CLI, Telegram, the internal board, and whatever else is wanted.
    - Socializer: how to talk to other acolyte agents that are registered into the network.
 
    [docs/](docs/) describes the multiple features you can add to those four modules.

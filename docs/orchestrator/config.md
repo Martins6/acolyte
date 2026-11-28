@@ -26,6 +26,7 @@ Prints the effective config as JSON in the `acolyte new --config` shape:
 | `memory-load` | `orch_settings.memory.load`; the matching `.acolyte/*.md` entry in `opencode.jsonc` `instructions` is the actual wiring |
 | `memory-access/learn/export` | `orch_settings` (`memory.*`); the `dream` job is the source of truth for `memory-learn` when present |
 | `communication.channels`, `communication.telegram.allowed_users` | `comm_tg_settings` |
+| `communication.board` | `orch_settings.communication.board` + the board skill/marker artifacts |
 | `schedule.timezone` | `orch_settings.schedule.timezone`, falling back to the dream/heartbeat job timezone |
 | `schedule.heartbeat_minutes` | the `heartbeat` job (`args.interval`, then its `@every <n>m` spec) |
 
@@ -44,6 +45,7 @@ Supported keys and their values:
 | `engine.agent` | `build`, `plan`, an entry of `agent{}`/`agents{}`, or a `.opencode/agents/*.md` id | targeted edit of `"default_agent"`; unknown ids are rejected, no prompt is invented |
 | `communication.channels` | JSON array of channels (v0: `telegram` only; `[]` disables all channels) | `comm_tg_settings.channels` |
 | `communication.telegram.allowed_users` | JSON array **or** comma-separated list | normalized (trimmed, empties dropped, deduped) into `comm_tg_settings.telegram.allowed_users` |
+| `communication.board` | `{"mode":"skill"\|"disable","args":{"heartbeat":bool}}` or `null` | stores `orch_settings.communication.board`; `skill` installs `.agents/skills/board/SKILL.md` + `AGENTS.md`/`.acolyte/CONFIG.md` markers; `args.heartbeat:true` adds the `.acolyte/HEARTBEAT.md` block; `disable` removes them but does not block invites or pings |
 | `schedule.timezone` | IANA name (or empty to clear) | `orch_settings.schedule.timezone`; existing `dream`/`heartbeat` jobs get the new timezone and a recomputed `next_run_at` |
 | `schedule.heartbeat_minutes` | integer `>= 0` | `0` deletes the `heartbeat` job; `>0` upserts it as `@every <n>m` with `args {"interval": n}` |
 | `memory-learn` | `{"mode":"simple-dreaming","args":{"days":N}}` or `null` | `null` deletes the `dream` job and `memory.learn`; otherwise upserts `dream` as `@every <N*24>h` with `args {"days": N}` and stores `memory.learn` |
@@ -143,6 +145,11 @@ acolyte config valet set memory-load null
 # Telegram access
 acolyte config valet set communication.telegram.allowed_users '@alice, @bob'
 acolyte config valet set communication.channels '[]'   # disable channels
+
+# Internal board awareness
+acolyte config valet set communication.board '{"mode":"skill"}'
+acolyte config valet set communication.board '{"mode":"skill","args":{"heartbeat":true}}' --dry-run
+acolyte config valet set communication.board '{"mode":"disable"}'
 
 # Secrets provenance
 acolyte config valet env

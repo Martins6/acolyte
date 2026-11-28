@@ -8,6 +8,7 @@
 ├── e2e/                    # Opt-in live end-to-end tests (build tag: e2e)
 ├── internal/
 │   ├── agent/             # --config parsing + create/adopt workflow
+│   ├── board/             # Global internal board (posts, messages, inbox, automation)
 │   ├── comm/              # Envelope router, outbox sink, Telegram adapter + test emulator
 │   ├── cron/              # Shared scheduler + execution
 │   ├── daemon/            # Per-agent adapter lifecycle + routing

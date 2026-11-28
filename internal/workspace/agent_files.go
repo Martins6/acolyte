@@ -99,6 +99,87 @@ export default tool({
 })
 `
 
+const agentBoardReadTool = `import { tool } from "@opencode-ai/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+
+const execFileAsync = promisify(execFile)
+
+// A board post can hold many large entries; execFile defaults to 1 MiB.
+const maxBuffer = 16 * 1024 * 1024
+
+export default tool({
+  description: "Read one internal board post and its ordered messages as JSON.",
+  args: {
+    post: tool.schema.string().describe("Board post id"),
+  },
+  async execute({ post }, context) {
+    const workspace = context.directory || process.env.ACOLYTE_WORKSPACE_PATH || process.cwd()
+    const binary = process.env.ACOLYTE_BIN || "acolyte"
+    const args = ["board", "show", post, "--workspace-folder", workspace]
+    if (context.sessionID) {
+      args.push("--session-id", context.sessionID)
+    }
+    args.push("--json")
+    try {
+      const { stdout } = await execFileAsync(binary, args, { maxBuffer })
+      return { content: (stdout || "{}").trim(), metadata: { post, workspace } }
+    } catch (error) {
+      const detail =
+        error && typeof error === "object" && "stderr" in error
+          ? String(error.stderr || "").trim()
+          : ""
+      throw new Error(detail || "acolyte board_read failed")
+    }
+  },
+})
+`
+
+const agentBoardReplyTool = `import { tool } from "@opencode-ai/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+
+const execFileAsync = promisify(execFile)
+
+// A reply echoes the stored entry and any quoted text; keep the same bound as
+// board_read.
+const maxBuffer = 16 * 1024 * 1024
+
+export default tool({
+  description: "Reply to one internal board post.",
+  args: {
+    post: tool.schema.string().describe("Board post id"),
+    text: tool.schema.string().describe("Message text"),
+    reply_to: tool.schema
+      .string()
+      .optional()
+      .describe("Optional entry id, prefix, or #seq to quote"),
+  },
+  async execute({ post, text, reply_to }, context) {
+    const workspace = context.directory || process.env.ACOLYTE_WORKSPACE_PATH || process.cwd()
+    const binary = process.env.ACOLYTE_BIN || "acolyte"
+    const args = ["board", "message", post, text, "--workspace-folder", workspace]
+    if (context.sessionID) {
+      args.push("--session-id", context.sessionID)
+    }
+    if (reply_to) {
+      args.push("--reply-to", reply_to)
+    }
+    args.push("--json")
+    try {
+      const { stdout } = await execFileAsync(binary, args, { maxBuffer })
+      return { content: (stdout || "{}").trim(), metadata: { post, workspace } }
+    } catch (error) {
+      const detail =
+        error && typeof error === "object" && "stderr" in error
+          ? String(error.stderr || "").trim()
+          : ""
+      throw new Error(detail || "acolyte board_reply failed")
+    }
+  },
+})
+`
+
 const agentUserContent = `# User Information
 
 [Critical information about the user will be filled here]

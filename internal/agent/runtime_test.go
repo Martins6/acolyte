@@ -86,6 +86,7 @@ func TestLoadConfigFreshDefaults(t *testing.T) {
 		Communication: CommunicationConfig{
 			Channels: []string{"telegram"},
 			Telegram: TelegramConfig{AllowedUsers: []string{}},
+			Board:    BoardConfig{Mode: "disable"},
 		},
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -120,6 +121,7 @@ func TestLoadConfigFull(t *testing.T) {
 		Communication: CommunicationConfig{
 			Channels: []string{"telegram"},
 			Telegram: TelegramConfig{AllowedUsers: []string{"@you"}},
+			Board:    BoardConfig{Mode: "disable"},
 		},
 		Schedule: ScheduleConfig{Timezone: "UTC", HeartbeatMinutes: 60},
 	}
@@ -519,6 +521,148 @@ func TestSetCommunication(t *testing.T) {
 	raw, ok, err := st.CommTG().GetSetting("telegram.allowed_users")
 	if err != nil || !ok || raw != `["@alice","@bob"]` {
 		t.Errorf("allowed_users = %q, %v, %v", raw, ok, err)
+	}
+}
+
+func TestSetCommunicationBoard(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+
+	res, err := SetConfig(st, target, SetOptions{Key: "communication.board", Value: `{"mode":"skill"}`})
+	if err != nil {
+		t.Fatalf("SetConfig(board skill) error: %v", err)
+	}
+	if !res.Changed || len(res.Files) != 3 {
+		t.Fatalf("result = %+v, want 3 file changes", res)
+	}
+	skillPath := filepath.Join(ws, ".agents", "skills", "board", "SKILL.md")
+	skill, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read skill: %v", err)
+	}
+	if !strings.Contains(string(skill), "name: board") {
+		t.Errorf("skill = %q", skill)
+	}
+	agents, err := os.ReadFile(filepath.Join(ws, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agents), "acolyte:board") {
+		t.Errorf("AGENTS.md missing board marker:\n%s", agents)
+	}
+	config, err := os.ReadFile(filepath.Join(ws, ".acolyte", "CONFIG.md"))
+	if err != nil {
+		t.Fatalf("read CONFIG.md: %v", err)
+	}
+	if !strings.Contains(string(config), "acolyte:board") {
+		t.Errorf("CONFIG.md missing board marker:\n%s", config)
+	}
+	cfg, err := LoadConfig(st, target)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Communication.Board.Mode != "skill" {
+		t.Errorf("board mode = %q, want skill", cfg.Communication.Board.Mode)
+	}
+
+	res, err = SetConfig(st, target, SetOptions{Key: "communication.board", Value: `{"mode":"skill"}`})
+	if err != nil {
+		t.Fatalf("SetConfig(board skill) error: %v", err)
+	}
+	if res.Changed {
+		t.Errorf("second skill set changed state: %+v", res)
+	}
+
+	res, err = SetConfig(st, target, SetOptions{
+		Key: "communication.board", Value: `{"mode":"skill","args":{"heartbeat":true}}`,
+	})
+	if err != nil {
+		t.Fatalf("SetConfig(board heartbeat) error: %v", err)
+	}
+	if len(res.Files) != 1 || res.Files[0].Path != ".acolyte/HEARTBEAT.md" {
+		t.Fatalf("heartbeat files = %+v", res.Files)
+	}
+	heartbeat, err := os.ReadFile(filepath.Join(ws, ".acolyte", "HEARTBEAT.md"))
+	if err != nil {
+		t.Fatalf("read HEARTBEAT.md: %v", err)
+	}
+	if !strings.Contains(string(heartbeat), "acolyte:board") || !strings.Contains(string(heartbeat), "notify-user") {
+		t.Errorf("HEARTBEAT.md missing board block:\n%s", heartbeat)
+	}
+
+	if _, err := SetConfig(st, target, SetOptions{Key: "communication.board", Value: `{"mode":"skill"}`}); err != nil {
+		t.Fatalf("SetConfig(board skill without heartbeat) error: %v", err)
+	}
+	heartbeat, err = os.ReadFile(filepath.Join(ws, ".acolyte", "HEARTBEAT.md"))
+	if err != nil {
+		t.Fatalf("read HEARTBEAT.md: %v", err)
+	}
+	if strings.Contains(string(heartbeat), "acolyte:board") {
+		t.Errorf("HEARTBEAT.md still has board block:\n%s", heartbeat)
+	}
+
+	res, err = SetConfig(st, target, SetOptions{
+		Key: "communication.board", Value: `{"mode":"disable"}`, DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("SetConfig(board disable dry-run) error: %v", err)
+	}
+	if !res.DryRun || len(res.Files) != 3 {
+		t.Fatalf("dry-run = %+v, want 3 planned changes", res)
+	}
+	if _, err := os.Stat(skillPath); err != nil {
+		t.Errorf("dry-run removed the skill: %v", err)
+	}
+
+	if _, err := SetConfig(st, target, SetOptions{Key: "communication.board", Value: `{"mode":"disable"}`}); err != nil {
+		t.Fatalf("SetConfig(board disable) error: %v", err)
+	}
+	if _, err := os.Stat(skillPath); !os.IsNotExist(err) {
+		t.Errorf("skill still exists after disable: %v", err)
+	}
+	agents, err = os.ReadFile(filepath.Join(ws, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if strings.Contains(string(agents), "acolyte:board") {
+		t.Errorf("AGENTS.md still has board marker:\n%s", agents)
+	}
+	cfg, err = LoadConfig(st, target)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Communication.Board.Mode != "disable" {
+		t.Errorf("board mode = %q, want disable", cfg.Communication.Board.Mode)
+	}
+}
+
+func TestSetCommunicationBoardDoesNotPersistOnArtifactFailure(t *testing.T) {
+	ws := createRuntimeAgent(t, `{}`)
+	st := openRuntimeStore(t, ws)
+	target := runtimeAgent(t, "valet")
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(ws, ".agents", "skills", "board")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err := SetConfig(st, target, SetOptions{
+		Key: "communication.board", Value: `{"mode":"skill"}`,
+	})
+	if err == nil {
+		t.Fatal("SetConfig() succeeded with a symlinked artifact parent")
+	}
+	if _, ok, err := st.Orch().GetSetting("communication.board"); err != nil {
+		t.Fatalf("GetSetting() error: %v", err)
+	} else if ok {
+		t.Fatal("communication.board setting was persisted despite artifact failure")
+	}
+	agents, err := os.ReadFile(filepath.Join(ws, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if strings.Contains(string(agents), "acolyte:board") {
+		t.Errorf("AGENTS.md marker was applied despite failure:\n%s", agents)
 	}
 }
 

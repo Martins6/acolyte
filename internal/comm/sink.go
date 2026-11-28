@@ -26,11 +26,22 @@ type SyntheticTurnRunner interface {
 type OutboxSink struct {
 	Stores StoreProvider
 	Turn   SyntheticTurnRunner
-	Now    func() time.Time
+	// Timeout, when positive, bounds each synthetic turn. Board promotion sets
+	// it below its claim lease so a reclaimed claim cannot be admitted twice.
+	Timeout time.Duration
+	// Permissions, when non-nil, temporarily replaces the session's permission
+	// rules for the turn. Promotion uses deny-by-default so participant-written
+	// board text cannot reach the wider tool surface.
+	Permissions []opencode.PermissionRule
+	Now         func() time.Time
 	// Activity, when non-nil, records tool activity for synthetic turns. An
 	// empty Agent is filled from the agent passed to Inbox, so one sink can
 	// serve every registered agent.
 	Activity *ActivityRecorder
+	// OnSession, when non-nil, runs after the turn session is resolved and
+	// before the synthetic input is admitted. Promotion uses it to persist the
+	// target session first.
+	OnSession func(sessionID string) error
 }
 
 // DeliveryError carries the final delivery payload when an outbox enqueue
@@ -142,13 +153,18 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 	defer release()
 
 	if strings.TrimSpace(sessionID) == "" {
-		if session, ok, err := st.Orch().LatestSession(); err != nil {
+		if session, ok, err := st.Orch().LatestUserSession(); err != nil {
 			return "", "", err
 		} else if ok {
 			sessionID = session.OpenCodeSessionID
 		}
 	}
-	cfg := opencode.TurnConfig{Workspace: agent.Workspace}
+	cfg := opencode.TurnConfig{
+		Workspace:   agent.Workspace,
+		Timeout:     s.Timeout,
+		Permissions: s.Permissions,
+	}
+	cfg.OnSession = s.OnSession
 	cfg.OnInteraction = InteractionRecorder(agent, st)
 	if s.Activity != nil {
 		recorder := *s.Activity

@@ -75,6 +75,7 @@ another agent (extract + index, and/or replay its sessions).
 | --- | ---- | -------- | ------- | --- |
 | `communication.channels` | string[] | `telegram` | Enabled channels. | [`telegram.md`](communication/telegram.md) |
 | `communication.telegram.allowed_users` | string[] | — | Allowed Telegram users (non-secret). | [`telegram.md`](communication/telegram.md) |
+| `communication.board` | `{mode,args}` \| null | — | Internal board awareness: `{"mode":"skill"\|"disable","args":{"heartbeat":bool}}`. Default `disable`. | [`board.md`](communication/board.md) |
 
 ### Schedule / heartbeat — [`orchestrator/README.md`](orchestrator/README.md)
 | Key | Type | Default | Meaning | Doc |
@@ -90,7 +91,7 @@ acolyte new --name valet --workspace-folder ~/agents/valet --config '{
   "engine": { "model": "minimax-coding-plan/MiniMax-M3" },
   "memory-learn":  { "mode": "simple-dreaming", "args": { "days": 3 } },
   "memory-export": { "mode": "opencode-export", "args": {} },
-  "communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["@you"] } },
+  "communication": { "channels": ["telegram"], "telegram": { "allowed_users": ["@you"] }, "board": { "mode": "skill" } },
   "schedule": { "timezone": "America/Sao_Paulo", "heartbeat_minutes": 60 }
 }'
 ```
@@ -125,6 +126,7 @@ does not own:
 | `engine.agent` | `build`, `plan`, or a defined agent id | `opencode.jsonc` `"default_agent"` (no prompts are invented) |
 | `communication.channels` | JSON array (v0: `telegram` only; `[]` disables) | `comm_tg_settings.channels` |
 | `communication.telegram.allowed_users` | JSON array or comma-separated | normalized to a deduped JSON array |
+| `communication.board` | `{"mode":"skill"\|"disable","args":{"heartbeat":bool}}` or `null` | `orch_settings` + board skill/AGENTS/CONFIG/HEARTBEAT artifacts |
 | `schedule.timezone` | IANA name | `orch_settings` + re-times the dream/heartbeat jobs and their `next_run_at` |
 | `schedule.heartbeat_minutes` | int | `0` removes the `heartbeat` job; `>0` upserts `@every <n>m` with `{"interval":n}` |
 | `memory-learn` | `{"mode":"simple-dreaming","args":{"days":N}}` or `null` | `null` removes the `dream` job + `memory.learn`; otherwise upserts `@every <N*24>h` with `{"days":N}` |
@@ -217,7 +219,8 @@ docs/
 │   └── memory-export/<mode>.md
 ├── communication/
 │   ├── README.md
-│   └── <channel>.md                ← telegram.md
+│   ├── telegram.md                 ← Telegram adapter
+│   └── board.md                    ← internal board: posts, messages, inbox, automation
 ├── opencode/
 │   └── v2-contract.md              ← pinned V2 API version + update procedure
 ├── ci/

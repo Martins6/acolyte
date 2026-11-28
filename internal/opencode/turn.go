@@ -43,6 +43,11 @@ func promptOutcomeUnknown(err error) bool {
 	return true
 }
 
+// PromptOutcomeUnknown reports whether an admission error might have
+// delivered the prompt. Callers that must not duplicate an admission keep
+// their claim when this is true and reconcile before retrying.
+func PromptOutcomeUnknown(err error) bool { return promptOutcomeUnknown(err) }
+
 // syntheticRecheckGap is how long to pause before re-waiting when a queued
 // input has not been delivered yet (a var so tests can shorten it).
 var syntheticRecheckGap = 2 * time.Second
@@ -93,6 +98,11 @@ type TurnConfig struct {
 	// held and before the input is admitted. Callers use it to fence a stale
 	// owner (for example an expired route claim) before OpenCode accepts work.
 	OnLockAcquired func() error
+	// OnSession, when non-nil, is called by AdmitSyntheticTurn after the
+	// session is created or resolved and before the synthetic event is
+	// admitted. Fire-and-forget callers persist the session ID here so a
+	// stale retry can reconcile the session's history.
+	OnSession func(sessionID string) error
 }
 
 // SyntheticEvent is an external/background event admitted to a session
@@ -364,6 +374,12 @@ func (c *Client) RunSyntheticTurn(ctx context.Context, sessionID string, ev Synt
 	stopEvents := c.startEventObserver(turnCtx, info.ID, cfg.OnEvent)
 	defer stopEvents()
 
+	if cfg.OnSession != nil {
+		if err := cfg.OnSession(info.ID); err != nil {
+			return &TurnResult{SessionID: info.ID}, turnCause(turnCtx, fmt.Errorf("opencode: record session: %w", err))
+		}
+	}
+
 	item, err := c.Synthetic(turnCtx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
 	if err != nil {
 		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, &PromptError{
@@ -403,6 +419,41 @@ func inboxID(item *InboxItem) string {
 		return ""
 	}
 	return item.ID
+}
+
+// AdmitSyntheticTurn ensures the session and admits one synthetic event
+// without waiting for the agent loop to finish. Callers use it for
+// fire-and-forget background work, such as board automation. Delivery should
+// be "queue" so an in-flight turn is not interrupted.
+func (c *Client) AdmitSyntheticTurn(ctx context.Context, sessionID string, ev SyntheticEvent, cfg TurnConfig) (*TurnResult, error) {
+	if cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
+		defer cancel()
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	info, _, err := c.getOrCreateSession(ctx, sessionID, cfg)
+	if err != nil {
+		return nil, err
+	}
+	// Admission-only turns own a dedicated session (board automation), so the
+	// ruleset is applied and left in place instead of being restored after a
+	// collected turn.
+	if cfg.Permissions != nil {
+		if err := c.SetSessionPermissions(ctx, info.ID, cfg.Permissions); err != nil {
+			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: apply session permissions: %w", err)
+		}
+	}
+	if cfg.OnSession != nil {
+		if err := cfg.OnSession(info.ID); err != nil {
+			return &TurnResult{SessionID: info.ID}, fmt.Errorf("opencode: record session: %w", err)
+		}
+	}
+	item, err := c.Synthetic(ctx, info.ID, ev.Text, ev.Description, ev.Metadata, ev.Delivery)
+	if err != nil {
+		return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, err
+	}
+	return &TurnResult{SessionID: info.ID, InputID: inboxID(item)}, nil
 }
 
 // admitInput hands the newly admitted marker to the caller's persistence hook.

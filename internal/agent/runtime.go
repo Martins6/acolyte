@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -24,6 +25,7 @@ func SupportedSetKeys() []string {
 		"engine.agent",
 		"communication.channels",
 		"communication.telegram.allowed_users",
+		"communication.board",
 		"schedule.timezone",
 		"schedule.heartbeat_minutes",
 		"memory-learn",
@@ -133,6 +135,12 @@ func LoadConfig(st *store.Store, a registry.Agent) (Config, error) {
 	}
 	cfg.Communication.Telegram.AllowedUsers = allowedUsers
 
+	board, err := readBoardSetting(orchStore)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Communication.Board = board
+
 	// Cron titles are not reserved: a user job may hold "dream" or
 	// "heartbeat". Only a job with the expected owner/kind/routine counts as
 	// the capability, so `get` never misreports a user job (conflicts are
@@ -204,15 +212,16 @@ type JobChange struct {
 // SetResult reports the effective before/after value of the key plus every
 // pending mutation. With DryRun set nothing is written.
 type SetResult struct {
-	Key          string          `json:"key"`
-	Before       any             `json:"before"`
-	After        any             `json:"after"`
-	Changed      bool            `json:"changed"`
-	DryRun       bool            `json:"dry_run"`
-	OpencodeDiff string          `json:"opencode_diff,omitempty"`
-	Settings     []SettingChange `json:"settings,omitempty"`
-	Jobs         []JobChange     `json:"jobs,omitempty"`
-	Description  *string         `json:"description,omitempty"`
+	Key          string                     `json:"key"`
+	Before       any                        `json:"before"`
+	After        any                        `json:"after"`
+	Changed      bool                       `json:"changed"`
+	DryRun       bool                       `json:"dry_run"`
+	OpencodeDiff string                     `json:"opencode_diff,omitempty"`
+	Settings     []SettingChange            `json:"settings,omitempty"`
+	Jobs         []JobChange                `json:"jobs,omitempty"`
+	Files        []workspace.ArtifactChange `json:"files,omitempty"`
+	Description  *string                    `json:"description,omitempty"`
 
 	opencodeBefore string
 	opencodeAfter  string
@@ -306,6 +315,29 @@ func planSet(st *store.Store, a registry.Agent, key, value string, current Confi
 		if err := planCommSetting(res, st.CommTG().GetSetting, "telegram.allowed_users", mustJSON(users)); err != nil {
 			return nil, err
 		}
+
+	case "communication.board":
+		desired, err := parseBoardConfigValue(value)
+		if err != nil {
+			return nil, fmt.Errorf("config: communication.board: %w", err)
+		}
+		res.Before, res.After = current.Communication.Board, desired
+		proposed.Communication.Board = desired
+		stored, ok, err := st.Orch().GetSetting("communication.board")
+		if err != nil {
+			return nil, err
+		}
+		desiredJSON := mustJSON(desired)
+		if !ok || stored != desiredJSON {
+			res.Settings = append(res.Settings, SettingChange{
+				Module: "orch", Key: "communication.board", Value: desiredJSON,
+			})
+		}
+		changes, err := workspace.PlanBoardArtifacts(a.Workspace, desired.Mode == "skill", desired.Heartbeat())
+		if err != nil {
+			return nil, err
+		}
+		res.Files = append(res.Files, changes...)
 
 	case "schedule.timezone":
 		timezone := strings.TrimSpace(value)
@@ -431,6 +463,7 @@ func planSet(st *store.Store, a registry.Agent, key, value string, current Confi
 	res.Changed = res.Description != nil ||
 		len(res.Settings) > 0 ||
 		len(res.Jobs) > 0 ||
+		len(res.Files) > 0 ||
 		res.opencodeAfter != ""
 	return res, nil
 }
@@ -624,7 +657,19 @@ func (r *SetResult) apply(st *store.Store, a registry.Agent) error {
 // applyMutations applies the planned job, setting, and registry writes after
 // the opencode.jsonc edit has been staged. The caller rolls that edit back if
 // any of these fail.
-func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) error {
+func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) (err error) {
+	if len(r.Files) > 0 {
+		if err := workspace.ApplyArtifactChanges(a.Workspace, r.Files); err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				if revertErr := workspace.RevertArtifactChanges(a.Workspace, r.Files); revertErr != nil {
+					err = errors.Join(err, fmt.Errorf("config: rollback board artifacts: %w", revertErr))
+				}
+			}
+		}()
+	}
 	// Job mutations run before settings and identity writes: if a user job
 	// grabbed the capability title between plan and apply, the conditional
 	// mutation refuses before any setting changes, and the caller restores
@@ -672,11 +717,6 @@ func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) error {
 			return fmt.Errorf("config: unknown job action %q", change.Action)
 		}
 	}
-	for _, change := range r.Settings {
-		if err := applySetting(st, change); err != nil {
-			return err
-		}
-	}
 	if r.Description != nil {
 		reg, err := registry.OpenDefault()
 		if err != nil {
@@ -686,6 +726,13 @@ func (r *SetResult) applyMutations(st *store.Store, a registry.Agent) error {
 		updated := a
 		updated.Description = *r.Description
 		if err := reg.Update(updated); err != nil {
+			return err
+		}
+	}
+	// Settings are the last durable write. If one fails, the deferred file
+	// rollback restores the artifact state.
+	for _, change := range r.Settings {
+		if err := applySetting(st, change); err != nil {
 			return err
 		}
 	}
@@ -707,6 +754,60 @@ func applySetting(st *store.Store, change SettingChange) error {
 	default:
 		return fmt.Errorf("config: unknown setting module %q", change.Module)
 	}
+}
+
+func readBoardSetting(orchStore *orch.Store) (BoardConfig, error) {
+	raw, ok, err := orchStore.GetSetting("communication.board")
+	if err != nil {
+		return BoardConfig{}, err
+	}
+	if !ok || strings.TrimSpace(raw) == "" {
+		return BoardConfig{Mode: "disable"}, nil
+	}
+	var cfg BoardConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return BoardConfig{}, fmt.Errorf("config: communication.board: %w", err)
+	}
+	if cfg.Mode == "" {
+		cfg.Mode = "disable"
+	}
+	return cfg, nil
+}
+
+func parseBoardConfigValue(value string) (BoardConfig, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return BoardConfig{}, fmt.Errorf("value must be a JSON object or null")
+	}
+	if value == "null" {
+		return BoardConfig{Mode: "disable"}, nil
+	}
+	if !strings.HasPrefix(value, "{") {
+		return BoardConfig{}, fmt.Errorf("value must be a JSON object or null")
+	}
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	var cfg BoardConfig
+	if err := decoder.Decode(&cfg); err != nil {
+		return BoardConfig{}, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return BoardConfig{}, fmt.Errorf("unexpected trailing data")
+		}
+		return BoardConfig{}, err
+	}
+	if cfg.Mode == "" {
+		cfg.Mode = "disable"
+	}
+	switch cfg.Mode {
+	case "skill", "disable":
+	default:
+		return BoardConfig{}, fmt.Errorf("mode %q must be skill or disable", cfg.Mode)
+	}
+	return cfg, nil
 }
 
 func memoryValidator(key string) (func(*MemoryConfig) error, error) {
