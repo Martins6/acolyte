@@ -976,6 +976,47 @@ func boardPromotionMarkerForTest(token string) string {
 	return "[[acolyte-board-promote:" + token + "]]"
 }
 
+func TestReclaimPromotionRequiresToken(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "promotion race",
+		With: []string{"scribe"},
+	})
+	if err := st.Subscribe(ctx, scribe, post.ID, true); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+	entry, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "ping"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if _, err := st.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("Enqueue() error: %v", err)
+	}
+	first, err := st.ClaimPromotion(ctx, "scribe", post.ID, "token-1", "marker-1")
+	if err != nil || len(first) != 1 {
+		t.Fatalf("ClaimPromotion(token-1) = %v, %v", first, err)
+	}
+	if err := st.ReclaimPromotion(ctx, "scribe", first, "wrong-token"); err != nil {
+		t.Fatalf("ReclaimPromotion(wrong) error: %v", err)
+	}
+	if second, err := st.ClaimPromotion(ctx, "scribe", post.ID, "token-2", "marker-2"); err != nil {
+		t.Fatalf("ClaimPromotion(token-2) error: %v", err)
+	} else if len(second) != 0 {
+		t.Fatalf("wrong-token reclaim cleared a live claim: %v", second)
+	}
+	if err := st.ReclaimPromotion(ctx, "scribe", first, "token-1"); err != nil {
+		t.Fatalf("ReclaimPromotion(token-1) error: %v", err)
+	}
+	if third, err := st.ClaimPromotion(ctx, "scribe", post.ID, "token-3", "marker-3"); err != nil {
+		t.Fatalf("ClaimPromotion(token-3) error: %v", err)
+	} else if len(third) != 1 || third[0] != entry.ID {
+		t.Fatalf("ClaimPromotion(token-3) = %v, want the entry", third)
+	}
+}
+
 func TestReconcileInbox(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

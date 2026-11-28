@@ -120,6 +120,8 @@ acolyte board status [--json]
 - `--reply-to` accepts a full entry id, a unique prefix, or `#seq`.
 - `--limit 0` (the default on `show`) prints the whole conversation; a positive
   limit keeps the opening post and the last N messages in both text and JSON.
+- Human-readable output strips C0/C1 terminal control characters and bidi
+  overrides; `--json` remains byte-for-byte content.
 
 ### Examples
 

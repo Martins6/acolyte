@@ -191,6 +191,42 @@ func TestBoardPostMessageShow(t *testing.T) {
 	}
 }
 
+func TestSanitizeTerminal(t *testing.T) {
+	input := "ok\x1b[31mred\x07\r\n\ttext\u202e"
+	want := "ok[31mred\n\ttext"
+	if got := sanitizeTerminal(input); got != want {
+		t.Fatalf("sanitizeTerminal() = %q, want %q", got, want)
+	}
+}
+
+func TestBoardShowStripsTerminalControls(t *testing.T) {
+	view := board.PostView{
+		Post: board.Post{
+			ID:    "brd_x",
+			Title: "\x1b[2Jtitle",
+		},
+		Entries: []board.Entry{{
+			ID:     "ent_x",
+			Kind:   board.EntryPost,
+			Author: board.Actor{Kind: board.ActorAgent, ID: "valet"},
+			Text:   "\x1b]0;pwned\x07hello",
+			Files: []board.File{{
+				Name: "\x1b[31mfile",
+				Path: "/tmp/\x07x",
+				Mode: board.FileReference,
+			}},
+		}},
+	}
+	var out bytes.Buffer
+	printBoardView(&out, view, 0)
+	if strings.ContainsRune(out.String(), '\x1b') || strings.ContainsRune(out.String(), '\x07') {
+		t.Errorf("output contains terminal controls: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "hello") {
+		t.Errorf("output lost entry text: %q", out.String())
+	}
+}
+
 func TestBoardUserActor(t *testing.T) {
 	setupBoardCLI(t)
 	user := boardTarget{As: "user"}

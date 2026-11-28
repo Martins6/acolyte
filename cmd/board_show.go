@@ -103,12 +103,12 @@ func printBoardView(w io.Writer, view board.PostView, limit int) {
 					fmt.Fprintf(w, " ↳ #%d", seq)
 				}
 			} else {
-				fmt.Fprintf(w, " ↳ %s", entry.ReplyToID)
+				fmt.Fprintf(w, " ↳ %s", sanitizeTerminal(entry.ReplyToID))
 			}
 		}
 		fmt.Fprintln(w)
 		if entry.Text != "" {
-			fmt.Fprintln(w, entry.Text)
+			fmt.Fprintln(w, sanitizeTerminal(entry.Text))
 		}
 		for _, file := range entry.Files {
 			missing := ""
@@ -116,7 +116,8 @@ func printBoardView(w io.Writer, view board.PostView, limit int) {
 				missing = " [missing]"
 			}
 			fmt.Fprintf(w, "  - %s  %s  %s  (%s)%s\n",
-				file.Name, file.Path, formatBoardSize(file.Size), file.Mode, missing)
+				sanitizeTerminal(file.Name), sanitizeTerminal(file.Path),
+				formatBoardSize(file.Size), file.Mode, missing)
 		}
 		fmt.Fprintln(w)
 	}

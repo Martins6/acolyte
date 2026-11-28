@@ -318,7 +318,7 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 	}
 
 	// Reconcile a stale promotion before claiming it again.
-	stale, staleSession, staleMarker, err := st.StalePromotion(ctx, actor.ID, view.ID, 10*time.Minute)
+	stale, staleToken, staleSession, staleMarker, err := st.StalePromotion(ctx, actor.ID, view.ID, 10*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -334,10 +334,10 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 				}
 			} else if truncated {
 				return fmt.Errorf("board: promotion session %s history is truncated; cannot reconcile", staleSession)
-			} else if err := st.ReclaimPromotion(ctx, actor.ID, stale); err != nil {
+			} else if err := st.ReclaimPromotion(ctx, actor.ID, stale, staleToken); err != nil {
 				return err
 			}
-		} else if err := st.ReclaimPromotion(ctx, actor.ID, stale); err != nil {
+		} else if err := st.ReclaimPromotion(ctx, actor.ID, stale, staleToken); err != nil {
 			return err
 		}
 	}

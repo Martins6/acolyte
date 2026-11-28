@@ -940,12 +940,11 @@ func (s *Store) Enqueue(ctx context.Context, entry Entry) ([]Delivery, error) {
 }
 
 // StalePromotion returns the oldest stale promotion claim for an agent+post.
-func (s *Store) StalePromotion(ctx context.Context, agentID, postID string, staleAfter time.Duration) (entryIDs []string, sessionID, marker string, err error) {
+func (s *Store) StalePromotion(ctx context.Context, agentID, postID string, staleAfter time.Duration) (entryIDs []string, staleToken, sessionID, marker string, err error) {
 	if staleAfter <= 0 {
 		staleAfter = 10 * time.Minute
 	}
 	cutoff := s.now().Add(-staleAfter)
-	var token string
 	err = s.db.QueryRowContext(ctx,
 		`SELECT promotion_token FROM brd_inbox
 		 WHERE agent_id = ? AND post_id = ? AND read_at IS NULL
@@ -953,26 +952,26 @@ func (s *Store) StalePromotion(ctx context.Context, agentID, postID string, stal
 		   AND promotion_token <> ''
 		 ORDER BY promotion_claimed_at LIMIT 1`,
 		agentID, postID, cutoff,
-	).Scan(&token)
+	).Scan(&staleToken)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, "", "", nil
+		return nil, "", "", "", nil
 	}
 	if err != nil {
-		return nil, "", "", fmt.Errorf("board: stale promotion: %w", err)
+		return nil, "", "", "", fmt.Errorf("board: stale promotion: %w", err)
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT entry_id, promotion_session_id, promotion_marker FROM brd_inbox
 		 WHERE agent_id = ? AND post_id = ? AND promotion_token = ? AND read_at IS NULL
 		 ORDER BY created_at, entry_id`,
-		agentID, postID, token)
+		agentID, postID, staleToken)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("board: stale promotion: %w", err)
+		return nil, "", "", "", fmt.Errorf("board: stale promotion: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var entryID, rowSession, rowMarker string
 		if err := rows.Scan(&entryID, &rowSession, &rowMarker); err != nil {
-			return nil, "", "", fmt.Errorf("board: stale promotion: %w", err)
+			return nil, "", "", "", fmt.Errorf("board: stale promotion: %w", err)
 		}
 		entryIDs = append(entryIDs, entryID)
 		if sessionID == "" {
@@ -982,13 +981,14 @@ func (s *Store) StalePromotion(ctx context.Context, agentID, postID string, stal
 			marker = rowMarker
 		}
 	}
-	return entryIDs, sessionID, marker, rows.Err()
+	return entryIDs, staleToken, sessionID, marker, rows.Err()
 }
 
-// ReclaimPromotion releases a promotion claim so the entries can be claimed
-// again (for example after an inconclusive earlier attempt).
-func (s *Store) ReclaimPromotion(ctx context.Context, agentID string, entryIDs []string) error {
-	if len(entryIDs) == 0 {
+// ReclaimPromotion releases a promotion claim only if the rows still carry the
+// stale token, so a concurrent newer claim cannot be cleared.
+func (s *Store) ReclaimPromotion(ctx context.Context, agentID string, entryIDs []string, token string) error {
+	token = strings.TrimSpace(token)
+	if len(entryIDs) == 0 || token == "" {
 		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1001,8 +1001,8 @@ func (s *Store) ReclaimPromotion(ctx context.Context, agentID string, entryIDs [
 			`UPDATE brd_inbox
 			 SET promotion_claimed_at = NULL, promotion_token = '', promotion_marker = '',
 			     promotion_session_id = ''
-			 WHERE agent_id = ? AND entry_id = ? AND read_at IS NULL`,
-			agentID, entryID,
+			 WHERE agent_id = ? AND entry_id = ? AND promotion_token = ? AND read_at IS NULL`,
+			agentID, entryID, token,
 		); err != nil {
 			return fmt.Errorf("board: reclaim promotion: %w", err)
 		}

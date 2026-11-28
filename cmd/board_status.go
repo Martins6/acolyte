@@ -130,7 +130,7 @@ func runBoardStatus(ctx context.Context, w io.Writer, opts boardStatusOptions) e
 	} else {
 		fmt.Fprintf(w, "Alerts: %d\n", len(result.Alerts))
 		for _, alert := range result.Alerts {
-			fmt.Fprintf(w, "  - %s (%s)\n", alert.Message, alert.PostID)
+			fmt.Fprintf(w, "  - %s (%s)\n", sanitizeTerminal(alert.Message), alert.PostID)
 		}
 	}
 	return nil

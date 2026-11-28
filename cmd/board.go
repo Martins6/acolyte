@@ -103,12 +103,30 @@ func boardParticipants(actors []board.Actor) string {
 }
 
 func boardPreview(text string, limit int) string {
+	text = sanitizeTerminal(text)
 	text = strings.Join(strings.Fields(text), " ")
 	runes := []rune(text)
 	if limit > 0 && len(runes) > limit {
 		return string(runes[:limit]) + "…"
 	}
 	return text
+}
+
+// sanitizeTerminal strips C0/C1 controls and bidi overrides from human output.
+// It preserves newlines and tabs; JSON output is left untouched.
+func sanitizeTerminal(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return -1
+		}
+		if (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			return -1
+		}
+		return r
+	}, value)
 }
 
 func boardEntryLabel(entry board.Entry) string {
