@@ -1217,6 +1217,57 @@ func TestReserveAutomationTurnForEntry(t *testing.T) {
 	}
 }
 
+func TestConfirmAutomationAdmissionRefreshesCooldown(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "confirm",
+		With: []string{"scribe"},
+	})
+	if err := st.SetAutomation(ctx, AgentActor("scribe"), post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	first, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "first"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	second, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "second"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	for _, entry := range []Entry{first, second} {
+		if _, err := st.Enqueue(ctx, entry); err != nil {
+			t.Fatalf("Enqueue() error: %v", err)
+		}
+	}
+	if ok, err := st.ReserveAutomationTurnForEntry(ctx, "scribe", post.ID, first.ID, 2*time.Minute, 20); err != nil || !ok {
+		t.Fatalf("first reserve = %v, %v", ok, err)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE brd_automations SET last_turn_at = ? WHERE agent_id = 'scribe' AND post_id = ?`,
+		st.now().Add(-time.Hour).UTC(), post.ID,
+	); err != nil {
+		t.Fatalf("age cooldown: %v", err)
+	}
+	if ok, err := st.ReserveAutomationTurnForEntry(ctx, "scribe", post.ID, first.ID, 2*time.Minute, 20); err != nil || !ok {
+		t.Fatalf("reused reserve = %v, %v", ok, err)
+	}
+	if err := st.ConfirmAutomationAdmission(ctx, "scribe", post.ID, "ses_x"); err != nil {
+		t.Fatalf("ConfirmAutomationAdmission() error: %v", err)
+	}
+	if ok, err := st.ReserveAutomationTurnForEntry(ctx, "scribe", post.ID, second.ID, 2*time.Minute, 20); err != nil || ok {
+		t.Fatalf("post-confirm reserve = %v, %v, want false", ok, err)
+	}
+	automation, err := st.Automation(ctx, "scribe", post.ID)
+	if err != nil {
+		t.Fatalf("Automation() error: %v", err)
+	}
+	if automation.Turns != 1 || automation.LastTurnAt.IsZero() || automation.SessionID != "ses_x" {
+		t.Errorf("automation = %+v, want one turn and a refreshed cooldown", automation)
+	}
+}
+
 func TestClaimPendingAutomated(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

@@ -197,7 +197,9 @@ for that post. It does not affect other participants.
   after a crash) is reconciled by scanning the automation session for the
   entry marker before retrying, so the same ping is not admitted twice.
 - Turn reservations are per inbox entry: a retry of the same entry reuses its
-  reservation instead of consuming another turn from the post budget.
+  reservation instead of consuming another turn from the post budget. The
+  cooldown is refreshed when admission is confirmed, not only when the turn is
+  reserved.
 - The dedicated session ID is persisted before the synthetic request, so a
   crash or ambiguous timeout still leaves a session to reconcile. If history is
   truncated before the marker is found, the claim is retained instead of

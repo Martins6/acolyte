@@ -162,7 +162,7 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		return false, admitErr
 	}
 
-	if err := e.Board.RecordAutomationSession(ctx, agentID, postID, result.SessionID); err != nil {
+	if err := e.Board.ConfirmAutomationAdmission(ctx, agentID, postID, result.SessionID); err != nil {
 		return false, err
 	}
 	if err := e.Board.MarkInboxProcessed(ctx, agentID, entry.ID, result.SessionID, result.InputID); err != nil {

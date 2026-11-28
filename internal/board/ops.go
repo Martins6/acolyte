@@ -1348,6 +1348,21 @@ func (s *Store) RecordAutomationSession(ctx context.Context, agentID, postID, se
 	return nil
 }
 
+// ConfirmAutomationAdmission refreshes the cooldown after a successful
+// admission, so the next entry cannot reserve immediately after a retry whose
+// reservation was made before an earlier failed attempt.
+func (s *Store) ConfirmAutomationAdmission(ctx context.Context, agentID, postID, sessionID string) error {
+	now := s.now()
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE brd_automations SET session_id = ?, last_turn_at = ?, updated_at = ?
+		 WHERE agent_id = ? AND post_id = ?`,
+		sessionID, now, now, agentID, postID,
+	); err != nil {
+		return fmt.Errorf("board: confirm automation admission: %w", err)
+	}
+	return nil
+}
+
 // RecordAutomationAdmission reconciles a stale claim that was already
 // admitted. It records the session and stamps the turn budget, since the
 // original reservation may have been lost with a crash.
