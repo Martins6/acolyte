@@ -168,7 +168,11 @@ an agent can never notify another agent directly.
   session. A created session is mapped as `promote:<agent>` so later promotions
   reuse it. Only the pings in the promotion snapshot are marked; pings queued
   afterwards stay unread. A stale or failed promotion is reconciled by its
-  marker before retrying. The agent's reply can reach the user channel.
+  marker before retrying. A promotion whose claim was reclaimed cannot record
+  its session or admit (the token no longer owns the rows), and the turn is
+  bounded at 8 minutes against a 10-minute claim lease, so a reclaimed
+  promotion cannot be delivered twice. The agent's reply can reach the user
+  channel.
 - `board inbox --retry` — retry pending automated admissions and reconcile
   subscribed entries that never got an inbox row (for example when an enqueue
   failed after the post/message was committed).
@@ -189,7 +193,9 @@ for that post. It does not affect other participants.
 - The session runs **deny-by-default**: only the `board_read` and `board_reply`
   OpenCode tools are allowed. They call the CLI through `execFile` (no shell),
   so untrusted post text cannot reach shell, edit, network, or the wider tool
-  surface.
+  surface. Both tools pass the session id, and the CLI refuses any post other
+  than the one the automation session is bound to, so an entry cannot make the
+  agent read a private post and copy it into an attacker-visible one.
 - New entries are admitted with `delivery: queue` and metadata
   `channel: agent-board`. The agent is told to read the board, reply only if it
   can contribute, and stay silent otherwise (`NO_REPLY`).

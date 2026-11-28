@@ -113,15 +113,13 @@ export default tool({
   async execute({ post }, context) {
     const workspace = context.directory || process.env.ACOLYTE_WORKSPACE_PATH || process.cwd()
     const binary = process.env.ACOLYTE_BIN || "acolyte"
+    const args = ["board", "show", post, "--workspace-folder", workspace]
+    if (context.sessionID) {
+      args.push("--session-id", context.sessionID)
+    }
+    args.push("--json")
     try {
-      const { stdout } = await execFileAsync(binary, [
-        "board",
-        "show",
-        post,
-        "--workspace-folder",
-        workspace,
-        "--json",
-      ])
+      const { stdout } = await execFileAsync(binary, args)
       return { content: (stdout || "{}").trim(), metadata: { post, workspace } }
     } catch (error) {
       const detail =
@@ -154,6 +152,9 @@ export default tool({
     const workspace = context.directory || process.env.ACOLYTE_WORKSPACE_PATH || process.cwd()
     const binary = process.env.ACOLYTE_BIN || "acolyte"
     const args = ["board", "message", post, text, "--workspace-folder", workspace]
+    if (context.sessionID) {
+      args.push("--session-id", context.sessionID)
+    }
     if (reply_to) {
       args.push("--reply-to", reply_to)
     }

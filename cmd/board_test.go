@@ -227,6 +227,68 @@ func TestBoardShowStripsTerminalControls(t *testing.T) {
 	}
 }
 
+func TestBoardAutomationSessionIsBoundToItsPost(t *testing.T) {
+	setupBoardCLI(t)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+	first, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "first post",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	second, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "second post",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+
+	st, err := openBoardStore()
+	if err != nil {
+		t.Fatalf("openBoardStore() error: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.SetAutomation(ctx, board.AgentActor("scribe"), first.Post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	if err := st.RecordAutomationSession(ctx, "scribe", first.Post.ID, "ses_bound"); err != nil {
+		t.Fatalf("RecordAutomationSession() error: %v", err)
+	}
+
+	if err := runBoardShow(ctx, &bytes.Buffer{}, boardShowOptions{
+		Target:    scribe,
+		Post:      second.Post.ID,
+		SessionID: "ses_bound",
+	}); !errors.Is(err, board.ErrForbidden) {
+		t.Errorf("runBoardShow(other post) error = %v, want ErrForbidden", err)
+	}
+	if err := runBoardShow(ctx, &bytes.Buffer{}, boardShowOptions{
+		Target:    scribe,
+		Post:      first.Post.ID,
+		SessionID: "ses_bound",
+	}); err != nil {
+		t.Errorf("runBoardShow(bound post) error = %v", err)
+	}
+	if err := runBoardMessage(ctx, &bytes.Buffer{}, boardMessageOptions{
+		Target:    scribe,
+		Post:      second.Post.ID,
+		Text:      "leak",
+		SessionID: "ses_bound",
+	}); !errors.Is(err, board.ErrForbidden) {
+		t.Errorf("runBoardMessage(other post) error = %v, want ErrForbidden", err)
+	}
+	if err := runBoardMessage(ctx, &bytes.Buffer{}, boardMessageOptions{
+		Target:    scribe,
+		Post:      first.Post.ID,
+		Text:      "safe reply",
+		SessionID: "ses_bound",
+	}); err != nil {
+		t.Errorf("runBoardMessage(bound post) error = %v", err)
+	}
+}
+
 func TestBoardUserActor(t *testing.T) {
 	setupBoardCLI(t)
 	user := boardTarget{As: "user"}

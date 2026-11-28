@@ -917,6 +917,65 @@ func TestRecordAutomationAdmissionDoesNotDoubleCount(t *testing.T) {
 	}
 }
 
+func TestMarkPromotionSessionRejectsLostClaim(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	scribe := AgentActor("scribe")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "promotion claim",
+		With: []string{"scribe"},
+	})
+	if err := st.Subscribe(ctx, scribe, post.ID, true); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+	entry, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "ping"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if _, err := st.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("Enqueue() error: %v", err)
+	}
+	if claimed, err := st.ClaimPromotion(ctx, "scribe", post.ID, "token-a", "marker-a"); err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimPromotion() = %v, %v", claimed, err)
+	}
+	if err := st.MarkPromotionSession(ctx, "scribe", "token-stale", "ses_x"); !errors.Is(err, ErrClaimLost) {
+		t.Fatalf("MarkPromotionSession(stale) error = %v, want ErrClaimLost", err)
+	}
+	if err := st.MarkPromotionSession(ctx, "scribe", "token-a", "ses_x"); err != nil {
+		t.Fatalf("MarkPromotionSession(owner) error: %v", err)
+	}
+	inbox, err := st.Inbox(ctx, "scribe", false)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].PromotionSessionID != "ses_x" {
+		t.Errorf("inbox = %+v, want the owned session recorded", inbox)
+	}
+}
+
+func TestAutomationPostBySession(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	post, _ := mustCreatePost(t, st, AgentActor("valet"), CreatePostInput{
+		Text: "automation binding",
+		With: []string{"scribe"},
+	})
+	if err := st.SetAutomation(ctx, AgentActor("scribe"), post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	if err := st.RecordAutomationSession(ctx, "scribe", post.ID, "ses_bound"); err != nil {
+		t.Fatalf("RecordAutomationSession() error: %v", err)
+	}
+	bound, ok, err := st.AutomationPostBySession(ctx, "scribe", "ses_bound")
+	if err != nil || !ok || bound != post.ID {
+		t.Fatalf("AutomationPostBySession() = %q, %v, %v", bound, ok, err)
+	}
+	if _, ok, err := st.AutomationPostBySession(ctx, "scribe", "ses_other"); err != nil || ok {
+		t.Fatalf("AutomationPostBySession(unknown) = %v, %v, want none", ok, err)
+	}
+}
+
 func TestMarkInboxPromotedOnlyTargets(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

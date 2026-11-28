@@ -10,9 +10,10 @@ import (
 )
 
 var (
-	boardMessageReplyTo string
-	boardMessageFiles   []string
-	boardMessageCopy    bool
+	boardMessageReplyTo   string
+	boardMessageFiles     []string
+	boardMessageCopy      bool
+	boardMessageSessionID string
 )
 
 var boardMessageCmd = &cobra.Command{
@@ -25,13 +26,14 @@ var boardMessageCmd = &cobra.Command{
 			text = args[1]
 		}
 		return runBoardMessage(cmd.Context(), cmd.OutOrStdout(), boardMessageOptions{
-			Target:  boardTargetFromFlags(),
-			Post:    args[0],
-			Text:    text,
-			ReplyTo: boardMessageReplyTo,
-			Files:   boardMessageFiles,
-			Copy:    boardMessageCopy,
-			JSON:    boardJSONOut,
+			Target:    boardTargetFromFlags(),
+			Post:      args[0],
+			Text:      text,
+			ReplyTo:   boardMessageReplyTo,
+			Files:     boardMessageFiles,
+			Copy:      boardMessageCopy,
+			SessionID: boardMessageSessionID,
+			JSON:      boardJSONOut,
 		})
 	},
 }
@@ -41,16 +43,18 @@ func init() {
 	boardMessageCmd.Flags().StringVar(&boardMessageReplyTo, "reply-to", "", "entry to quote (id, prefix, or #seq)")
 	boardMessageCmd.Flags().StringArrayVar(&boardMessageFiles, "file", nil, "file to attach (repeatable)")
 	boardMessageCmd.Flags().BoolVar(&boardMessageCopy, "copy", false, "copy attached files into $ACOLYTE_HOME/board/files")
+	boardMessageCmd.Flags().StringVar(&boardMessageSessionID, "session-id", "", "automation session binding (rejects other posts)")
 }
 
 type boardMessageOptions struct {
-	Target  boardTarget
-	Post    string
-	Text    string
-	ReplyTo string
-	Files   []string
-	Copy    bool
-	JSON    bool
+	Target    boardTarget
+	Post      string
+	Text      string
+	ReplyTo   string
+	Files     []string
+	Copy      bool
+	SessionID string
+	JSON      bool
 }
 
 type boardMessageResult struct {
@@ -75,7 +79,14 @@ func runBoardMessage(ctx context.Context, w io.Writer, opts boardMessageOptions)
 	if err != nil {
 		return err
 	}
-	entry, err := st.AppendMessage(ctx, actor, opts.Post, board.AppendMessageInput{
+	post, err := st.ResolvePost(ctx, opts.Post)
+	if err != nil {
+		return err
+	}
+	if err := enforceBoardAutomationBinding(ctx, st, actor.ID, opts.SessionID, post.ID); err != nil {
+		return err
+	}
+	entry, err := st.AppendMessage(ctx, actor, post.ID, board.AppendMessageInput{
 		Text:      opts.Text,
 		Files:     files,
 		ReplyToID: opts.ReplyTo,

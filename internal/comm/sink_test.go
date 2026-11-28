@@ -180,6 +180,19 @@ func TestOutboxSinkInboxWithoutChat(t *testing.T) {
 	}
 }
 
+func TestOutboxSinkInboxPassesTimeout(t *testing.T) {
+	sink, _, agent, cleanup := newSinkHarness(t)
+	defer cleanup()
+	sink.Timeout = 3 * time.Minute
+	if _, _, err := sink.Inbox(context.Background(), agent, "", "ping", nil); err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	fake := sink.Turn.(*fakeSynthTurn)
+	if len(fake.configs) != 1 || fake.configs[0].Timeout != 3*time.Minute {
+		t.Fatalf("turn timeout = %+v, want 3m", fake.configs)
+	}
+}
+
 func TestOutboxSinkInboxRecordsToolActivity(t *testing.T) {
 	sink, pool, agent, cleanup := newSinkHarness(t)
 	defer cleanup()

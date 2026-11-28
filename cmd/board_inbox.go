@@ -21,6 +21,14 @@ var (
 	boardInboxPromoteSession string
 )
 
+const (
+	// boardPromotionClaimLease is how long a promotion claim is protected from
+	// takeover. The turn is bounded below it so a reclaimed claim can never be
+	// admitted twice.
+	boardPromotionClaimLease      = 10 * time.Minute
+	boardPromotionAdmissionBudget = 8 * time.Minute
+)
+
 var boardInboxCmd = &cobra.Command{
 	Use:   "inbox",
 	Short: "View the agent's board inbox",
@@ -318,7 +326,7 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 	}
 
 	// Reconcile a stale promotion before claiming it again.
-	stale, staleToken, staleSession, staleMarker, err := st.StalePromotion(ctx, actor.ID, view.ID, 10*time.Minute)
+	stale, staleToken, staleSession, staleMarker, err := st.StalePromotion(ctx, actor.ID, view.ID, boardPromotionClaimLease)
 	if err != nil {
 		return err
 	}
@@ -374,8 +382,9 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 	}
 
 	sink := comm.OutboxSink{
-		Stores: pool,
-		Turn:   client,
+		Stores:  pool,
+		Turn:    client,
+		Timeout: boardPromotionAdmissionBudget,
 		OnSession: func(sessionID string) error {
 			if err := st.MarkPromotionSession(ctx, actor.ID, token, sessionID); err != nil {
 				return err

@@ -12,6 +12,7 @@ import (
 )
 
 var boardShowLimit int
+var boardShowSessionID string
 
 var boardShowCmd = &cobra.Command{
 	Use:   "show <post>",
@@ -19,10 +20,11 @@ var boardShowCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBoardShow(cmd.Context(), cmd.OutOrStdout(), boardShowOptions{
-			Target: boardTargetFromFlags(),
-			Post:   args[0],
-			Limit:  boardShowLimit,
-			JSON:   boardJSONOut,
+			Target:    boardTargetFromFlags(),
+			Post:      args[0],
+			Limit:     boardShowLimit,
+			SessionID: boardShowSessionID,
+			JSON:      boardJSONOut,
 		})
 	},
 }
@@ -30,13 +32,15 @@ var boardShowCmd = &cobra.Command{
 func init() {
 	boardCmd.AddCommand(boardShowCmd)
 	boardShowCmd.Flags().IntVar(&boardShowLimit, "limit", 0, "show only the last N messages (0 = all)")
+	boardShowCmd.Flags().StringVar(&boardShowSessionID, "session-id", "", "automation session binding (rejects other posts)")
 }
 
 type boardShowOptions struct {
-	Target boardTarget
-	Post   string
-	Limit  int
-	JSON   bool
+	Target    boardTarget
+	Post      string
+	Limit     int
+	SessionID string
+	JSON      bool
 }
 
 func runBoardShow(ctx context.Context, w io.Writer, opts boardShowOptions) error {
@@ -50,7 +54,14 @@ func runBoardShow(ctx context.Context, w io.Writer, opts boardShowOptions) error
 	}
 	defer st.Close()
 
-	view, err := st.Show(ctx, actor, opts.Post)
+	post, err := st.ResolvePost(ctx, opts.Post)
+	if err != nil {
+		return err
+	}
+	if err := enforceBoardAutomationBinding(ctx, st, actor.ID, opts.SessionID, post.ID); err != nil {
+		return err
+	}
+	view, err := st.Show(ctx, actor, post.ID)
 	if err != nil {
 		return err
 	}

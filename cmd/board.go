@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -151,4 +152,24 @@ func formatBoardSize(size int64) string {
 
 func joinComma(parts []string) string {
 	return strings.Join(parts, ", ")
+}
+
+// enforceBoardAutomationBinding keeps a dedicated automation session on the
+// post that triggered it. Board text is untrusted: without this, an entry could
+// direct the agent to read a private post and copy it into an attacker-visible
+// one. Only sessions recorded as automation sessions are restricted; a normal
+// session (which already has the wider tool surface) is unaffected.
+func enforceBoardAutomationBinding(ctx context.Context, st *board.Store, agentID, sessionID, postID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	bound, ok, err := st.AutomationPostBySession(ctx, agentID, sessionID)
+	if err != nil {
+		return err
+	}
+	if ok && bound != postID {
+		return fmt.Errorf("%w: automation session %s is bound to post %s", board.ErrForbidden, sessionID, bound)
+	}
+	return nil
 }

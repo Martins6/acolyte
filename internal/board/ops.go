@@ -819,6 +819,28 @@ func (s *Store) Automation(ctx context.Context, agentID, postID string) (*Automa
 	return s.getAutomation(ctx, s.db, agentID, postID)
 }
 
+// AutomationPostBySession returns the post a board automation session is bound
+// to. It lets the CLI confine a dedicated automation session to its own post.
+func (s *Store) AutomationPostBySession(ctx context.Context, agentID, sessionID string) (string, bool, error) {
+	agentID = strings.TrimSpace(agentID)
+	sessionID = strings.TrimSpace(sessionID)
+	if agentID == "" || sessionID == "" {
+		return "", false, nil
+	}
+	var postID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT post_id FROM brd_automations WHERE agent_id = ? AND session_id = ? LIMIT 1`,
+		agentID, sessionID,
+	).Scan(&postID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("board: automation session: %w", err)
+	}
+	return postID, true, nil
+}
+
 // Automations lists an agent's automation state ordered by post.
 func (s *Store) Automations(ctx context.Context, agentID string) ([]Automation, error) {
 	agentID = strings.TrimSpace(agentID)
@@ -1088,12 +1110,20 @@ func (s *Store) ClaimPromotion(ctx context.Context, agentID, postID, token, mark
 // MarkPromotionSession records the target session before the promoted turn is
 // admitted.
 func (s *Store) MarkPromotionSession(ctx context.Context, agentID, token, sessionID string) error {
-	if _, err := s.db.ExecContext(ctx,
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE brd_inbox SET promotion_session_id = ?
 		 WHERE agent_id = ? AND promotion_token = ? AND read_at IS NULL`,
 		sessionID, agentID, token,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("board: mark promotion session: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("board: mark promotion session: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("%w: promotion claim %s was reclaimed", ErrClaimLost, token)
 	}
 	return nil
 }
