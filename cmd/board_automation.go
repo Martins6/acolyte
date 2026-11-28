@@ -82,7 +82,8 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		return false, nil
 	}
 
-	entryID, stale, err := e.Board.ClaimPendingAutomated(ctx, agentID, postID, board.NewClaimToken(), boardAutomationClaimLease)
+	claimToken := board.NewClaimToken()
+	entryID, stale, err := e.Board.ClaimPendingAutomated(ctx, agentID, postID, claimToken, boardAutomationClaimLease)
 	if err != nil {
 		return false, err
 	}
@@ -153,13 +154,17 @@ func (e *boardAutomationEngine) processPost(ctx context.Context, agentID, postID
 		return false, err
 	}
 
-	result, admitErr := e.admit(ctx, sessionID, agent, agentID, postID, post.Title, entry)
+	result, admitErr := e.admit(ctx, sessionID, agent, agentID, postID, post.Title, entry, claimToken)
 	if admitErr != nil && sessionID != "" && isBoardSessionNotFound(admitErr) {
 		// The dedicated session was deleted; start a fresh one.
 		sessionID = ""
-		result, admitErr = e.admit(ctx, "", agent, agentID, postID, post.Title, entry)
+		result, admitErr = e.admit(ctx, "", agent, agentID, postID, post.Title, entry, claimToken)
 	}
 	if admitErr != nil {
+		if errors.Is(admitErr, board.ErrClaimLost) {
+			// Another process owns this entry now; do not clear its claim.
+			return false, admitErr
+		}
 		if opencode.PromptOutcomeUnknown(admitErr) {
 			// OpenCode may have accepted the event before the error. Keep the
 			// claim and reservation; a stale retry reconciles the marker.
@@ -208,7 +213,7 @@ func (e *boardAutomationEngine) wasAdmitted(ctx context.Context, sessionID, entr
 	return false, "", truncated, nil
 }
 
-func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, agent registry.Agent, agentID, postID, title string, entry board.Entry) (*opencode.TurnResult, error) {
+func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, agent registry.Agent, agentID, postID, title string, entry board.Entry, claimToken string) (*opencode.TurnResult, error) {
 	return e.Turn.AdmitSyntheticTurn(ctx, sessionID, opencode.SyntheticEvent{
 		Text:        boardAutomationPrompt(title, entry),
 		Description: "Board automation",
@@ -226,6 +231,13 @@ func (e *boardAutomationEngine) admit(ctx context.Context, sessionID string, age
 		Timeout:     boardAutomationAdmissionBudget,
 		Permissions: boardAutomationPermissions(),
 		OnSession: func(sessionID string) error {
+			owns, err := e.Board.RenewInboxClaim(ctx, agentID, entry.ID, claimToken)
+			if err != nil {
+				return err
+			}
+			if !owns {
+				return fmt.Errorf("%w: automation claim for %s was reclaimed", board.ErrClaimLost, entry.ID)
+			}
 			return e.Board.RecordAutomationSession(ctx, agentID, postID, sessionID)
 		},
 	})

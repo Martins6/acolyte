@@ -168,8 +168,14 @@ func enforceBoardAutomationBinding(ctx context.Context, st *board.Store, agentID
 	if err != nil {
 		return err
 	}
+	if !ok {
+		bound, ok, err = st.SessionBinding(ctx, agentID, sessionID)
+		if err != nil {
+			return err
+		}
+	}
 	if ok && bound != postID {
-		return fmt.Errorf("%w: automation session %s is bound to post %s", board.ErrForbidden, sessionID, bound)
+		return fmt.Errorf("%w: session %s is bound to post %s", board.ErrForbidden, sessionID, bound)
 	}
 	return nil
 }

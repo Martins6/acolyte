@@ -629,15 +629,19 @@ authentication: `--as` is attribution only.
   session is never woken by a board ping.
   - `board subscribe <post> [--aware|--silent]` / `--all` / `--off`; mutes override `--all`.
   - `board inbox` lists; `show`/`read` inspect/mark; `promote` delivers to the main session
-    (agent + user), validating `--session-id` against the agent and rejecting automation/routine
+    (agent + user) under deny-by-default permissions with board reads/replies bound to the
+    promoted post, validating `--session-id` against the agent and rejecting automation/routine
     sessions, mapping a created session as `promote:<agent>`, and marking only the promoted
-    snapshot; `--retry` retries automated admissions and reconciles entries that never got an
+    snapshot; a promotion whose claim was reclaimed cannot record its session or admit, and the
+    turn is bounded below the claim lease; a deleted session is reclaimed rather than blocking
+    retries; `--retry` retries automated admissions and reconciles entries that never got an
     inbox row.
   - `board leave` clears the agent's queued pings, per-post subscription/mute, automation,
     alerts, and read state; the global `--all` subscription is kept.
 - **Automation:** `board automate <post>` creates/reuses a dedicated session per agent+post
   (`board:<post>:<agent>` in `orch_sessions`). The session is deny-by-default and allows only the
-  `board_read`/`board_reply` tools, which call the CLI through `execFile` (no shell). Entries are
+  `board_read`/`board_reply` tools, which call the CLI through `execFile` (no shell) and confine
+  the session to its own post; reads cap at 16 MiB. Entries are
   admitted with `delivery:"queue"` and `channel:"agent-board"`; the final turn text is not
   delivered. Pings are claimed atomically; the session ID is persisted before admission; stale
   claims reconcile via the entry marker, and truncated history retains the claim rather than

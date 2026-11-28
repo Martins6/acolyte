@@ -623,10 +623,29 @@ func TestBoardInboxPromote(t *testing.T) {
 	if fake.synthCalls != 1 {
 		t.Errorf("main-session turns = %d, want 1", fake.synthCalls)
 	}
+	if len(fake.runConfigs) != 1 {
+		t.Fatalf("promotion turn configs = %+v", fake.runConfigs)
+	}
+	rules := fake.runConfigs[0].Permissions
+	if len(rules) < 3 || rules[0].Action != "*" || rules[0].Effect != opencode.PermissionDeny {
+		t.Fatalf("promotion permissions = %+v, want deny-by-default", rules)
+	}
+	allowed := map[string]bool{}
+	for _, rule := range rules {
+		if rule.Effect == opencode.PermissionAllow {
+			allowed[rule.Action] = true
+		}
+	}
+	if !allowed["board_read"] || !allowed["board_reply"] {
+		t.Errorf("promotion permissions missing board tools: %+v", rules)
+	}
+	st := openBoardTestStore(t)
+	if _, ok, err := st.SessionBinding(context.Background(), "scribe", "ses_cli"); err != nil || ok {
+		t.Errorf("promotion binding left behind: %v, %v", ok, err)
+	}
 	if !strings.Contains(out.String(), "Promoted 1 pings") {
 		t.Errorf("output = %q", out.String())
 	}
-	st := openBoardTestStore(t)
 	inbox, err := st.Inbox(context.Background(), "scribe", false)
 	if err != nil {
 		t.Fatalf("Inbox() error: %v", err)
@@ -799,6 +818,69 @@ func TestBoardInboxPromoteRejectsForeignSession(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "not mapped") {
 		t.Fatalf("runBoardInboxPromote(foreign session) error = %v", err)
+	}
+}
+
+func TestBoardInboxPromoteReclaimsDeletedSession(t *testing.T) {
+	setupBoardCLI(t)
+	fake := &fakeCLITurn{messageErr: &opencode.APIError{Status: 404, Message: "session not found"}}
+	withFakeTurn(t, fake)
+	valet := boardTarget{AgentName: "valet"}
+	scribe := boardTarget{AgentName: "scribe"}
+	ctx := context.Background()
+
+	result, _ := runBoardPostCLI(t, boardPostOptions{
+		Target: valet,
+		Text:   "deleted promotion session",
+		With:   []string{"scribe"},
+		JSON:   true,
+	})
+	if err := runBoardSubscribe(ctx, &bytes.Buffer{}, boardSubscribeOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+		Aware:  true,
+	}); err != nil {
+		t.Fatalf("runBoardSubscribe() error: %v", err)
+	}
+	if err := runBoardMessage(ctx, &bytes.Buffer{}, boardMessageOptions{
+		Target: valet,
+		Post:   result.Post.ID,
+		Text:   "ping",
+	}); err != nil {
+		t.Fatalf("runBoardMessage() error: %v", err)
+	}
+
+	st := openBoardTestStore(t)
+	token := "promote-token"
+	entryIDs, err := st.ClaimPromotion(ctx, "scribe", result.Post.ID, token, boardPromotionMarker(token))
+	if err != nil || len(entryIDs) != 1 {
+		t.Fatalf("ClaimPromotion() = %v, %v", entryIDs, err)
+	}
+	if err := st.MarkPromotionSession(ctx, "scribe", token, "ses_deleted"); err != nil {
+		t.Fatalf("MarkPromotionSession() error: %v", err)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE brd_inbox SET promotion_claimed_at = ? WHERE agent_id = 'scribe' AND post_id = ?`,
+		time.Now().Add(-time.Hour).UTC(), result.Post.ID,
+	); err != nil {
+		t.Fatalf("age promotion claim: %v", err)
+	}
+
+	if err := runBoardInboxPromote(ctx, &bytes.Buffer{}, boardInboxPromoteOptions{
+		Target: scribe,
+		Post:   result.Post.ID,
+	}); err != nil {
+		t.Fatalf("runBoardInboxPromote() error: %v", err)
+	}
+	if fake.synthCalls != 1 {
+		t.Fatalf("promotion admissions = %d, want 1 after reclaiming the deleted session", fake.synthCalls)
+	}
+	inbox, err := st.Inbox(ctx, "scribe", true)
+	if err != nil {
+		t.Fatalf("Inbox() error: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ReadAt == nil {
+		t.Errorf("inbox = %+v, want the ping promoted and marked read", inbox)
 	}
 }
 

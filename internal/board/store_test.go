@@ -50,8 +50,8 @@ func TestOpenCreatesSchema(t *testing.T) {
 	).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("schema version = %d, want 1", version)
+	if version != 2 {
+		t.Errorf("schema version = %d, want 2", version)
 	}
 
 	var journal string
@@ -85,8 +85,8 @@ func TestOpenIsIdempotent(t *testing.T) {
 	).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("schema version = %d, want 1", version)
+	if version != 2 {
+		t.Errorf("schema version = %d, want 2", version)
 	}
 }
 
@@ -106,13 +106,95 @@ func TestOpenDefaultUsesACOLYTEHome(t *testing.T) {
 	}
 }
 
+func TestMigrateAddsBindingsAndTurnReservation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "board.sqlite.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_meta (
+		module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV1); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES ('brd', 1)`); err != nil {
+		t.Fatalf("record v1: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close v1: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(v1) error: %v", err)
+	}
+	defer st.Close()
+
+	columns := map[string]bool{}
+	rows, err := st.DB().Query(`PRAGMA table_info(brd_inbox)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, ctype string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info: %v", err)
+		}
+		columns[name] = true
+	}
+	rows.Close()
+	if !columns["turn_reserved_at"] {
+		t.Error("brd_inbox.turn_reserved_at was not added")
+	}
+	var table string
+	if err := st.DB().QueryRow(
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'brd_session_bindings'`,
+	).Scan(&table); err != nil {
+		t.Errorf("brd_session_bindings is missing: %v", err)
+	}
+}
+
+func TestMigrateToleratesExistingTurnReservationColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "board.sqlite.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_meta (
+		module TEXT PRIMARY KEY, version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_meta: %v", err)
+	}
+	if _, err := db.Exec(schemaV1); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE brd_inbox ADD COLUMN turn_reserved_at DATETIME`); err != nil {
+		t.Fatalf("pre-add column: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES ('brd', 1)`); err != nil {
+		t.Fatalf("record v1: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close v1: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(v1 with column) error: %v", err)
+	}
+	defer st.Close()
+}
+
 func TestOpenRejectsNewerSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "board.sqlite.db")
 	st, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open() error: %v", err)
 	}
-	if _, err := st.DB().Exec(`UPDATE schema_meta SET version = 2 WHERE module = 'brd'`); err != nil {
+	if _, err := st.DB().Exec(`UPDATE schema_meta SET version = 3 WHERE module = 'brd'`); err != nil {
 		t.Fatalf("bump schema version: %v", err)
 	}
 	if err := st.Close(); err != nil {

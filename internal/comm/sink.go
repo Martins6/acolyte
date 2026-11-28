@@ -29,7 +29,11 @@ type OutboxSink struct {
 	// Timeout, when positive, bounds each synthetic turn. Board promotion sets
 	// it below its claim lease so a reclaimed claim cannot be admitted twice.
 	Timeout time.Duration
-	Now     func() time.Time
+	// Permissions, when non-nil, temporarily replaces the session's permission
+	// rules for the turn. Promotion uses deny-by-default so participant-written
+	// board text cannot reach the wider tool surface.
+	Permissions []opencode.PermissionRule
+	Now         func() time.Time
 	// Activity, when non-nil, records tool activity for synthetic turns. An
 	// empty Agent is filled from the agent passed to Inbox, so one sink can
 	// serve every registered agent.
@@ -155,7 +159,11 @@ func (s OutboxSink) Inbox(ctx context.Context, agent registry.Agent, sessionID, 
 			sessionID = session.OpenCodeSessionID
 		}
 	}
-	cfg := opencode.TurnConfig{Workspace: agent.Workspace, Timeout: s.Timeout}
+	cfg := opencode.TurnConfig{
+		Workspace:   agent.Workspace,
+		Timeout:     s.Timeout,
+		Permissions: s.Permissions,
+	}
 	cfg.OnSession = s.OnSession
 	cfg.OnInteraction = InteractionRecorder(agent, st)
 	if s.Activity != nil {

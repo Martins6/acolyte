@@ -841,6 +841,68 @@ func (s *Store) AutomationPostBySession(ctx context.Context, agentID, sessionID 
 	return postID, true, nil
 }
 
+// BindSession confines a session's board tools to one post until ttl elapses.
+// Promotion uses it so board text cannot direct the main session to another
+// post while the promoted turn runs.
+func (s *Store) BindSession(ctx context.Context, agentID, sessionID, postID string, ttl time.Duration) error {
+	agentID = strings.TrimSpace(agentID)
+	sessionID = strings.TrimSpace(sessionID)
+	postID = strings.TrimSpace(postID)
+	if agentID == "" || sessionID == "" || postID == "" {
+		return fmt.Errorf("%w: agent, session, and post are required", ErrInvalid)
+	}
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	now := s.now()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO brd_session_bindings (session_id, agent_id, post_id, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(session_id) DO UPDATE SET agent_id = excluded.agent_id,
+		   post_id = excluded.post_id, created_at = excluded.created_at, expires_at = excluded.expires_at`,
+		sessionID, agentID, postID, now, now.Add(ttl),
+	); err != nil {
+		return fmt.Errorf("board: bind session: %w", err)
+	}
+	return nil
+}
+
+// SessionBinding returns the post a session is currently confined to.
+func (s *Store) SessionBinding(ctx context.Context, agentID, sessionID string) (string, bool, error) {
+	agentID = strings.TrimSpace(agentID)
+	sessionID = strings.TrimSpace(sessionID)
+	if agentID == "" || sessionID == "" {
+		return "", false, nil
+	}
+	var postID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT post_id FROM brd_session_bindings
+		 WHERE session_id = ? AND agent_id = ? AND expires_at > ?`,
+		sessionID, agentID, s.now(),
+	).Scan(&postID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("board: session binding: %w", err)
+	}
+	return postID, true, nil
+}
+
+// ClearSessionBinding removes a session binding once its turn is over.
+func (s *Store) ClearSessionBinding(ctx context.Context, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM brd_session_bindings WHERE session_id = ?`, sessionID,
+	); err != nil {
+		return fmt.Errorf("board: clear session binding: %w", err)
+	}
+	return nil
+}
+
 // Automations lists an agent's automation state ordered by post.
 func (s *Store) Automations(ctx context.Context, agentID string) ([]Automation, error) {
 	agentID = strings.TrimSpace(agentID)
@@ -1210,6 +1272,27 @@ func (s *Store) ReleaseInboxClaim(ctx context.Context, agentID, entryID string) 
 		return fmt.Errorf("board: release inbox claim: %w", err)
 	}
 	return nil
+}
+
+// RenewInboxClaim extends a claim lease only while the token still owns the
+// row. It is the ownership check immediately before admission.
+func (s *Store) RenewInboxClaim(ctx context.Context, agentID, entryID, token string) (bool, error) {
+	if strings.TrimSpace(token) == "" {
+		return false, nil
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE brd_inbox SET claimed_at = ?
+		 WHERE agent_id = ? AND entry_id = ? AND claim_token = ? AND processed_at IS NULL`,
+		s.now(), agentID, entryID, token,
+	)
+	if err != nil {
+		return false, fmt.Errorf("board: renew inbox claim: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("board: renew inbox claim: %w", err)
+	}
+	return rows > 0, nil
 }
 
 // PendingAutomated lists entry IDs waiting for automated processing.

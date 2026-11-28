@@ -976,6 +976,68 @@ func TestAutomationPostBySession(t *testing.T) {
 	}
 }
 
+func TestRenewInboxClaimOnlyForOwner(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	valet := AgentActor("valet")
+	post, _ := mustCreatePost(t, st, valet, CreatePostInput{
+		Text: "claim ownership",
+		With: []string{"scribe"},
+	})
+	if err := st.SetAutomation(ctx, AgentActor("scribe"), post.ID); err != nil {
+		t.Fatalf("SetAutomation() error: %v", err)
+	}
+	entry, err := st.AppendMessage(ctx, valet, post.ID, AppendMessageInput{Text: "ping"})
+	if err != nil {
+		t.Fatalf("AppendMessage() error: %v", err)
+	}
+	if _, err := st.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("Enqueue() error: %v", err)
+	}
+	token := NewClaimToken()
+	entryID, _, err := st.ClaimPendingAutomated(ctx, "scribe", post.ID, token, time.Minute)
+	if err != nil || entryID != entry.ID {
+		t.Fatalf("ClaimPendingAutomated() = %q, %v", entryID, err)
+	}
+	if ok, err := st.RenewInboxClaim(ctx, "scribe", entryID, "wrong-token"); err != nil || ok {
+		t.Fatalf("RenewInboxClaim(wrong) = %v, %v, want false", ok, err)
+	}
+	if ok, err := st.RenewInboxClaim(ctx, "scribe", entryID, token); err != nil || !ok {
+		t.Fatalf("RenewInboxClaim(owner) = %v, %v, want true", ok, err)
+	}
+}
+
+func TestSessionBindingConfinesAndExpires(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	st.Now = func() time.Time { return now }
+	post, _ := mustCreatePost(t, st, AgentActor("valet"), CreatePostInput{
+		Text: "binding",
+		With: []string{"scribe"},
+	})
+	if err := st.BindSession(ctx, "scribe", "ses_main", post.ID, 5*time.Minute); err != nil {
+		t.Fatalf("BindSession() error: %v", err)
+	}
+	bound, ok, err := st.SessionBinding(ctx, "scribe", "ses_main")
+	if err != nil || !ok || bound != post.ID {
+		t.Fatalf("SessionBinding() = %q, %v, %v", bound, ok, err)
+	}
+	if err := st.ClearSessionBinding(ctx, "ses_main"); err != nil {
+		t.Fatalf("ClearSessionBinding() error: %v", err)
+	}
+	if _, ok, err := st.SessionBinding(ctx, "scribe", "ses_main"); err != nil || ok {
+		t.Fatalf("SessionBinding(cleared) = %v, %v, want none", ok, err)
+	}
+	if err := st.BindSession(ctx, "scribe", "ses_main", post.ID, 5*time.Minute); err != nil {
+		t.Fatalf("BindSession() error: %v", err)
+	}
+	now = now.Add(6 * time.Minute)
+	if _, ok, err := st.SessionBinding(ctx, "scribe", "ses_main"); err != nil || ok {
+		t.Fatalf("SessionBinding(expired) = %v, %v, want none", ok, err)
+	}
+}
+
 func TestMarkInboxPromotedOnlyTargets(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

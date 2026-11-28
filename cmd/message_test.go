@@ -36,6 +36,7 @@ type fakeCLITurn struct {
 	admitSessions []string
 	admitEvents   []opencode.SyntheticEvent
 	admitConfigs  []opencode.TurnConfig
+	runConfigs    []opencode.TurnConfig
 	admitErr      error
 	admitErrOn    string
 	synthErr      error
@@ -55,6 +56,7 @@ func (f *fakeCLITurn) RunUserTurn(_ context.Context, sessionID, text string, cfg
 
 func (f *fakeCLITurn) RunSyntheticTurn(_ context.Context, sessionID string, _ opencode.SyntheticEvent, cfg opencode.TurnConfig) (*opencode.TurnResult, error) {
 	f.synthCalls++
+	f.runConfigs = append(f.runConfigs, cfg)
 	effective := sessionID
 	if effective == "" {
 		effective = "ses_cli"

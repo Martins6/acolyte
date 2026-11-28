@@ -10,7 +10,7 @@ import (
 
 const (
 	module  = "brd"
-	version = 1
+	version = 2
 )
 
 // Migrate creates or upgrades the board schema.
@@ -38,6 +38,17 @@ func Migrate(db *sql.DB) error {
 			return fmt.Errorf("brd: migrate to version 1: %w", err)
 		}
 		current = 1
+	}
+	if current < 2 {
+		// A development database created before the schema was versioned may
+		// already carry the column, so add it only when it is missing.
+		if err := addColumnIfMissing(db, "brd_inbox", "turn_reserved_at", "DATETIME"); err != nil {
+			return err
+		}
+		if _, err := db.Exec(schemaV2); err != nil {
+			return fmt.Errorf("brd: migrate to version 2: %w", err)
+		}
+		current = 2
 	}
 
 	if _, err := db.Exec(`INSERT INTO schema_meta (module, version) VALUES (?, ?)
@@ -172,7 +183,6 @@ CREATE TABLE IF NOT EXISTS brd_inbox (
   promotion_token      TEXT NOT NULL DEFAULT '',
   promotion_marker     TEXT NOT NULL DEFAULT '',
   promotion_session_id TEXT NOT NULL DEFAULT '',
-  turn_reserved_at     DATETIME,
   PRIMARY KEY (agent_id, entry_id)
 );
 CREATE INDEX IF NOT EXISTS brd_inbox_agent ON brd_inbox(agent_id, read_at);
@@ -188,3 +198,50 @@ CREATE TABLE IF NOT EXISTS brd_alerts (
 );
 CREATE INDEX IF NOT EXISTS brd_alerts_agent ON brd_alerts(agent_id, notified_at);
 `
+
+// schemaV2 adds per-entry turn reservations and short-lived session bindings
+// that confine board tools to one post.
+const schemaV2 = `
+CREATE TABLE IF NOT EXISTS brd_session_bindings (
+  session_id TEXT PRIMARY KEY,
+  agent_id   TEXT NOT NULL,
+  post_id    TEXT NOT NULL,
+  created_at DATETIME NOT NULL,
+  expires_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS brd_session_bindings_expiry ON brd_session_bindings(expires_at);
+`
+
+// addColumnIfMissing adds a column to an existing table unless PRAGMA reports
+// it already present. SQLite has no ADD COLUMN IF NOT EXISTS.
+func addColumnIfMissing(db *sql.DB, table, column, kind string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("brd: inspect %s: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, ctype string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("brd: inspect %s: %w", table, err)
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("brd: inspect %s: %w", table, err)
+	}
+	rows.Close()
+	if found {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, kind)); err != nil {
+		return fmt.Errorf("brd: add %s.%s: %w", table, column, err)
+	}
+	return nil
+}

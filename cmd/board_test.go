@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/martins6/acolyte/internal/agent"
 	"github.com/martins6/acolyte/internal/board"
@@ -256,6 +257,9 @@ func TestBoardAutomationSessionIsBoundToItsPost(t *testing.T) {
 	if err := st.RecordAutomationSession(ctx, "scribe", first.Post.ID, "ses_bound"); err != nil {
 		t.Fatalf("RecordAutomationSession() error: %v", err)
 	}
+	if err := st.BindSession(ctx, "scribe", "ses_main", first.Post.ID, time.Minute); err != nil {
+		t.Fatalf("BindSession() error: %v", err)
+	}
 
 	if err := runBoardShow(ctx, &bytes.Buffer{}, boardShowOptions{
 		Target:    scribe,
@@ -263,6 +267,13 @@ func TestBoardAutomationSessionIsBoundToItsPost(t *testing.T) {
 		SessionID: "ses_bound",
 	}); !errors.Is(err, board.ErrForbidden) {
 		t.Errorf("runBoardShow(other post) error = %v, want ErrForbidden", err)
+	}
+	if err := runBoardShow(ctx, &bytes.Buffer{}, boardShowOptions{
+		Target:    scribe,
+		Post:      second.Post.ID,
+		SessionID: "ses_main",
+	}); !errors.Is(err, board.ErrForbidden) {
+		t.Errorf("runBoardShow(bound main session, other post) error = %v, want ErrForbidden", err)
 	}
 	if err := runBoardShow(ctx, &bytes.Buffer{}, boardShowOptions{
 		Target:    scribe,

@@ -105,6 +105,9 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
+// A board post can hold many large entries; execFile defaults to 1 MiB.
+const maxBuffer = 16 * 1024 * 1024
+
 export default tool({
   description: "Read one internal board post and its ordered messages as JSON.",
   args: {
@@ -119,7 +122,7 @@ export default tool({
     }
     args.push("--json")
     try {
-      const { stdout } = await execFileAsync(binary, args)
+      const { stdout } = await execFileAsync(binary, args, { maxBuffer })
       return { content: (stdout || "{}").trim(), metadata: { post, workspace } }
     } catch (error) {
       const detail =
@@ -137,6 +140,10 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
+
+// A reply echoes the stored entry and any quoted text; keep the same bound as
+// board_read.
+const maxBuffer = 16 * 1024 * 1024
 
 export default tool({
   description: "Reply to one internal board post.",
@@ -160,7 +167,7 @@ export default tool({
     }
     args.push("--json")
     try {
-      const { stdout } = await execFileAsync(binary, args)
+      const { stdout } = await execFileAsync(binary, args, { maxBuffer })
       return { content: (stdout || "{}").trim(), metadata: { post, workspace } }
     } catch (error) {
       const detail =

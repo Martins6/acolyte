@@ -27,6 +27,9 @@ const (
 	// admitted twice.
 	boardPromotionClaimLease      = 10 * time.Minute
 	boardPromotionAdmissionBudget = 8 * time.Minute
+	// boardPromotionBindingTTL outlives the admission budget so the binding is
+	// still valid while the turn runs, then expires if the process crashed.
+	boardPromotionBindingTTL = 9 * time.Minute
 )
 
 var boardInboxCmd = &cobra.Command{
@@ -333,17 +336,25 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 	if len(stale) > 0 {
 		if staleSession != "" && staleMarker != "" {
 			promoted, truncated, scanErr := boardPromotionAdmitted(ctx, client, staleSession, staleMarker)
-			if scanErr != nil {
+			switch {
+			case scanErr != nil && isBoardSessionNotFound(scanErr):
+				// The session is gone, so the marker cannot be present. Release
+				// the claim instead of blocking every later promotion.
+				if err := st.ReclaimPromotion(ctx, actor.ID, stale, staleToken); err != nil {
+					return err
+				}
+			case scanErr != nil:
 				return scanErr
-			}
-			if promoted {
+			case promoted:
 				if err := st.MarkInboxPromoted(ctx, actor.ID, stale, staleSession); err != nil {
 					return err
 				}
-			} else if truncated {
+			case truncated:
 				return fmt.Errorf("board: promotion session %s history is truncated; cannot reconcile", staleSession)
-			} else if err := st.ReclaimPromotion(ctx, actor.ID, stale, staleToken); err != nil {
-				return err
+			default:
+				if err := st.ReclaimPromotion(ctx, actor.ID, stale, staleToken); err != nil {
+					return err
+				}
 			}
 		} else if err := st.ReclaimPromotion(ctx, actor.ID, stale, staleToken); err != nil {
 			return err
@@ -382,9 +393,10 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 	}
 
 	sink := comm.OutboxSink{
-		Stores:  pool,
-		Turn:    client,
-		Timeout: boardPromotionAdmissionBudget,
+		Stores:      pool,
+		Turn:        client,
+		Timeout:     boardPromotionAdmissionBudget,
+		Permissions: boardAutomationPermissions(),
 		OnSession: func(sessionID string) error {
 			if err := st.MarkPromotionSession(ctx, actor.ID, token, sessionID); err != nil {
 				return err
@@ -394,10 +406,12 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 				return err
 			}
 			defer release()
-			_, err = perAgent.Orch().UpsertSession(
+			if _, err := perAgent.Orch().UpsertSession(
 				"promote:"+agent.Name, sessionID, time.Now().UTC(),
-			)
-			return err
+			); err != nil {
+				return err
+			}
+			return st.BindSession(ctx, actor.ID, sessionID, view.ID, boardPromotionBindingTTL)
 		},
 	}
 	reply, sessionID, err := sink.Inbox(ctx, agent, opts.SessionID, boardPromoteText(view, filtered, marker), map[string]any{
@@ -405,6 +419,11 @@ func runBoardInboxPromote(ctx context.Context, w io.Writer, opts boardInboxPromo
 		"post_id":  view.ID,
 		"promoted": len(entryIDs),
 	})
+	if sessionID != "" {
+		if clearErr := st.ClearSessionBinding(ctx, sessionID); clearErr != nil && err == nil {
+			err = clearErr
+		}
+	}
 	if err != nil {
 		return err
 	}
